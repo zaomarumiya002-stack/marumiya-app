@@ -1,6 +1,5 @@
 """
-丸実屋 受注・製造・在庫管理アプリ (クラウド・デザイン復活版)
-=========================================
+丸実屋 受注・製造・在庫管理アプリ (クラウド・完全安定版)
 """
 
 import streamlit as st
@@ -40,7 +39,7 @@ def check_password():
 check_password()
 
 # ─────────────────────────────────────────────
-# カスタムCSS (使い勝手の良いUIデザインを完全復活)
+# カスタムCSS (UIデザイン復活版)
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -53,46 +52,39 @@ st.markdown("""
     --clr-text: #1c2a3a; --clr-subtext: #5a6a7e;
     --radius: 10px; --shadow: 0 2px 12px rgba(0,0,0,0.08);
 }
-html, body,[class*="css"] { font-family: 'Noto Sans JP', sans-serif !important; color: var(--clr-text); background-color: var(--clr-bg); }
+html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif !important; color: var(--clr-text); background-color: var(--clr-bg); }
 .app-header { background: linear-gradient(135deg, var(--clr-primary) 0%, var(--clr-primary-dk) 100%); border-radius: var(--radius); padding: 14px 24px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; box-shadow: var(--shadow); }
 .app-header.manu-header { background: linear-gradient(135deg, var(--clr-manu) 0%, var(--clr-manu-dk) 100%); }
-.app-header.guide-header { background: linear-gradient(135deg, #7c3db8) 0%, #5a2a8c 100%); }
-.app-header h1 { margin: 0; padding: 0; font-size: 20px; font-weight: 900; color: #ffffff !important; letter-spacing: 0.04em; }
+.app-header.guide-header { background: linear-gradient(135deg, #7c3db8 0%, #5a2a8c 100%); }
+.app-header h1 { margin: 0 !important; padding: 0; font-size: 20px; font-weight: 900; color: #ffffff !important; }
 .card { background: var(--clr-card); border: 1px solid var(--clr-border); border-radius: var(--radius); padding: 18px 22px; margin-bottom: 16px; box-shadow: var(--shadow); }
 .card-title { font-size: 15px; font-weight: 700; color: var(--clr-primary); border-bottom: 2px solid var(--clr-primary); padding-bottom: 8px; margin-bottom: 14px; }
 
-/* サイドバー (紺色 & グリーン) */
+/* サイドバー */
 [data-testid="stSidebar"] { background: linear-gradient(180deg, #0b2239 0%, #14365d 100%) !important; }
 [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-[data-testid="stSidebar"] div[role="radiogroup"] label { background-color: transparent !important; border: none !important; padding: 12px 16px !important; border-radius: 8px !important; margin-bottom: 4px !important; transition: background 0.2s, color 0.2s; cursor: pointer; }
-[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background: rgba(255, 255, 255, 0.1) !important; }
-[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) { background: #0e8c45 !important; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p { color: #ffffff !important; font-weight: 900 !important; }
-[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child { display: none !important; }
+[data-testid="stSidebarNav"] { padding-top: 0 !important; }
 
-/* Pills型カテゴリ選択 */
+/* ラジオボタンをボタン風にする */
 div.stRadio > div[role="radiogroup"] { display: flex; flex-direction: row; flex-wrap: wrap; gap: 8px; }
-div.stRadio > div[role="radiogroup"] > label { background-color: #ffffff !important; border: 1.5px solid #d0d7e3 !important; border-radius: 20px !important; padding: 6px 14px !important; margin: 0 !important; cursor: pointer !important; box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important; transition: all 0.2s ease-in-out !important; }
-div.stRadio > div[role="radiogroup"] > label:hover { background-color: #f0f4f8 !important; border-color: #b0bec5 !important; }
-div.stRadio > div[role="radiogroup"] > label > div:first-child { display: none !important; }
+div.stRadio > div[role="radiogroup"] > label { background-color: #ffffff !important; border: 1.5px solid #d0d7e3 !important; border-radius: 20px !important; padding: 6px 14px !important; cursor: pointer !important; transition: all 0.2s; }
+div.stRadio > div[role="radiogroup"] > label:hover { background-color: #f0f4f8 !important; }
+div.stRadio > div[role="radiogroup"] > label[data-baseweb="radio"] div:first-child { display: none !important; }
 div.stRadio > div[role="radiogroup"] > label p { font-size: 14px !important; font-weight: 600 !important; margin: 0 !important; color: #374a5e !important; }
 
 /* スケジュール表 */
-.sched-wrap { overflow-x: auto; border-radius: 8px; box-shadow: var(--shadow); }
+.sched-wrap { overflow-x: auto; border-radius: 8px; }
 .sched-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 800px; background: #fff; }
-.sched-table th { background: #1a6fc4; color: #fff !important; font-weight: 700; padding: 8px; text-align: center; white-space: nowrap; border: 1px solid #0e4d8a; }
+.sched-table th { background: #1a6fc4; color: #fff !important; font-weight: 700; padding: 8px; border: 1px solid #0e4d8a; }
 .sched-table td { border: 1px solid #d8e2ef; padding: 6px; vertical-align: top; }
-.sched-table td.col-label { background: #f4f7fc; font-weight: 700; text-align: center; white-space: nowrap; width: 80px; }
-.sched-table td.col-today { background: #fffbee; border-left: 2px solid #f0a500; border-right: 2px solid #f0a500; }
-.sched-entry { border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12px; line-height: 1.4; border-left: 4px solid #1a6fc4; background: #eef4fd; }
-.sched-entry.manu-entry { border-left: 4px solid #0e8c5a; background: #e8f5f0; }
-.sched-entry .s-prod { color: #374a5e; font-size: 12px; font-weight: 700; margin-bottom: 2px; }
-.sched-empty { color: #b0bec5; font-size: 12px; text-align: center; padding: 8px 0; }
+.col-today { background: #fffbee !important; }
+.sched-entry { border-radius: 6px; padding: 6px 8px; margin-bottom: 4px; font-size: 11px; border-left: 4px solid #1a6fc4; background: #eef4fd; }
+.sched-entry.manu-entry { border-left-color: #0e8c5a; background: #e8f5f0; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# ☁️ Googleスプレッドシート接続 (接続失敗時のエラー対策を強化)
+# ☁️ Googleスプレッドシート接続
 # ─────────────────────────────────────────────
 @st.cache_resource
 def init_connection():
@@ -103,19 +95,17 @@ def init_connection():
         )
         return gspread.authorize(creds)
     except Exception as e:
-        st.error(f"Google接続設定エラー: Secretsの内容を確認してください。 {e}")
+        st.error(f"接続エラー: {e}")
         st.stop()
 
 client = init_connection()
 
 try:
     sheet = client.open_by_url(st.secrets["spreadsheet_url"])
-except Exception:
-    st.error("❌ スプレッドシートが開けません。")
-    st.info("💡 解決方法: スプレッドシートの [共有] ボタンを押し、サービスアカウントのメールアドレスを '編集者' として追加してください。")
+except Exception as e:
+    st.error(f"スプレッドシートが開けません。権限を確認してください。{e}")
     st.stop()
 
-# 各シートの必須カラム定義 (KeyError対策)
 SHEET_COLUMNS = {
     "orders": ["ID", "納品予定日", "顧客名", "大カテゴリ", "製品名", "ケース数", "登録日時"],
     "manufactures": ["ID", "製造予定日", "備考", "大カテゴリ", "製品名", "ケース数", "登録日時"],
@@ -129,37 +119,41 @@ def load_data(sheet_name):
         ws = sheet.worksheet(sheet_name)
         data = ws.get_all_values()
         expected = SHEET_COLUMNS[sheet_name]
-        if not data or len(data) == 0:
+        if not data or len(data) <= 1:
             return pd.DataFrame(columns=expected)
-        headers = data.pop(0)
-        df = pd.DataFrame(data, columns=headers)
-        # 欠落している列があれば補完
-        for col in expected:
-            if col not in df.columns: df[col] = ""
-        # 型変換
+        headers = data[0]
+        df = pd.DataFrame(data[1:], columns=headers)
+        
+        # 数値・日付型の変換
         if "ケース数" in df.columns: df["ケース数"] = pd.to_numeric(df["ケース数"], errors="coerce").fillna(0).astype(int)
         if "初期在庫数" in df.columns: df["初期在庫数"] = pd.to_numeric(df["初期在庫数"], errors="coerce").fillna(0).astype(int)
         if "納品予定日" in df.columns: df["納品予定日"] = pd.to_datetime(df["納品予定日"], errors="coerce")
         if "製造予定日" in df.columns: df["製造予定日"] = pd.to_datetime(df["製造予定日"], errors="coerce")
-        return df[expected]
-    except Exception:
+        if "登録日時" in df.columns: df["登録日時"] = pd.to_datetime(df["登録日時"], errors="coerce")
+        return df
+    except:
         return pd.DataFrame(columns=SHEET_COLUMNS[sheet_name])
 
 def save_data(sheet_name, df):
     try:
         ws = sheet.worksheet(sheet_name)
         ws.clear()
-        df_str = df.copy()
-        for col in df_str.select_dtypes(include=['datetime64[ns]']).columns:
-            df_str[col] = df_str[col].dt.strftime('%Y-%m-%d')
-        df_str = df_str.fillna("")
-        ws.update(values=[df_str.columns.values.tolist()] + df_str.values.tolist(), range_name='A1')
-        load_data.clear(); simulate_inventory.clear()
+        df_save = df.copy()
+        # スプレッドシート保存用に全データを文字列に安全変換
+        for col in df_save.columns:
+            if pd.api.types.is_datetime64_any_dtype(df_save[col]):
+                df_save[col] = df_save[col].dt.strftime('%Y-%m-%d')
+        df_save = df_save.fillna("")
+        data_to_update = [df_save.columns.values.tolist()] + df_save.values.tolist()
+        ws.update(values=data_to_update, range_name='A1')
+        load_data.clear() # キャッシュを即時クリア
+        return True
     except Exception as e:
-        st.error(f"保存エラー: {e}")
+        st.error(f"保存に失敗しました: {e}")
+        return False
 
 # ─────────────────────────────────────────────
-# 各種マスタと共通関数
+# 共通ロジック
 # ─────────────────────────────────────────────
 CATEGORIES = ["平こん", "つきこん", "糸こん・しらたき", "三角こん", "玉こん", "ダイスこん", "短冊", "国産", "ちぎりこん", "大黒屋", "かねこ", "冷凍耐性", "その他"]
 CAT_ICONS = {"平こん": "🟫", "つきこん": "🍝", "糸こん・しらたき": "🍜", "三角こん": "🔺", "玉こん": "🟤", "ダイスこん": "🎲", "短冊": "🏷️", "国産": "🇯🇵", "ちぎりこん": "🤲", "大黒屋": "🏮", "かねこ": "🏭", "冷凍耐性": "❄️", "その他": "📦"}
@@ -173,159 +167,191 @@ def format_product_name(p_name):
     return f"📦 {p_str}"
 
 @st.cache_data(ttl=5)
-def simulate_inventory(orders_df, manus_df, master_df, forecast_days=60):
-    o_tmp = pd.DataFrame(columns=["日付", "製品名", "変動"])
-    m_tmp = pd.DataFrame(columns=["日付", "製品名", "変動"])
-    if not orders_df.empty:
-        o_tmp = orders_df[["納品予定日", "製品名", "ケース数"]].copy().dropna(subset=["製品名"])
-        o_tmp.columns = ["日付", "製品名", "変動"]
-        o_tmp["変動"] = -o_tmp["変動"]
-    if not manus_df.empty:
-        m_tmp = manus_df[["製造予定日", "製品名", "ケース数"]].copy().dropna(subset=["製品名"])
-        m_tmp.columns = ["日付", "製品名", "変動"]
-    
-    events = pd.concat([o_tmp, m_tmp])
-    if events.empty: return pd.DataFrame(), pd.DataFrame()
-    
-    events["日付"] = pd.to_datetime(events["日付"]).dt.normalize()
+def simulate_inventory(orders_df, manus_df, master_df):
     today = pd.Timestamp.today().normalize()
-    date_range = pd.date_range(today, today + timedelta(days=forecast_days))
+    date_range = pd.date_range(today, today + timedelta(days=60))
+    
     inv_records, alerts = [], []
     
     for _, row in master_df.iterrows():
         prod, cat = row["製品名"], row["大カテゴリ"]
         init_inv = int(row.get("初期在庫数", 0))
-        prod_events = events[events["製品名"] == prod]
-        past_v = prod_events[prod_events["日付"] < today]["変動"].sum()
-        current_inv = init_inv + past_v
-        future_events = prod_events[prod_events["日付"] >= today].groupby("日付")["変動"].sum()
+        
+        # 過去〜現在の変動計算
+        o_prod = orders_df[orders_df["製品名"] == prod]
+        m_prod = manus_df[manus_df["製品名"] == prod]
+        
+        current_inv = init_inv
+        # 過去の製造・出荷を反映（もしデータにある場合）
+        current_inv += m_prod[m_prod["製造予定日"] < today]["ケース数"].sum()
+        current_inv -= o_prod[o_prod["納品予定日"] < today]["ケース数"].sum()
+        
         for d in date_range:
-            current_inv += future_events.get(d, 0)
+            daily_m = m_prod[m_prod["製造予定日"] == d]["ケース数"].sum()
+            daily_o = o_prod[o_prod["納品予定日"] == d]["ケース数"].sum()
+            current_inv += (daily_m - daily_o)
+            
             inv_records.append({"日付": d, "日付_str": d.strftime("%m/%d"), "大カテゴリ": cat, "製品名": prod, "在庫数": current_inv})
             if current_inv < 0:
                 alerts.append({"日付": d, "製品名": prod, "不足数": abs(current_inv), "カテゴリ": cat})
+                
     return pd.DataFrame(inv_records), pd.DataFrame(alerts)
 
-# ─────────────────────────────────────────────
-# メイン処理
-# ─────────────────────────────────────────────
-if "order_key" not in st.session_state: st.session_state.order_key = 0
-if "manu_key" not in st.session_state: st.session_state.manu_key = 0
-if "order_success_msg" not in st.session_state: st.session_state.order_success_msg = ""
-if "manu_success_msg" not in st.session_state: st.session_state.manu_success_msg = ""
-
-# ロード
+# データのロード
 orders_df = load_data("orders")
 manus_df = load_data("manufactures")
 master_df = load_data("master")
 cust_df = load_data("customers")
-
-# マスタが空なら
-if master_df.empty:
-    master_df = pd.DataFrame([{"大カテゴリ":"平こん", "製品名":"板こん（黒）1kg", "初期在庫数":0}])
-    save_data("master", master_df)
-
 inv_df, alerts_df = simulate_inventory(orders_df, manus_df, master_df)
-cat_options = ["➖ 未選択"] + [f"{CAT_ICONS.get(c, '📦')} {c}" for c in CATEGORIES]
 
 # ─────────────────────────────────────────────
-# サイドバー & 画面切替
+# サイドバー
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("<div style='text-align:center; padding:10px;'><h3>🏭 丸実屋 システム</h3></div>", unsafe_allow_html=True)
-    page = st.radio("メニュー", ["📋 受注登録 (出庫)", "🏭 製造登録 (入庫)", "📦 スケジュール・在庫確認", "📊 統計・分析", "⚙️ マスタ管理", "📖 使い方ガイド"], label_visibility="collapsed")
+    st.markdown("<div style='text-align:center; padding:20px 0;'><h2 style='color:white; margin:0;'>🏭 丸実屋</h2><p style='color:#a0aec0; font-size:12px;'>受注・在庫管理システム</p></div>", unsafe_allow_html=True)
+    page = st.radio("メニュー", ["📋 受注登録 (出庫)", "🏭 製造登録 (入庫)", "📦 在庫・スケジュール確認", "📊 分析", "⚙️ マスタ管理"], label_visibility="collapsed")
+    
     if not alerts_df.empty:
-        st.error(f"⚠️ 欠品アラート ({len(alerts_df.groupby('製品名'))}品目)")
+        st.error(f"🚨 欠品警告: {len(alerts_df['製品名'].unique())}品目")
     else:
-        st.success("✅ 欠品の予定なし")
+        st.success("✅ 在庫は安定しています")
 
-# --- 📋 受注登録 ---
+# ─────────────────────────────────────────────
+# ページ表示：受注登録
+# ─────────────────────────────────────────────
 if page == "📋 受注登録 (出庫)":
-    st.markdown("<style>div.stRadio > div[role='radiogroup'] > label:has(input:checked) { background-color: var(--clr-primary) !important; border-color: var(--clr-primary) !important; } div.stRadio > div[role='radiogroup'] > label:has(input:checked) p { color: #ffffff !important; font-weight: 700 !important; }</style>", unsafe_allow_html=True)
-    st.markdown('<div class="app-header"><h1>📋 受注登録 (出荷入力)</h1></div>', unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["➕ 新規受注", "✏️ データ修正"])
+    st.markdown('<div class="app-header"><h1>📋 受注登録 (出荷予定入力)</h1></div>', unsafe_allow_html=True)
+    tab1, tab2 = st.tabs(["➕ 新規登録", "✏️ 登録済み一覧・修正"])
+    
     with tab1:
-        st.markdown('<div class="card"><div class="card-title">📝 入力フォーム</div>', unsafe_allow_html=True)
-        okey = st.session_state.order_key
-        c1, c2, c3 = st.columns([1.5, 2, 1])
-        d_date = c1.date_input("納品予定日", value=date.today() + timedelta(days=1), key=f"o_d_{okey}")
-        cust_list = ["✏️ 新規・直接入力"] + sorted(cust_df["顧客名"].unique().tolist()) if not cust_df.empty else ["✏️ 新規・直接入力"]
-        sel_c = c2.selectbox("顧客名", cust_list, key=f"o_c_{okey}")
-        c_name = c2.text_input("📝 新規顧客名", key=f"o_ct_{okey}") if sel_c == "✏️ 新規・直接入力" else sel_c
-        cases = c3.number_input("ケース数", min_value=1, value=1, key=f"o_cs_{okey}")
-        sel_label = st.radio("大カテゴリを選択", cat_options, horizontal=True, key=f"o_cat_{okey}")
-        sel_cat = sel_label.split(" ", 1)[1] if " " in sel_label else ""
-        prods = master_df[master_df["大カテゴリ"]==sel_cat]["製品名"].tolist() if sel_cat else []
-        prod = st.selectbox("製品名", prods, format_func=format_product_name, key=f"o_p_{okey}")
-        if st.button("✅ 受注を登録する", type="primary", use_container_width=True):
-            if prod and c_name:
-                new_row = pd.DataFrame([{"ID": "O-"+str(uuid.uuid4())[:6].upper(), "納品予定日": pd.Timestamp(d_date), "顧客名": c_name, "大カテゴリ": sel_cat, "製品名": prod, "ケース数": int(cases), "登録日時": pd.Timestamp.now()}])
-                save_data("orders", pd.concat([orders_df, new_row], ignore_index=True))
-                st.session_state.order_success_msg = f"✅ 【{c_name}】を登録しました。"
-                st.session_state.order_key += 1; st.rerun()
-        if st.session_state.order_success_msg: st.success(st.session_state.order_success_msg); st.session_state.order_success_msg = ""
+        st.markdown('<div class="card"><div class="card-title">📝 受注情報を入力してください</div>', unsafe_allow_html=True)
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col1: d_date = st.date_input("納品予定日", value=date.today() + timedelta(days=1))
+        with col2:
+            cust_options = ["✏️ 直接入力"] + sorted(cust_df["顧客名"].unique().tolist())
+            sel_cust = st.selectbox("顧客名", cust_options)
+            cust_name = st.text_input("顧客名を入力") if sel_cust == "✏️ 直接入力" else sel_cust
+        with col3: cases = st.number_input("ケース数", min_value=1, value=1)
+        
+        cat_labels = ["➖ 未選択"] + [f"{CAT_ICONS.get(c)} {c}" for c in CATEGORIES]
+        sel_cat_label = st.radio("カテゴリ選択", cat_labels, horizontal=True)
+        sel_cat = sel_cat_label.split(" ", 1)[1] if " " in sel_cat_label else ""
+        
+        prods = master_df[master_df["大カテゴリ"] == sel_cat]["製品名"].tolist() if sel_cat else []
+        sel_prod = st.selectbox("製品を選択", prods, format_func=format_product_name)
+        
+        if st.button("✅ この内容で登録する", type="primary", use_container_width=True):
+            if sel_prod and cust_name:
+                new_data = pd.DataFrame([{
+                    "ID": "O-" + str(uuid.uuid4())[:6].upper(),
+                    "納品予定日": pd.Timestamp(d_date),
+                    "顧客名": cust_name,
+                    "大カテゴリ": sel_cat,
+                    "製品名": sel_prod,
+                    "ケース数": int(cases),
+                    "登録日時": pd.Timestamp.now()
+                }])
+                if save_data("orders", pd.concat([orders_df, new_data], ignore_index=True)):
+                    st.success("登録完了！")
+                    st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-# --- 🏭 製造登録 ---
-if page == "🏭 製造登録 (入庫)":
-    st.markdown("<style>div.stRadio > div[role='radiogroup'] > label:has(input:checked) { background-color: var(--clr-manu) !important; border-color: var(--clr-manu) !important; } div.stRadio > div[role='radiogroup'] > label:has(input:checked) p { color: #ffffff !important; font-weight: 700 !important; }</style>", unsafe_allow_html=True)
-    st.markdown('<div class="app-header manu-header"><h1>🏭 製造登録 (入庫入力)</h1></div>', unsafe_allow_html=True)
-    mkey = st.session_state.manu_key
-    st.markdown('<div class="card"><div class="card-title" style="color:var(--clr-manu);">📝 製造入力フォーム</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1.5, 1.2, 2.3])
-    m_date = c1.date_input("製造予定日", value=date.today(), key=f"m_d_{mkey}")
-    m_cases = c2.number_input("ケース数", min_value=1, value=50, key=f"m_cs_{mkey}")
-    m_note = c3.text_input("備考 (ロット等)", key=f"m_n_{mkey}")
-    sel_label = st.radio("カテゴリ選択", cat_options, horizontal=True, key=f"m_cat_{mkey}")
-    sel_cat = sel_label.split(" ", 1)[1] if " " in sel_label else ""
-    prods = master_df[master_df["大カテゴリ"]==sel_cat]["製品名"].tolist() if sel_cat else []
-    prod = st.selectbox("製品名", prods, format_func=format_product_name, key=f"m_p_{mkey}")
-    if st.button("➕ 製造を登録する", type="primary", use_container_width=True):
-        if prod:
-            new_row = pd.DataFrame([{"ID": "M-"+str(uuid.uuid4())[:6].upper(), "製造予定日": pd.Timestamp(m_date), "備考": m_note, "大カテゴリ": sel_cat, "製品名": prod, "ケース数": int(m_cases), "登録日時": pd.Timestamp.now()}])
-            save_data("manufactures", pd.concat([manus_df, new_row], ignore_index=True))
-            st.session_state.manu_success_msg = f"✅ 【{prod}】の製造を登録しました。"
-            st.session_state.manu_key += 1; st.rerun()
-    if st.session_state.manu_success_msg: st.success(st.session_state.manu_success_msg); st.session_state.manu_success_msg = ""
+    with tab2:
+        st.dataframe(orders_df.sort_values("納品予定日", ascending=False), use_container_width=True, hide_index=True)
+
+# ─────────────────────────────────────────────
+# ページ表示：製造登録
+# ─────────────────────────────────────────────
+elif page == "🏭 製造登録 (入庫)":
+    st.markdown('<div class="app-header manu-header"><h1>🏭 製造登録 (入庫予定入力)</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-title" style="color:var(--clr-manu);">📝 製造情報を入力</div>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1: m_date = st.date_input("製造日", value=date.today())
+    with col2: m_cases = st.number_input("製造数 (ケース)", min_value=1, value=50)
+    with col3: m_note = st.text_input("備考 (ロット等)")
+    
+    cat_labels = ["➖ 未選択"] + [f"{CAT_ICONS.get(c)} {c}" for c in CATEGORIES]
+    sel_cat_label = st.radio("カテゴリ選択", cat_labels, horizontal=True, key="m_cat")
+    sel_cat = sel_cat_label.split(" ", 1)[1] if " " in sel_cat_label else ""
+    
+    prods = master_df[master_df["大カテゴリ"] == sel_cat]["製品名"].tolist() if sel_cat else []
+    sel_prod = st.selectbox("製品を選択", prods, format_func=format_product_name, key="m_prod")
+    
+    if st.button("➕ 製造予定を登録", type="primary", use_container_width=True):
+        if sel_prod:
+            new_data = pd.DataFrame([{
+                "ID": "M-" + str(uuid.uuid4())[:6].upper(),
+                "製造予定日": pd.Timestamp(m_date),
+                "備考": m_note,
+                "大カテゴリ": sel_cat,
+                "製品名": sel_prod,
+                "ケース数": int(m_cases),
+                "登録日時": pd.Timestamp.now()
+            }])
+            if save_data("manufactures", pd.concat([manus_df, new_data], ignore_index=True)):
+                st.success("製造予定を登録しました。")
+                st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-# --- 📦 スケジュール・在庫 ---
-if page == "📦 スケジュール・在庫確認":
+# ─────────────────────────────────────────────
+# ページ表示：在庫・スケジュール
+# ─────────────────────────────────────────────
+elif page == "📦 在庫・スケジュール確認":
     st.markdown('<div class="app-header"><h1>📦 在庫・スケジュール確認</h1></div>', unsafe_allow_html=True)
-    t1, t2, t3 = st.tabs(["📊 在庫推移", "🚨 欠品アラート", "📆 直近1週間の入出庫"])
+    
+    t1, t2 = st.tabs(["📊 在庫推移表", "📆 入出庫カレンダー"])
+    
     with t1:
-        st.markdown('<div class="card"><div class="card-title">📅 14日間の日別在庫推移</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card"><div class="card-title">📅 向こう14日間の在庫予測</div>', unsafe_allow_html=True)
         if not inv_df.empty:
-            pv = inv_df[inv_df["日付"] <= pd.Timestamp.today().normalize()+timedelta(days=14)].pivot_table(index=["大カテゴリ", "製品名"], columns="日付_str", values="在庫数", aggfunc='last').reset_index()
-            st.dataframe(pv.style.map(lambda x: 'color:red; font-weight:bold;' if isinstance(x, (int,float)) and x < 0 else ''), use_container_width=True, hide_index=True)
+            target_days = (pd.Timestamp.today().normalize() + timedelta(days=14))
+            view_df = inv_df[inv_df["日付"] <= target_days].pivot_table(index=["大カテゴリ", "製品名"], columns="日付_str", values="在庫数", aggfunc="last").reset_index()
+            
+            def highlight_neg(val):
+                if isinstance(val, (int, float)) and val < 0: return 'color: red; font-weight: bold; background-color: #ffebee;'
+                return ''
+            
+            st.dataframe(view_df.style.applymap(highlight_neg), use_container_width=True, hide_index=True)
         st.markdown('</div>', unsafe_allow_html=True)
-    with t3:
-        today = pd.Timestamp.today().normalize(); day_list = [today + timedelta(days=i) for i in range(7)]
-        max_v = max(300, orders_df["ケース数"].max() if not orders_df.empty else 0, manus_df["ケース数"].max() if not manus_df.empty else 0)
-        def get_bar(val, color, sign):
-            pct = min(100, int((val/max_v)*100)); return f'<div style="position:relative; background:#eee; border-radius:4px; height:18px; margin-top:4px;"><div style="width:{pct}%; background:{color}; height:100%; border-radius:4px; opacity:0.8;"></div><div style="position:absolute; top:0; right:4px; font-size:10px; font-weight:900;">{sign}{val}</div></div>'
-        rows = ""
-        WEEKDAYS_JA = ["月","火","水","木","金","土","日"]
-        for d in day_list:
-            cls = "col-today" if d == today else ""
-            m_cells = "".join([f'<div class="sched-entry manu-entry"><div class="s-prod">{format_product_name(r["製品名"])}</div>{get_bar(r["ケース数"], "#0e8c5a", "+")}</div>' for _,r in manus_df[manus_df["製造予定日"]==d].iterrows()])
-            o_cells = "".join([f'<div class="sched-entry" style="border-left-color:{CAT_COLORS.get(r["大カテゴリ"],"#1a6fc4")};"><div class="s-prod">{format_product_name(r["製品名"])}</div>{get_bar(r["ケース数"], CAT_COLORS.get(r["大カテゴリ"],"#1a6fc4"), "-")}</div>' for _,r in orders_df[orders_df["納品予定日"]==d].iterrows()])
-            rows += f'<tr><td class="col-label {cls}">{d.strftime("%m/%d")}({WEEKDAYS_JA[d.dayofweek]})</td><td class="{cls}">{m_cells if m_cells else "—"}</td><td class="{cls}">{o_cells if o_cells else "—"}</td></tr>'
-        st.markdown(f'<div class="sched-wrap"><table class="sched-table"><thead><tr><th>日付</th><th>🏭 製造(入庫)</th><th>📋 出荷(出庫)</th></tr></thead><tbody>{rows}</tbody></table></div>', unsafe_allow_html=True)
 
-# 統計、マスタ、ガイドは同様のロジックでスプレッドシート対応を維持
-if page == "📊 統計・分析":
-    st.markdown('<div class="app-header"><h1>📊 月別分析</h1></div>', unsafe_allow_html=True)
-    if not orders_df.empty:
-        orders_df["年月"] = orders_df["納品予定日"].dt.strftime("%Y-%m")
-        st.plotly_chart(px.bar(orders_df.groupby(["年月","大カテゴリ"])["ケース数"].sum().reset_index(), x="年月", y="ケース数", color="大カテゴリ", color_discrete_map=CAT_COLORS, barmode="stack"), use_container_width=True)
+    with t2:
+        st.markdown('<div class="card"><div class="card-title">📆 直近7日間のスケジュール</div>', unsafe_allow_html=True)
+        today = pd.Timestamp.today().normalize()
+        days = [today + timedelta(days=i) for i in range(7)]
+        
+        rows_html = ""
+        for d in days:
+            d_str = d.strftime("%m/%d")
+            # 製造
+            m_items = manus_df[manus_df["製造予定日"] == d]
+            m_html = "".join([f'<div class="sched-entry manu-entry"><b>製造:</b> {r["製品名"]} ({r["ケース数"]}cs)</div>' for _, r in m_items.iterrows()])
+            # 受注
+            o_items = orders_df[orders_df["納品予定日"] == d]
+            o_html = "".join([f'<div class="sched-entry"><b>出荷:</b> {r["顧客名"]} / {r["製品名"]} ({r["ケース数"]}cs)</div>' for _, r in o_items.iterrows()])
+            
+            is_today = "col-today" if d == today else ""
+            rows_html += f'<tr><td class="col-label {is_today}">{d_str}</td><td class="{is_today}">{m_html}</td><td class="{is_today}">{o_html}</td></tr>'
+            
+        st.markdown(f'<div class="sched-wrap"><table class="sched-table"><tr><th>日付</th><th>🏭 製造予定</th><th>📋 出荷予定</th></tr>{rows_html}</table></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-if page == "⚙️ マスタ管理":
-    st.markdown('<div class="app-header"><h1>⚙️ マスタ管理</h1></div>', unsafe_allow_html=True)
-    tab_m, tab_c = st.tabs(["📦 製品マスタ", "🏢 顧客マスタ"])
-    with tab_m:
-        ed_m = st.data_editor(master_df, num_rows="dynamic", use_container_width=True)
-        if st.button("💾 製品保存"): save_data("master", ed_m); st.rerun()
-    with tab_c:
-        ed_c = st.data_editor(cust_df, num_rows="dynamic", use_container_width=True)
-        if st.button("💾 顧客保存"): save_data("customers", ed_c); st.rerun()
+# ─────────────────────────────────────────────
+# ページ表示：マスタ管理
+# ─────────────────────────────────────────────
+elif page == "⚙️ マスタ管理":
+    st.markdown('<div class="app-header"><h1>⚙️ マスタ・初期在庫管理</h1></div>', unsafe_allow_html=True)
+    
+    st.info("💡 初期在庫数を変更すると、その数値を起点に未来の在庫が再計算されます。")
+    ed_master = st.data_editor(master_df, num_rows="dynamic", use_container_width=True)
+    if st.button("💾 製品マスタを保存", type="primary"):
+        save_data("master", ed_master)
+        st.success("保存しました。")
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🏢 顧客リスト管理")
+    ed_cust = st.data_editor(cust_df, num_rows="dynamic", use_container_width=True)
+    if st.button("💾 顧客マスタを保存"):
+        save_data("customers", ed_cust)
+        st.success("保存しました。")
+        st.rerun()
