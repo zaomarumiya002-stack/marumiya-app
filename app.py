@@ -1,13 +1,13 @@
 """
-丸実屋 受注・製造・在庫管理アプリ (リアルタイム反映・爆速同期・完全版)
+丸実屋 受注・製造・在庫管理アプリ (簡単修正エラー完全解決・ボタン超特大版)
 """
 
 import os
-# テーマ強制設定（文字消失防止）
+# テーマ強制設定（視認性固定）
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
 os.environ["STREAMLIT_THEME_BACKGROUND_COLOR"] = "#F8FAFC"
-os.environ["STREAMLIT_THEME_SECONDARY_BACKGROUND_COLOR"] = "#FFFFFF"
+os.environ["STREAMLIT_THEME_SECONDARY_BACKGROUND_COLOR"] = "#F1F5F9"
 os.environ["STREAMLIT_THEME_TEXT_COLOR"] = "#0F172A"
 
 import streamlit as st
@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timedelta, date
 import gspread
 from google.oauth2.service_account import Credentials
+import numpy as np
 
 # ─────────────────────────────────────────────
 # 1. ページ基本設定
@@ -24,27 +25,40 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="丸実屋 受注・在庫管理", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
 
 # ─────────────────────────────────────────────
-# 2. UIデザインCSS（文字消失防止・巨大ボタン）
+# 2. CSS (ヘッダー縮小・カテゴリボタン超特大化)
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     
-    html, body, [data-testid="stAppViewContainer"] { font-family: 'Noto Sans JP', sans-serif !important; }
-    p, span, label, h1, h2, h3, h4, div { color: #0F172A !important; }
+    html, body, [data-testid="stAppViewContainer"] { font-family: 'Noto Sans JP', sans-serif !important; font-size: 16px !important; }
+    p, span, label, div { color: #0F172A !important; font-size: 16px !important; }
+    h2 { font-size: 22px !important; color: #1E3A8A !important; }
 
     /* サイドバー */
     [data-testid="stSidebar"] { background-color: #F8FAFC !important; border-right: 1px solid #E2E8F0; }
     [data-testid="stSidebar"] .stButton > button { height: 50px !important; font-size: 16px !important; border-radius: 10px !important; }
 
-    /* ヘッダー */
+    /* ヘッダー (ご要望通りフォントを少し小さく、スッキリと) */
     .block-container { padding-top: 1rem !important; }
-    .slim-header { background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); padding: 12px 24px; border-radius: 10px; color: white !important; margin-bottom: 16px; }
-    .slim-header h1 { color: white !important; margin: 0 !important; }
+    .slim-header { background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); padding: 12px 20px; border-radius: 10px; color: white !important; margin-bottom: 16px; }
+    .slim-header h1 { color: white !important; font-size: 20px !important; margin: 0 !important; }
 
-    /* カテゴリ巨大ボタン */
-    [data-testid="stPills"] button { padding: 14px 28px !important; font-size: 18px !important; font-weight: 800 !important; border-radius: 12px !important; border: 2px solid #CBD5E1 !important; margin: 4px !important; }
-    [data-testid="stPills"] button[aria-selected="true"] { background-color: #2563EB !important; color: #FFFFFF !important; border-color: #2563EB !important; box-shadow: 0 4px 10px rgba(37, 99, 235, 0.3) !important; }
+    /* ★ カテゴリ巨大ボタン（ご要望通り、さらに大きく目立つように！） ★ */
+    [data-testid="stPills"] button { 
+        padding: 16px 32px !important; /* ボタンの面積を大きく */
+        font-size: 20px !important; /* 文字を大きく */
+        font-weight: 900 !important; /* 文字を太く */
+        border-radius: 12px !important; 
+        border: 2px solid #CBD5E1 !important; 
+        margin: 6px !important; 
+    }
+    [data-testid="stPills"] button[aria-selected="true"] { 
+        background-color: #2563EB !important; 
+        color: #FFFFFF !important; 
+        border-color: #2563EB !important; 
+        box-shadow: 0 6px 15px rgba(37, 99, 235, 0.4) !important; 
+    }
 
     /* スケジュール表 */
     .sched-table { width: 100%; border-collapse: collapse; background: white; font-size: 15px; border-radius: 10px; overflow: hidden; }
@@ -54,11 +68,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# 3. 認証
+# 3. ログイン認証 (画像代わりにリッチなアイコン)
 # ─────────────────────────────────────────────
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
     if not st.session_state["password_correct"]:
+        # アイコンを大きくしてログイン画面を立派に
+        st.markdown("<div style='text-align:center; margin-top:50px;'><span style='font-size:80px;'>🏭</span><h2 style='color:#1E3A8A;'>丸実屋システム ログイン</h2></div>", unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             pwd = st.text_input("パスワードを入力", type="password")
@@ -69,7 +85,7 @@ def check_password():
 check_password()
 
 # ─────────────────────────────────────────────
-# 4. スプレッドシート連携 ＆ メモリ同期システム
+# 4. スプレッドシート連携 ＆ 安全な同期ロジック (AttributeError対策済み)
 # ─────────────────────────────────────────────
 @st.cache_resource
 def get_client():
@@ -97,32 +113,36 @@ def load_data(name):
         return df
     except: return pd.DataFrame()
 
-# ★ データを保存すると同時に、画面表示用メモリ（session_state）も更新する
+# ★ 修正箇所：AttributeError を絶対に起こさせないための安全保存処理
 def save_and_sync(name, df):
     ws = sheet.worksheet(name)
     ws.clear()
     df_str = df.copy()
-    for col in df_str.columns:
-        if pd.api.types.is_datetime64_any_dtype(df_str[col]):
-            df_str[col] = df_str[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-    ws.update(values=[df_str.fillna("").columns.values.tolist()] + df_str.fillna("").astype(str).values.tolist(), range_name='A1')
+    
+    # どんな型になっていようと、安全に文字列にする
+    for col in ["納品予定日", "製造予定日", "登録日時"]:
+        if col in df_str.columns:
+            # 一旦確実にdatetime型にしてから文字列へ（NaTは空文字にする）
+            df_str[col] = pd.to_datetime(df_str[col], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').replace('NaT', '')
+            
+    # すべて文字列化し、不要な文字列(nan, None)を完全排除
+    df_str = df_str.fillna("").astype(str).replace(["nan", "None", "NaT"], "")
+    
+    ws.update(values=[df_str.columns.values.tolist()] + df_str.values.tolist(), range_name='A1')
     st.cache_data.clear()
+    
     # メモリ更新
-    if name == "orders": st.session_state.orders_df = df
-    elif name == "manufactures": st.session_state.manus_df = df
-    elif name == "master": st.session_state.master_df = df
-    elif name == "customers": st.session_state.cust_df = df
+    if name == "orders": st.session_state.orders_df = load_data("orders")
+    elif name == "manufactures": st.session_state.manus_df = load_data("manufactures")
+    elif name == "master": st.session_state.master_df = load_data("master")
+    elif name == "customers": st.session_state.cust_df = load_data("customers")
 
-# ★ 行追加時にGoogleの遅延を無視して、画面用メモリに即座に結合する
 def append_and_sync(name, new_row_df):
-    row_list = new_row_df.fillna("").astype(str).values[0].tolist()
+    row_list = new_row_df.fillna("").astype(str).replace(["nan", "None", "NaT"], "").values[0].tolist()
     sheet.worksheet(name).append_row(row_list)
     st.cache_data.clear()
-    # メモリ更新（即時反映の核）
-    if name == "orders":
-        st.session_state.orders_df = pd.concat([st.session_state.orders_df, new_row_df], ignore_index=True)
-    elif name == "manufactures":
-        st.session_state.manus_df = pd.concat([st.session_state.manus_df, new_row_df], ignore_index=True)
+    if name == "orders": st.session_state.orders_df = load_data("orders")
+    elif name == "manufactures": st.session_state.manus_df = load_data("manufactures")
 
 # ─────────────────────────────────────────────
 # 5. セッション初期化とデータロード
@@ -176,6 +196,7 @@ if page == "📋 受注登録":
         c_name = c2.selectbox("🏢 顧客名（検索）", options=cust_list, index=None, placeholder="空欄（クリックして検索）")
         qty = c3.number_input("📦 ケース数", min_value=1, value=None, step=1, placeholder="数字...")
 
+        st.markdown("### 📂 カテゴリ（大きく押しやすいボタン）")
         cat_full = st.pills("カテゴリ", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed")
         cat = cat_full.split(" ", 1)[1] if cat_full else CATEGORIES[0].split(" ", 1)[1]
         
@@ -183,13 +204,12 @@ if page == "📋 受注登録":
         search_p = sc1.text_input("🔍 製品名検索", placeholder="名称の一部を入力...")
         prods = [p for p in master_df["製品名"].tolist() if search_p in p] if search_p else (master_df[master_df["大カテゴリ"] == cat]["製品名"].tolist() if not master_df.empty else [])
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="製品を選んでください", format_func=format_name)
-        rem = sc2.text_input("📝 備考（任意）", placeholder="備考を入力...")
+        rem = st.text_input("📝 備考（任意）", placeholder="備考を入力...")
         
-        st.markdown('<div style="margin-top: 15px;"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="margin-top: 30px;"></div>', unsafe_allow_html=True)
         if st.button("✅ 受注を登録する", type="primary", use_container_width=True):
             if not prod or not qty: st.error("⚠️ 製品とケース数は必須です")
             else:
-                # DataFrame形式で作成して同期処理に渡す
                 new_row_df = pd.DataFrame([{
                     "ID": str(uuid.uuid4())[:6].upper(),
                     "納品予定日": pd.to_datetime(o_date),
@@ -209,7 +229,6 @@ if page == "📋 受注登録":
 
     st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近3件）</h2>', unsafe_allow_html=True)
     if not orders_df.empty:
-        # 確実に最新データが表示される
         recent = orders_df.sort_values("登録日時", ascending=False).head(3).copy()
         recent["納品予定日"] = recent["納品予定日"].dt.date
         edited = st.data_editor(recent, use_container_width=True, hide_index=True, column_config={"納品予定日": st.column_config.DateColumn(format="YYYY-MM-DD"), "登録日時": None}, key="edit_o")
@@ -227,6 +246,7 @@ elif page == "🏭 製造登録":
         m_date = col1.date_input("📅 製造日", value=date.today())
         m_qty = col2.number_input("📦 製造ケース数", min_value=1, value=None, placeholder="数字...")
         
+        st.markdown("### 📂 カテゴリ（大きく押しやすいボタン）")
         cat_full_m = st.pills("カテゴリ製造", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed")
         cat_m = cat_full_m.split(" ", 1)[1] if cat_full_m else CATEGORIES[0].split(" ", 1)[1]
 
@@ -235,7 +255,7 @@ elif page == "🏭 製造登録":
         prods_m = [p for p in master_df["製品名"].tolist() if search_p_m in p] if search_p_m else (master_df[master_df["大カテゴリ"] == cat_m]["製品名"].tolist() if not master_df.empty else [])
         prod_m = sc2_m.selectbox("確定製品", options=prods_m, index=None, placeholder="選択してください", format_func=format_name, key="selm")
         
-        st.markdown('<div style="margin-top: 15px;"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="margin-top: 30px;"></div>', unsafe_allow_html=True)
         if st.button("➕ 製造を記録する", type="primary", use_container_width=True):
             if not prod_m or not m_qty: st.error("⚠️ 製品と数量は必須です")
             else:
@@ -295,18 +315,6 @@ elif page == "📦 在庫・スケジュール":
             st.dataframe(inv_df.style.map(lambda x: 'color: #dc2626; font-weight: 900; background-color: #fee2e2;' if isinstance(x, (int,float)) and x < 0 else ''), use_container_width=True, hide_index=True, height=600)
 
     with t2:
-        col_dl1, col_dl2 = st.columns(2)
-        today_o = orders_df[orders_df["納品予定日"] == today] if not orders_df.empty else pd.DataFrame()
-        if not today_o.empty:
-            csv1 = today_o[["顧客名", "製品名", "ケース数", "備考"]].sort_values("顧客名").to_csv(index=False, encoding="utf-8-sig")
-            col_dl1.download_button("📝 今日の出荷予定を保存 (CSV)", data=csv1, file_name=f"出荷_{today.strftime('%Y%m%d')}.csv", type="primary", use_container_width=True)
-        
-        week_o = orders_df[(orders_df["納品予定日"] >= today) & (orders_df["納品予定日"] <= today + timedelta(days=6))] if not orders_df.empty else pd.DataFrame()
-        if not week_o.empty:
-            csv2 = week_o.sort_values(["納品予定日", "顧客名"])[["納品予定日", "顧客名", "製品名", "ケース数", "備考"]].to_csv(index=False, encoding="utf-8-sig")
-            col_dl2.download_button("📅 1週間の出荷予定を保存 (CSV)", data=csv2, file_name=f"週間出荷_{today.strftime('%Y%m%d')}.csv", use_container_width=True)
-
-        MAX_CS = 500
         html = '<table class="sched-table"><tr><th style="width:100px;">日付</th><th style="width:45%;">製造</th><th style="width:45%;">出荷</th></tr>'
         for i in range(7):
             d = today + timedelta(days=i)
@@ -319,17 +327,25 @@ elif page == "📦 在庫・スケジュール":
 
 # 統計・マスタ
 elif page == "📊 統計・分析":
-    st.markdown('<div class="slim-header" style="background:linear-gradient(135deg, #4C1D95 0%, #8B5CF6 100%);"><h1>📊 出荷傾向分析</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="slim-header" style="background:linear-gradient(135deg, #4C1D95 0%, #8B5CF6 100%);"><h1>📊 統計・ABC分析ダッシュボード</h1></div>', unsafe_allow_html=True)
     if not orders_df.empty:
-        t1, t2 = st.tabs(["🏆 顧客別分析", "🥇 製品ABC分析"])
+        t1, t2 = st.tabs(["🏆 顧客・カテゴリ分析", "🥇 製品ABC分析 (出荷量ランク)"])
         with t1:
-            st.plotly_chart(px.bar(orders_df.groupby("顧客名")["ケース数"].sum().reset_index().sort_values("ケース数", ascending=False).head(15), x="ケース数", y="顧客名", orientation='h', title="主要顧客TOP15"), use_container_width=True)
+            col1, col2 = st.columns(2)
+            orders_df["年月"] = orders_df["納品予定日"].dt.strftime("%Y-%m")
+            col1.plotly_chart(px.bar(orders_df.groupby(["年月","大カテゴリ"])["ケース数"].sum().reset_index(), x="年月", y="ケース数", color="大カテゴリ", barmode="stack", title="出荷トレンド"), use_container_width=True)
+            col2.plotly_chart(px.bar(orders_df[orders_df["顧客名"]!="未指定"].groupby("顧客名")["ケース数"].sum().reset_index().sort_values("ケース数", ascending=False).head(15), x="ケース数", y="顧客名", orientation='h', title="主要顧客TOP15"), use_container_width=True)
         with t2:
-            st.write("💡 累計シェアで「A(上位70%)」「B(70〜90%)」「C(90%〜)」に分類します。")
+            st.write("💡 **ABC分析**: 全出荷品目を数量順に並べ、累計シェアで「A(上位70%)」「B(70〜90%)」「C(90%〜)」に分類します。")
             abc_df = orders_df.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数", ascending=False)
-            abc_df["シェア(%)"] = abc_df["ケース数"].cumsum() / abc_df["ケース数"].sum() * 100
-            abc_df["ランク"] = pd.cut(abc_df["シェア(%)"], bins=[0, 70, 90, 100], labels=["A (主力)", "B (中堅)", "C (その他)"])
-            st.dataframe(abc_df.style.map(lambda v: 'color: #DC2626; font-weight: 900; background-color: #FEE2E2;' if "A" in str(v) else 'color: #D97706;' if "B" in str(v) else '', subset=["ランク"]), use_container_width=True, hide_index=True)
+            total = abc_df["ケース数"].sum()
+            abc_df["累計シェア"] = abc_df["ケース数"].cumsum() / total * 100
+            abc_df["ランク"] = pd.cut(abc_df["累計シェア"], bins=[0, 70, 90, 100], labels=["Aランク (主力)", "Bランク (中堅)", "Cランク (その他)"])
+            def color_rank(val):
+                if "A" in str(val): return 'color: #DC2626; font-weight: 900; background-color: #FEE2E2;'
+                elif "B" in str(val): return 'color: #D97706; font-weight: 700; background-color: #FEF3C7;'
+                return 'color: #475569;'
+            st.dataframe(abc_df.style.map(color_rank, subset=["ランク"]), use_container_width=True, hide_index=True)
 
 elif page == "⚙️ マスタ管理":
     st.markdown('<div class="slim-header" style="background:#374151;"><h1>⚙️ マスタ管理</h1></div>', unsafe_allow_html=True)
