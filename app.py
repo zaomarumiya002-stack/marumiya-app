@@ -1,5 +1,5 @@
 """
-丸実屋 受注・製造・在庫管理アプリ (超高速計算エンジン・UI最適化・安定版)
+丸実屋 受注・製造・在庫管理アプリ (エラー完全修復・超高速・安定版)
 """
 
 import os
@@ -16,7 +16,6 @@ import plotly.express as px
 import uuid
 from datetime import datetime, timedelta, date
 import gspread
-from gspread_dataframe import set_with_dataframe
 from google.oauth2.service_account import Credentials
 import numpy as np
 
@@ -26,46 +25,45 @@ import numpy as np
 st.set_page_config(page_title="丸実屋 受注・在庫管理", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
 
 # ─────────────────────────────────────────────
-# 2. 究極のUIデザインCSS
+# 2. 究極のUIデザインCSS (文字消失防止)
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     html, body, [data-testid="stAppViewContainer"] { font-family: 'Noto Sans JP', sans-serif !important; font-size: 16px !important; }
-    p, span, label, div { color: #0F172A !important; }
+    p, span, label, div { color: #0F172A !important; font-size: 16px !important; }
+    h1 { font-size: 28px !important; }
+    h2 { font-size: 22px !important; color: #1E3A8A !important; }
 
     /* サイドバー */
     [data-testid="stSidebar"] { background-color: #F8FAFC !important; border-right: 1px solid #E2E8F0; }
+    [data-testid="stSidebar"] .stButton > button { height: 55px !important; font-size: 17px !important; border-radius: 12px !important; font-weight: 700 !important; }
 
-    /* ヘッダー (ご要望通りフォントを小さくスッキリ) */
+    /* ヘッダー (フォントを小さくスッキリ) */
     .block-container { padding-top: 1rem !important; }
-    .slim-header { background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); padding: 10px 20px; border-radius: 10px; color: white !important; margin-bottom: 15px; }
-    .slim-header h1 { color: white !important; margin: 0 !important; font-size: 16px !important; font-weight: 700 !important; }
+    .slim-header { background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%); padding: 12px 24px; border-radius: 10px; color: white !important; margin-bottom: 15px; }
+    .slim-header h1 { color: white !important; margin: 0 !important; font-size: 18px !important; font-weight: 700 !important; }
     .header-manu { background: linear-gradient(135deg, #064E3B 0%, #10B981 100%); }
 
-    /* ★ カテゴリ特大ボタン（以前の2倍サイズ） ★ */
+    /* ★ カテゴリ巨大ボタン（超特大） ★ */
     [data-testid="stPills"] button { 
-        padding: 24px 48px !important; /* 面積をさらに拡大 */
-        font-size: 26px !important; /* 文字とアイコンを特大に */
-        font-weight: 900 !important;
-        border-radius: 15px !important; 
-        border: 2px solid #CBD5E1 !important; 
-        margin: 8px !important; 
+        padding: 16px 32px !important; font-size: 22px !important; font-weight: 900 !important; 
+        border-radius: 12px !important; border: 2px solid #CBD5E1 !important; margin: 6px !important; 
     }
     [data-testid="stPills"] button[aria-selected="true"] { 
         background-color: #2563EB !important; color: #FFFFFF !important; border-color: #2563EB !important; 
-        box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4) !important; 
+        box-shadow: 0 6px 15px rgba(37, 99, 235, 0.4) !important; 
     }
 
     /* スケジュール表 */
-    .sched-table { width: 100%; border-collapse: collapse; background: white; font-size: 15px; border-radius: 10px; overflow: hidden; }
+    .sched-table { width: 100%; border-collapse: collapse; background: white; font-size: 16px; border-radius: 10px; overflow: hidden; }
     .sched-table th { background: #F8FAFC; padding: 10px; border-bottom: 2px solid #E2E8F0; }
     .sched-table td { padding: 10px; border-bottom: 1px solid #F1F5F9; vertical-align: top; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# 3. 認証
+# 3. ログイン認証
 # ─────────────────────────────────────────────
 def check_password():
     if "password_correct" not in st.session_state: st.session_state["password_correct"] = False
@@ -81,7 +79,7 @@ def check_password():
 check_password()
 
 # ─────────────────────────────────────────────
-# 4. Googleスプレッドシート連携 ＆ 高速保存ロジック
+# 4. Googleスプレッドシート連携 ＆ 最強の同期ロジック
 # ─────────────────────────────────────────────
 @st.cache_resource
 def get_client():
@@ -121,10 +119,10 @@ def save_and_sync(name, df):
     df_save = df_save.fillna("").astype(str).replace(["nan", "None", "NaT"], "")
     ws.update(values=[df_save.columns.values.tolist()] + df_save.values.tolist(), range_name='A1')
     st.cache_data.clear()
-    if name == "orders": st.session_state.orders_df = load_data_from_cloud("orders")
-    elif name == "manufactures": st.session_state.manus_df = load_data_from_cloud("manufactures")
-    elif name == "master": st.session_state.master_df = load_data_from_cloud("master")
-    elif name == "customers": st.session_state.cust_df = load_data_from_cloud("customers")
+    if name == "orders": st.session_state.orders_df = df
+    elif name == "manufactures": st.session_state.manus_df = df
+    elif name == "master": st.session_state.master_df = df
+    elif name == "customers": st.session_state.cust_df = df
 
 def append_and_sync(name, new_row_df):
     row_list = new_row_df.copy()
@@ -138,7 +136,7 @@ def append_and_sync(name, new_row_df):
     elif name == "manufactures": st.session_state.manus_df = pd.concat([st.session_state.manus_df, new_row_df], ignore_index=True)
 
 # ─────────────────────────────────────────────
-# 5. セッション初期化とマスタ
+# 5. データロード ＆ セッション管理
 # ─────────────────────────────────────────────
 if "orders_df" not in st.session_state: st.session_state.orders_df = load_data_from_cloud("orders")
 if "manus_df" not in st.session_state: st.session_state.manus_df = load_data_from_cloud("manufactures")
@@ -171,14 +169,15 @@ with st.sidebar:
         if st.button(item, key=f"menu_{item}", use_container_width=True, type="primary" if st.session_state.current_page == item else "secondary"):
             change_page(item); st.rerun()
 
-# ─────────────────────────────────────────────
-# 7. 各画面の描画
-# ─────────────────────────────────────────────
 page = st.session_state.current_page
 
-# --- 受注登録 ---
+# ─────────────────────────────────────────────
+# 7. 各画面描画
+# ─────────────────────────────────────────────
+
+# --- 📋 受注登録 ---
 if page == "📋 受注登録":
-    st.markdown('<div class="slim-header"><h1>📋 受注（出荷予定）登録</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="slim-header"><h1>📋 受注登録</h1></div>', unsafe_allow_html=True)
     with st.container():
         c1, c2, c3 = st.columns([1, 2, 1])
         o_date = c1.date_input("📅 納品日", value=date.today() + timedelta(days=1))
@@ -191,16 +190,16 @@ if page == "📋 受注登録":
         cat = cat_full.split(" ", 1)[1] if cat_full else CATEGORIES[0].split(" ", 1)[1]
         
         sc1, sc2 = st.columns([1.5, 2.5])
-        search_p = sc1.text_input("🔍 製品名検索", placeholder="名称の一部...")
+        search_p = sc1.text_input("🔍 製品名検索", placeholder="名称の一部を入力...")
         prods = [p for p in master_df["製品名"].tolist() if search_p in p] if search_p else (master_df[master_df["大カテゴリ"] == cat]["製品名"].tolist() if not master_df.empty else [])
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="製品を選んでください", format_func=format_name)
         rem = sc2.text_input("📝 備考")
         
         st.markdown('<div style="margin-top: 30px;"></div>', unsafe_allow_html=True)
         if st.button("✅ 受注を登録する", type="primary", use_container_width=True):
-            if not prod or not qty: st.error("⚠️ 製品とケース数は必須です")
+            if not prod or not qty: st.error("⚠️ 製品名とケース数は必須です")
             else:
-                new_row = pd.DataFrame([{"ID": str(uuid.uuid4())[:6].upper(), "納品予定日": pd.to_datetime(o_date), "顧客名": c_name if c_name else "未指定", "大カテゴリ": cat, "製品名": prod, "ケース数": int(qty), "備考": rem, "登録日時": pd.to_datetime(datetime.now())}])
+                new_row = pd.DataFrame([{"ID": str(uuid.uuid4())[:6].upper(), "納品予定日": pd.to_datetime(o_date), "顧客名": c_name if c_name else "未指定", "大カテゴリ": cat, "製品名": prod, "ケース数": int(qty), "備考": rem, "登録日時": datetime.now()}])
                 append_and_sync("orders", new_row)
                 st.success(f"✅ 登録完了：{prod}"); st.rerun()
 
@@ -213,9 +212,9 @@ if page == "📋 受注登録":
             others = st.session_state.orders_df[~st.session_state.orders_df["ID"].isin(recent["ID"])]
             save_and_sync("orders", pd.concat([others, edited], ignore_index=True)); st.rerun()
 
-# --- 製造登録 ---
+# --- 🏭 製造登録 ---
 elif page == "🏭 製造登録":
-    st.markdown('<div class="slim-header header-manu"><h1>🏭 製造データの登録</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="slim-header header-manu"><h1>🏭 製造登録</h1></div>', unsafe_allow_html=True)
     with st.container():
         col1, col2 = st.columns([1, 1])
         m_date = col1.date_input("📅 製造日", value=date.today())
@@ -231,7 +230,7 @@ elif page == "🏭 製造登録":
         if st.button("➕ 製造を記録する", type="primary", use_container_width=True):
             if not prod_m or not m_qty: st.error("⚠️ 製品と数量は必須です")
             else:
-                new_row = pd.DataFrame([{"ID": str(uuid.uuid4())[:6].upper(), "製造予定日": pd.to_datetime(m_date), "備考": "", "大カテゴリ": cat_m, "製品名": prod_m, "ケース数": int(m_qty), "登録日時": pd.to_datetime(datetime.now())}])
+                new_row = pd.DataFrame([{"ID": str(uuid.uuid4())[:6].upper(), "製造予定日": pd.to_datetime(m_date), "備考": "", "大カテゴリ": cat_m, "製品名": prod_m, "ケース数": int(m_qty), "登録日時": datetime.now()}])
                 append_and_sync("manufactures", new_row)
                 st.success(f"✅ 登録完了：{prod_m}"); st.rerun()
 
@@ -244,48 +243,38 @@ elif page == "🏭 製造登録":
             others_m = st.session_state.manus_df[~st.session_state.manus_df["ID"].isin(recent_m["ID"])]
             save_and_sync("manufactures", pd.concat([others_m, edited_m], ignore_index=True)); st.rerun()
 
-# --- 📦 在庫・スケジュール (【超速】行列演算エンジン) ---
+# --- 📦 在庫・スケジュール ---
 elif page == "📦 在庫・スケジュール":
     st.markdown('<div class="slim-header"><h1>📦 在庫予測とスケジュール</h1></div>', unsafe_allow_html=True)
     today = pd.Timestamp.today().normalize()
     dates = pd.date_range(today, today + timedelta(days=30))
     
-    t1, t2 = st.tabs(["📉 1ヶ月在庫予測 (超速表示)", "📅 週間カレンダー"])
+    t1, t2 = st.tabs(["📉 1ヶ月在庫予測", "📅 週間カレンダー"])
     
     with t1:
         if master_df.empty:
             st.info("製品マスタが空です。")
         else:
-            # ★ 超高速行列計算エンジン
             o_ev = orders_df[["納品予定日", "製品名", "ケース数"]].rename(columns={"納品予定日":"日付", "ケース数":"qty"})
             o_ev["qty"] = -o_ev["qty"]
             m_ev = manus_df[["製造予定日", "製品名", "ケース数"]].rename(columns={"製造予定日":"日付", "ケース数":"qty"})
             all_ev = pd.concat([o_ev, m_ev]).dropna()
-            
-            # 現在庫を製品ごとに一括集計
             past_ev = all_ev[all_ev["日付"] < today].groupby("製品名")["qty"].sum()
             future_ev = all_ev[all_ev["日付"] >= today]
-            
-            # 未来の全変動をピボットテーブルで一括行列化（高速化の核）
             if not future_ev.empty:
                 pivot_ev = future_ev.pivot_table(index="製品名", columns="日付", values="qty", aggfunc="sum").reindex(columns=dates, fill_value=0)
             else:
                 pivot_ev = pd.DataFrame(0, index=master_df["製品名"], columns=dates)
-            
-            # 在庫マトリクスの構築
             inv_data = []
             for _, r in master_df.iterrows():
                 p = r["製品名"]
                 curr_stock = int(r["初期在庫数"]) + int(past_ev.get(p, 0))
-                # その製品の1ヶ月分の累積和を一気に計算
                 p_future_cumsum = pivot_ev.loc[p].cumsum() if p in pivot_ev.index else pd.Series(0, index=dates)
                 daily_forecast = (p_future_cumsum + curr_stock).astype(int)
-                
                 row = {"カテゴリ": r["大カテゴリ"], "製品名": format_name(p), "現在庫": int(curr_stock)}
                 for d in dates:
                     row[d.strftime("%m/%d")] = int(daily_forecast[d])
                 inv_data.append(row)
-                
             inv_df = pd.DataFrame(inv_data).sort_values("カテゴリ")
             st.dataframe(inv_df.style.map(lambda x: 'color: #dc2626; font-weight: 900; background-color: #fee2e2;' if isinstance(x, (int,float)) and x < 0 else ''), use_container_width=True, hide_index=True, height=600)
 
@@ -306,12 +295,12 @@ elif page == "📦 在庫・スケジュール":
             html += f'<tr><td><b>{d.strftime("%m/%d")}</b><br>{["月","火","水","木","金","土","日"][d.dayofweek]}曜</td><td>{m_h}</td><td>{o_h}</td></tr>'
         st.markdown(html + '</table>', unsafe_allow_html=True)
 
-# 📊 統計・分析、マスタは以前のまま
+# 📊 統計・分析 (ABC分析)
 elif page == "📊 統計・分析":
     st.markdown('<div class="slim-header" style="background:#4C1D95;"><h1>📊 ABC分析 ＆ 顧客ランキング</h1></div>', unsafe_allow_html=True)
     if not orders_df.empty:
         abc = orders_df.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数", ascending=False)
-        abc["累計比率"] = abc["ケース_数"].cumsum() / abc["ケース数"].sum() * 100
+        abc["累計比率"] = abc["ケース数"].cumsum() / abc["ケース数"].sum() * 100
         abc["ランク"] = pd.cut(abc["累計比率"], bins=[0, 70, 90, 100], labels=["A (主力)", "B (中堅)", "C (その他)"])
         st.dataframe(abc.style.map(lambda v: 'background-color: #FEE2E2; font-weight: 900;' if "A" in str(v) else '', subset=["ランク"]), use_container_width=True, hide_index=True)
         st.plotly_chart(px.bar(orders_df[orders_df["顧客名"]!="未指定"].groupby("顧客名")["ケース数"].sum().reset_index().sort_values("ケース数", ascending=False).head(15), x="ケース数", y="顧客名", orientation='h', title="主要顧客TOP15"), use_container_width=True)
