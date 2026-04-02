@@ -92,6 +92,7 @@ def load_data_from_cloud(name):
         df = pd.DataFrame(data[1:], columns=data[0])
         for c in cols:
             if c not in df.columns: df[c] = ""
+        # 厳密な型変換（エラー回避）
         if "ケース数" in df.columns: df["ケース数"] = pd.to_numeric(df["ケース数"], errors='coerce').fillna(0).astype(int)
         if "初期在庫数" in df.columns: df["初期在庫数"] = pd.to_numeric(df["初期在庫数"], errors='coerce').fillna(0).astype(int)
         for c in ["納品予定日", "製造予定日", "登録日時"]:
@@ -153,25 +154,27 @@ def format_name(name):
 # ★ 共通在庫計算エンジン（リアルタイム＆未来予測）
 # ─────────────────────────────────────────────
 today = pd.Timestamp.today().normalize()
-dates = pd.date_range(today, today + timedelta(days=60)) # 予測期間を60日に延長
+dates = pd.date_range(today, today + timedelta(days=60))
 current_stocks = {}
-future_stocks = {} # {製品名: {日付: 在庫数}}
+future_stocks = {}
 
 if not master_df.empty:
+    # 出荷（orders）: qtyをマイナス化（もしマイナス入力があれば -(-) でプラスになり在庫復帰ロジック完成）
     o_ev = orders_df[["納品予定日", "製品名", "ケース数"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日", "製品名", "ケース数"])
     if not o_ev.empty:
         o_ev = o_ev.rename(columns={"納品予定日":"日付", "ケース数":"qty"})
-        o_ev["qty"] = -pd.to_numeric(o_ev["qty"], errors='coerce').fillna(0)
+        o_ev["qty"] = -pd.to_numeric(o_ev["qty"], errors='coerce').fillna(0).astype(int)
     
+    # 製造（manus）: qtyはそのままプラス
     m_ev = manus_df[["製造予定日", "製品名", "ケース数"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日", "製品名", "ケース数"])
     if not m_ev.empty:
         m_ev = m_ev.rename(columns={"製造予定日":"日付", "ケース数":"qty"})
-        m_ev["qty"] = pd.to_numeric(m_ev["qty"], errors='coerce').fillna(0)
+        m_ev["qty"] = pd.to_numeric(m_ev["qty"], errors='coerce').fillna(0).astype(int)
     
     all_ev = pd.concat([o_ev, m_ev]).dropna(subset=["製品名", "日付"])
     past_ev = all_ev[all_ev["日付"] < today].groupby("製品名")["qty"].sum()
-    
     future_ev = all_ev[all_ev["日付"] >= today]
+    
     if not future_ev.empty:
         pivot_ev = future_ev.pivot_table(index="製品名", columns="日付", values="qty", aggfunc="sum").reindex(columns=dates, fill_value=0)
     else:
@@ -227,7 +230,10 @@ if page == "📋 受注登録":
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="選択してください", format_func=format_name)
         rem = sc2.text_input("📝 備考")
         
-        is_substitute = sc2.checkbox("🔄 代替品として送付", help="チェックすると備考欄に自動で【代替品】と付与されます")
+        # 【追加】代替品 ＆ イレギュラーチェックボックス
+        col_chk1, col_chk2 = sc2.columns(2)
+        is_substitute = col_chk1.checkbox("🔄 代替品として送付")
+        is_irregular = col_chk2.checkbox("⚠️ イレギュラー(水漏れ等)")
         
         st.write("---")
 
@@ -243,7 +249,12 @@ if page == "📋 受注登録":
             if not prod or not qty: 
                 msg_slot.error("⚠️ 【製品・ケース数】は必須です。")
             else:
-                final_rem = f"【代替品】 {rem}".strip() if is_substitute else rem
+                # 備考欄の自動付与ロジック
+                prefix = ""
+                if is_substitute: prefix += "【代替品】"
+                if is_irregular: prefix += "【イレギュラー】"
+                final_rem = f"{prefix} {rem}".strip()
+                
                 new_row = pd.DataFrame([{
                     "ID": str(uuid.uuid4())[:6].upper(), 
                     "納品予定日": pd.to_datetime(o_date), 
@@ -304,12 +315,11 @@ elif page == "📑 登録一覧・編集":
         cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日", "製品名", "ケース数", "備考"]
         edit_df = edit_df[[c for c in cols if c in edit_df.columns]]
         
-        # 【追加機能】 動的な在庫状況（過不足）列の算出
+        # 動的な在庫状況（過不足）の算出
         def get_stock_status(row):
             try:
                 d = pd.Timestamp(row["納品予定日"]).normalize()
                 p = row["製品名"]
-                # 未来の日付なら予測在庫、過去なら現在庫を参照
                 if d >= today and p in future_stocks and d in future_stocks[p]:
                     stock = future_stocks[p][d]
                 else:
@@ -321,17 +331,31 @@ elif page == "📑 登録一覧・編集":
 
         edit_df.insert(7, "在庫状況", edit_df.apply(get_stock_status, axis=1))
 
-        # 【追加機能】 在庫不足行の赤背景ハイライト
-        def highlight_shortage_row(row):
-            color = ''
-            if "不足" in str(row.get("在庫状況", "")):
-                color = 'background-color: #FEE2E2; color: #DC2626; font-weight: bold;'
-            return [color] * len(row)
+        # 【追加】 イレギュラー品＆在庫不足の複合ハイライト
+        def highlight_row(row):
+            color_style = ''
+            is_irregular = "【イレギュラー】" in str(row.get("備考", ""))
+            is_shortage = "不足" in str(row.get("在庫状況", ""))
+            
+            if is_shortage and is_irregular:
+                color_style = 'background-color: #FEF08A; color: #DC2626; font-weight: bold;' # 背景黄、文字赤
+            elif is_shortage:
+                color_style = 'background-color: #FEE2E2; color: #DC2626; font-weight: bold;' # 背景薄赤、文字赤
+            elif is_irregular:
+                color_style = 'background-color: #FEF08A; color: #854D0E; font-weight: bold;' # 背景黄、文字茶色
+            return [color_style] * len(row)
 
-        st.markdown("※出荷時点で在庫がマイナス（欠品）となる行は<span style='color:#DC2626;font-weight:bold;'>赤色</span>で強調表示されます。在庫状況列で過不足数を確認できます。", unsafe_allow_html=True)
+        st.markdown("""
+        <div style="font-size:14px; margin-bottom:10px;">
+            <b>🎨 色の見方：</b> 
+            <span style="background-color:#FEE2E2; color:#DC2626; padding:2px 6px; border-radius:4px;">在庫不足（赤字）</span> / 
+            <span style="background-color:#FEF08A; color:#854D0E; padding:2px 6px; border-radius:4px;">イレギュラー対応（黄色）</span><br>
+            <b>🔄 リパック対応：</b> イレギュラー品を在庫に戻す場合、「ケース数」に<b>マイナスの数値（例：-10）</b>を入力して保存すると、在庫がプラスに復帰します。
+        </div>
+        """, unsafe_allow_html=True)
         
         edited = st.data_editor(
-            edit_df.style.apply(highlight_shortage_row, axis=1),
+            edit_df.style.apply(highlight_row, axis=1),
             use_container_width=True,
             hide_index=True,
             height=600,
@@ -339,18 +363,18 @@ elif page == "📑 登録一覧・編集":
                 "ID": None,
                 "登録日時": None,
                 "大カテゴリ": None,
-                "納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD"),
-                "ケース数": st.column_config.NumberColumn("ケース数", min_value=1),
-                "在庫状況": st.column_config.TextColumn("在庫状況 (出庫後)", disabled=True) # 編集不可
+                "納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD", required=True),
+                # min_valueの制限を外し、マイナス入力（在庫復帰）を可能にする
+                "ケース数": st.column_config.NumberColumn("ケース数", required=True), 
+                "在庫状況": st.column_config.TextColumn("在庫状況 (出庫後)", disabled=True)
             },
             key="edit_all_orders"
         )
         
         if st.button("💾 修正を保存", type="primary", use_container_width=True):
-            # 保存時は計算用に追加した「在庫状況」列を削除してスプレッドシートに書き戻す
             save_df = edited.drop(columns=["在庫状況"], errors='ignore')
             save_and_sync("orders", save_df)
-            st.success("✅ 全データを更新しました！")
+            st.success("✅ 全データを更新し、在庫の再計算を行いました！")
             st.rerun()
 
 # --- 📦 在庫・スケジュール ---
@@ -387,10 +411,9 @@ elif page == "📦 在庫・スケジュール":
         for i in range(7):
             d = today + timedelta(days=i)
             
-            # 製造セル
             m_h = "".join([f'<div style="background:#F0FFF4; border-left:4px solid #10B981; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{format_name(r["製品名"])}</span> <span style="float:right; font-weight:900; color:#059669;">{int(r["ケース数"])}cs</span></div>' for _,r in manus_df[manus_df["製造予定日"]==d].iterrows()]) if not manus_df.empty else ""
             
-            # 出荷セル（在庫不足の赤字ハイライト対応）
+            # 【追加】 カレンダーでの在庫不足時の赤太字表示
             o_h = ""
             for _, r in orders_df[orders_df["納品予定日"] == d].iterrows():
                 p = r["製品名"]
@@ -398,13 +421,13 @@ elif page == "📦 在庫・スケジュール":
                 stock_on_day = future_stocks.get(p, {}).get(d, 0)
                 
                 if stock_on_day < 0:
-                    qty_html = f'<span style="color:#DC2626;">{qty}cs (不足)</span>'
+                    qty_html = f'<span style="color:#DC2626; font-weight:900;">{qty}cs (不足)</span>'
                     bg_color, border_color = "#FEE2E2", "#DC2626"
                 else:
-                    qty_html = f'<span style="color:#1D4ED8;">{qty}cs</span>'
+                    qty_html = f'<span style="color:#1D4ED8; font-weight:900;">{qty}cs</span>'
                     bg_color, border_color = "#F0F7FF", "#2563EB"
                     
-                o_h += f'<div style="background:{bg_color}; border-left:4px solid {border_color}; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{r["顧客名"]}: {format_name(p)}</span> <span style="float:right; font-weight:900;">{qty_html}</span></div>'
+                o_h += f'<div style="background:{bg_color}; border-left:4px solid {border_color}; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{r["顧客名"]}: {format_name(p)}</span> <span style="float:right;">{qty_html}</span></div>'
                 
             html += f'<tr><td><b>{d.strftime("%m/%d")}</b><br>{["月","火","水","木","金","土","日"][d.dayofweek]}曜</td><td>{m_h}</td><td>{o_h}</td></tr>'
         st.markdown(html + '</table>', unsafe_allow_html=True)
