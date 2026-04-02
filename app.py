@@ -67,7 +67,7 @@ def check_password():
 check_password()
 
 # ─────────────────────────────────────────────
-# 3. GSpread 同期ロジック (KeyError・列名正規化対応)
+# 3. GSpread 同期ロジック
 # ─────────────────────────────────────────────
 @st.cache_resource
 def get_client():
@@ -93,11 +93,9 @@ def load_data_from_cloud(name):
         if len(data) <= 1: return pd.DataFrame(columns=cols)
         df = pd.DataFrame(data[1:], columns=data[0])
         
-        # 【最優先】列名の空白除去と重複排除（KeyError・Seriesエラーの物理的排除）
         df.columns = df.columns.str.strip().str.replace(' ', '').str.replace('　', '')
         df = df.loc[:, ~df.columns.duplicated()]
         
-        # 足りない列を補完
         for c in cols:
             if c not in df.columns: df[c] = ""
             
@@ -119,7 +117,7 @@ def save_and_sync(name, df):
         elif pd.api.types.is_numeric_dtype(df_save[col]): df_save[col] = df_save[col].fillna(0).apply(to_int).astype(str)
     df_save = df_save.fillna("").astype(str).replace(["nan", "None", "NaT"], "")
     ws.update(values=[df_save.columns.values.tolist()] + df_save.values.tolist(), range_name='A1')
-    st.cache_data.clear() # 即時キャッシュクリア（複数人対応）
+    st.cache_data.clear() 
     st.session_state[f"{name}_df"] = load_data_from_cloud(name)
 
 def append_and_sync(name, new_row_df):
@@ -130,7 +128,7 @@ def append_and_sync(name, new_row_df):
         if pd.api.types.is_datetime64_any_dtype(row_copy[col]): row_copy[col] = row_copy[col].dt.strftime('%Y-%m-%d %H:%M:%S').replace('NaT', '')
     row_to_send = row_copy.fillna("").astype(str).replace(["nan", "None", "NaT"], "").values[0].tolist()
     ws.append_row(row_to_send)
-    st.cache_data.clear() # 即時キャッシュクリア
+    st.cache_data.clear() 
     st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], new_row_df], ignore_index=True)
 
 for sheet_name in ["orders", "manufactures", "master", "customers", "packaging_master", "packaging_logs"]:
@@ -157,13 +155,14 @@ dates = pd.date_range(today, today + timedelta(days=60))
 # --- 製品在庫 ---
 current_stocks = {}
 future_stocks = {}
-master_df_unique = master_df.drop_duplicates(subset=["製品名"]) if not master_df.empty else pd.DataFrame()
+# 【修正】データが0件の時でも必ず列名を持たせてKeyErrorを防ぐ
+master_df_unique = master_df.drop_duplicates(subset=["製品名"]) if not master_df.empty else pd.DataFrame(columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"])
 
 if not master_df_unique.empty:
     o_ev = orders_df[["納品予定日", "製品名", "ケース数"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日", "製品名", "ケース数"])
     if not o_ev.empty:
         o_ev = o_ev.rename(columns={"納品予定日":"日付", "ケース数":"qty"})
-        o_ev["qty"] = -pd.to_numeric(o_ev["qty"], errors='coerce').fillna(0) # 出荷はマイナス。負数入力（復帰）はプラス化
+        o_ev["qty"] = -pd.to_numeric(o_ev["qty"], errors='coerce').fillna(0)
     m_ev = manus_df[["製造予定日", "製品名", "ケース数"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日", "製品名", "ケース数"])
     if not m_ev.empty:
         m_ev = m_ev.rename(columns={"製造予定日":"日付", "ケース数":"qty"})
@@ -187,7 +186,8 @@ if not master_df_unique.empty:
 
 # --- 資材推移サマリ ---
 pack_summary = {}
-pack_mst_unique = pack_mst_df.drop_duplicates(subset=["資材名"]) if not pack_mst_df.empty else pd.DataFrame()
+# 【修正】データが0件の時でも必ず列名を持たせてKeyErrorを防ぐ
+pack_mst_unique = pack_mst_df.drop_duplicates(subset=["資材名"]) if not pack_mst_df.empty else pd.DataFrame(columns=["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"])
 
 if not pack_mst_unique.empty:
     for _, r in pack_mst_unique.iterrows():
@@ -198,7 +198,6 @@ if not pack_mst_unique.empty:
             "期間入庫累計": 0, "期間出庫消費": 0, "現在庫": 0
         }
 
-# 単体ログからの増減（数量は常に正の数で記録され、処理区分で判断）
 if not pack_log_df.empty:
     for _, r in pack_log_df.iterrows():
         p_name, qty, p_type = r.get("資材名", ""), to_int(r.get("数量", 0)), str(r.get("処理区分", ""))
@@ -206,7 +205,6 @@ if not pack_log_df.empty:
             if "入庫" in p_type: pack_summary[p_name]["期間入庫累計"] += qty
             elif "出庫" in p_type: pack_summary[p_name]["期間出庫消費"] += qty
 
-# 製品出荷との連動（非連動タグがある場合はスキップ）
 if not orders_df.empty and not master_df_unique.empty:
     master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
     for _, r in orders_df.iterrows():
@@ -215,7 +213,6 @@ if not orders_df.empty and not master_df_unique.empty:
             pack_name = master_pack_info[prod].get("使用資材名", "")
             pack_usage = to_int(master_pack_info[prod].get("資材使用数", 0))
             if pack_name and pack_usage > 0 and pack_name in pack_summary:
-                # qtyが正(出荷)なら資材消費(プラス)、qtyが負(復帰)なら資材戻る(マイナス消費)
                 pack_summary[pack_name]["期間出庫消費"] += (qty * pack_usage)
 
 for d in pack_summary.values():
@@ -255,7 +252,6 @@ if page == "📋 受注登録":
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="選択してください", format_func=format_name)
         rem = sc2.text_input("📝 備考")
         
-        # イレギュラー時の資材非連動オプション
         col_chk1, col_chk2 = sc2.columns(2)
         is_substitute = col_chk1.checkbox("🔄 代替品として送付")
         is_irregular = col_chk2.checkbox("⚠️ イレギュラー(水漏れ等)")
@@ -338,7 +334,6 @@ elif page == "🏭 製造登録":
 elif page == "📦 資材・入出庫":
     st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #B45309 0%, #D97706 100%);"><h1>📦 資材・段ボール入出庫</h1></div>', unsafe_allow_html=True)
     
-    # ⚠️ 要発注アラート
     shortage_packs = [p_name for p_name, d in pack_summary.items() if d["現在庫"] < d["発注点"]]
     if shortage_packs:
         st.error(f"🚨 **要発注アラート（現在庫が発注点未満）:**\n\n" + "、".join(shortage_packs))
@@ -353,7 +348,6 @@ elif page == "📦 資材・入出庫":
         filtered_packs = [p for p in pack_mst_unique["資材名"].tolist() if search_pack in p] if search_pack else pack_mst_unique["資材名"].tolist()
         sel_pack = sc2.selectbox("📦 対象資材", options=filtered_packs, index=None, placeholder="選択してください")
         
-        # 直感的な入出庫・棚卸UI
         p_type = st.radio("処理区分", options=["📥 入庫 (在庫を増やす)", "📤 出庫・廃棄 (在庫を減らす)", "📋 棚卸 (現在の実在庫を入力)"], horizontal=True)
         
         if "棚卸" in p_type:
@@ -373,7 +367,6 @@ elif page == "📦 資材・入出庫":
                 log_qty = to_int(p_qty)
                 final_p_type = "入庫" if "入庫" in p_type else "出庫"
                 
-                # 棚卸の場合は差分を計算
                 if "棚卸" in p_type:
                     current_calc_stock = pack_summary[sel_pack]["現在庫"]
                     diff = log_qty - current_calc_stock
@@ -384,7 +377,7 @@ elif page == "📦 資材・入出庫":
                         final_p_type = "出庫"
                         log_qty = abs(diff)
                 
-                if log_qty > 0: # 差分が0の場合は登録しない
+                if log_qty > 0: 
                     new_pack = pd.DataFrame([{
                         "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(p_date),
                         "資材名": sel_pack, "処理区分": final_p_type, "数量": log_qty, "理由": p_reason, "備考": p_rem, "登録日時": datetime.now()
