@@ -86,14 +86,14 @@ def load_data_from_cloud(name):
             "manufactures": ["ID","製造予定日","備考","大カテゴリ","製品名","ケース数","登録日時"],
             "master": ["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"],
             "customers": ["顧客名","ふりがな"],
-            "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","発注点","初期在庫"], # CSV構造に統合
+            "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"],
             "packaging_logs": ["ID","登録日","資材名","処理区分","数量","理由","備考","登録日時"]
         }[name]
         
         if len(data) <= 1: return pd.DataFrame(columns=cols)
         df = pd.DataFrame(data[1:], columns=data[0])
         
-        # 【重要】列名の空白除去と重複排除（KeyError・Seriesエラーの物理的排除）
+        # 【最優先】列名の空白除去と重複排除（KeyError・Seriesエラーの物理的排除）
         df.columns = df.columns.str.strip().str.replace(' ', '').str.replace('　', '')
         df = df.loc[:, ~df.columns.duplicated()]
         
@@ -107,7 +107,7 @@ def load_data_from_cloud(name):
             if c in df.columns: df[c] = pd.to_datetime(df[c], errors='coerce')
         return df[cols]
     except Exception: 
-        return pd.DataFrame(columns={"orders":["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","備考","登録日時"],"manufactures":["ID","製造予定日","備考","大カテゴリ","製品名","ケース数","登録日時"],"master":["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"],"customers":["顧客名","ふりがな"],"packaging_master":["資材名","品番","規格","仕入先","保管場所","単位","発注点","初期在庫"],"packaging_logs":["ID","登録日","資材名","処理区分","数量","理由","備考","登録日時"]}[name])
+        return pd.DataFrame(columns={"orders":["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","備考","登録日時"],"manufactures":["ID","製造予定日","備考","大カテゴリ","製品名","ケース数","登録日時"],"master":["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"],"customers":["顧客名","ふりがな"],"packaging_master":["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"],"packaging_logs":["ID","登録日","資材名","処理区分","数量","理由","備考","登録日時"]}[name])
 
 def save_and_sync(name, df):
     try: ws = sheet.worksheet(name)
@@ -119,7 +119,7 @@ def save_and_sync(name, df):
         elif pd.api.types.is_numeric_dtype(df_save[col]): df_save[col] = df_save[col].fillna(0).apply(to_int).astype(str)
     df_save = df_save.fillna("").astype(str).replace(["nan", "None", "NaT"], "")
     ws.update(values=[df_save.columns.values.tolist()] + df_save.values.tolist(), range_name='A1')
-    st.cache_data.clear() # 即時キャッシュクリア
+    st.cache_data.clear() # 即時キャッシュクリア（複数人対応）
     st.session_state[f"{name}_df"] = load_data_from_cloud(name)
 
 def append_and_sync(name, new_row_df):
@@ -360,7 +360,7 @@ elif page == "📦 資材・入出庫":
             p_qty = st.number_input("現在の実在庫数 (正の数)", min_value=0, value=None)
             reason_options = ["棚卸調整"]
         else:
-            p_qty = st.number_input("処理する数量 (正の数で入力)", min_value=1, value=None)
+            p_qty = st.number_input("処理する数量 (常に正の数で入力)", min_value=1, value=None)
             reason_options = ["仕入（購入）", "返品受付", "その他入庫"] if "入庫" in p_type else ["破損・廃棄", "サンプル出荷", "その他出庫"]
             
         p_reason = st.selectbox("詳細な理由", options=reason_options)
