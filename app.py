@@ -153,7 +153,7 @@ def format_name(name):
 # ★ 共通在庫計算エンジン（リアルタイム＆未来予測）
 # ─────────────────────────────────────────────
 today = pd.Timestamp.today().normalize()
-dates = pd.date_range(today, today + timedelta(days=30))
+dates = pd.date_range(today, today + timedelta(days=60)) # 予測期間を60日に延長
 current_stocks = {}
 future_stocks = {} # {製品名: {日付: 在庫数}}
 
@@ -227,12 +227,10 @@ if page == "📋 受注登録":
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="選択してください", format_func=format_name)
         rem = sc2.text_input("📝 備考")
         
-        # 【代替品チェックボックス】
         is_substitute = sc2.checkbox("🔄 代替品として送付", help="チェックすると備考欄に自動で【代替品】と付与されます")
         
         st.write("---")
 
-        # 【リアルタイム在庫不足アラート】
         if prod and qty:
             cur_stock = current_stocks.get(prod, 0)
             if cur_stock < qty:
@@ -264,15 +262,6 @@ if page == "📋 受注登録":
             msg_slot.success(st.session_state.success_msg)
             st.session_state.success_msg = None
 
-    st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近3件）</h2>', unsafe_allow_html=True)
-    if not st.session_state.orders_df.empty:
-        recent = st.session_state.orders_df.sort_values("登録日時", ascending=False).head(3).copy()
-        recent["納品予定日"] = recent["納品予定日"].dt.date
-        edited = st.data_editor(recent, use_container_width=True, hide_index=True, column_config={"納品予定日": st.column_config.DateColumn(format="YYYY-MM-DD"), "登録日時": None}, key="edit_o")
-        if st.button("💾 修正保存"):
-            others = st.session_state.orders_df[~st.session_state.orders_df["ID"].isin(recent["ID"])]
-            save_and_sync("orders", pd.concat([others, edited], ignore_index=True)); st.rerun()
-
 # --- 🏭 製造登録 ---
 elif page == "🏭 製造登録":
     st.markdown('<div class="slim-header header-manu"><h1>🏭 製造データ登録</h1></div>', unsafe_allow_html=True)
@@ -303,15 +292,6 @@ elif page == "🏭 製造登録":
             m_msg_slot.success(st.session_state.success_msg)
             st.session_state.success_msg = None
 
-    st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近3件）</h2>', unsafe_allow_html=True)
-    if not st.session_state.manus_df.empty:
-        recent_m = st.session_state.manus_df.sort_values("登録日時", ascending=False).head(3).copy()
-        recent_m["製造予定日"] = recent_m["製造予定日"].dt.date
-        edited_m = st.data_editor(recent_m, use_container_width=True, hide_index=True, column_config={"製造予定日": st.column_config.DateColumn(format="YYYY-MM-DD"), "登録日時": None}, key="edit_m")
-        if st.button("💾 修正を保存", key="smb"):
-            others_m = st.session_state.manus_df[~st.session_state.manus_df["ID"].isin(recent_m["ID"])]
-            save_and_sync("manufactures", pd.concat([others_m, edited_m], ignore_index=True)); st.rerun()
-
 # --- 📑 登録一覧・編集 ---
 elif page == "📑 登録一覧・編集":
     st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #0F766E 0%, #14B8A6 100%);"><h1>📑 登録一覧・データ編集</h1></div>', unsafe_allow_html=True)
@@ -324,18 +304,31 @@ elif page == "📑 登録一覧・編集":
         cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日", "製品名", "ケース数", "備考"]
         edit_df = edit_df[[c for c in cols if c in edit_df.columns]]
         
-        # 【修正】確実なハイライト適用ロジック
+        # 【追加機能】 動的な在庫状況（過不足）列の算出
+        def get_stock_status(row):
+            try:
+                d = pd.Timestamp(row["納品予定日"]).normalize()
+                p = row["製品名"]
+                # 未来の日付なら予測在庫、過去なら現在庫を参照
+                if d >= today and p in future_stocks and d in future_stocks[p]:
+                    stock = future_stocks[p][d]
+                else:
+                    stock = current_stocks.get(p, 0)
+                
+                if stock < 0: return f"在庫不足 ({stock})"
+                else: return f"OK (+{stock})"
+            except: return "不明"
+
+        edit_df.insert(7, "在庫状況", edit_df.apply(get_stock_status, axis=1))
+
+        # 【追加機能】 在庫不足行の赤背景ハイライト
         def highlight_shortage_row(row):
             color = ''
-            try:
-                req_qty = int(row["ケース数"])
-                cur_stock = current_stocks.get(row["製品名"], 0)
-                if req_qty > cur_stock:
-                    color = 'background-color: #FEE2E2; color: #DC2626; font-weight: bold;'
-            except: pass
+            if "不足" in str(row.get("在庫状況", "")):
+                color = 'background-color: #FEE2E2; color: #DC2626; font-weight: bold;'
             return [color] * len(row)
 
-        st.markdown("※数量が現在庫を上回る（出荷不可・欠品）行は<span style='color:#DC2626;font-weight:bold;'>赤色</span>で強調表示されます。", unsafe_allow_html=True)
+        st.markdown("※出荷時点で在庫がマイナス（欠品）となる行は<span style='color:#DC2626;font-weight:bold;'>赤色</span>で強調表示されます。在庫状況列で過不足数を確認できます。", unsafe_allow_html=True)
         
         edited = st.data_editor(
             edit_df.style.apply(highlight_shortage_row, axis=1),
@@ -347,13 +340,16 @@ elif page == "📑 登録一覧・編集":
                 "登録日時": None,
                 "大カテゴリ": None,
                 "納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD"),
-                "ケース数": st.column_config.NumberColumn("ケース数", min_value=1)
+                "ケース数": st.column_config.NumberColumn("ケース数", min_value=1),
+                "在庫状況": st.column_config.TextColumn("在庫状況 (出庫後)", disabled=True) # 編集不可
             },
             key="edit_all_orders"
         )
         
         if st.button("💾 修正を保存", type="primary", use_container_width=True):
-            save_and_sync("orders", edited)
+            # 保存時は計算用に追加した「在庫状況」列を削除してスプレッドシートに書き戻す
+            save_df = edited.drop(columns=["在庫状況"], errors='ignore')
+            save_and_sync("orders", save_df)
             st.success("✅ 全データを更新しました！")
             st.rerun()
 
@@ -366,11 +362,12 @@ elif page == "📦 在庫・スケジュール":
         if master_df.empty: st.info("製品マスタが空です。")
         else:
             inv_list = []
+            show_dates = pd.date_range(today, today + timedelta(days=30))
             for _, r in master_df.iterrows():
                 p = r["製品名"]
                 curr_stock = current_stocks.get(p, 0)
                 row = {"カテゴリ": r["大カテゴリ"], "製品名": format_name(p), "現在庫": curr_stock}
-                for d in dates:
+                for d in show_dates:
                     row[d.strftime("%m/%d")] = future_stocks.get(p, {}).get(d, curr_stock)
                 inv_list.append(row)
                 
@@ -385,11 +382,30 @@ elif page == "📦 在庫・スケジュール":
             o_txt = "\n".join([f"出: {r['顧客名']} : {r['製品名']} ({r['ケース数']}cs)" for _, r in orders_df[orders_df["納品予定日"]==d].iterrows()]) if not orders_df.empty else ""
             cal_data.append({"日付": d.strftime("%m/%d"), "製造": m_txt, "出荷": o_txt})
         st.download_button("🖨️ カレンダーExcel出力", data=pd.DataFrame(cal_data).to_csv(index=False, encoding="utf-8-sig"), file_name=f"予定_{today.strftime('%Y%m%d')}.csv", type="primary", use_container_width=True)
+        
         html = '<table class="sched-table"><tr><th style="width:100px;">日付</th><th style="width:45%;">製造</th><th style="width:45%;">出荷</th></tr>'
         for i in range(7):
             d = today + timedelta(days=i)
+            
+            # 製造セル
             m_h = "".join([f'<div style="background:#F0FFF4; border-left:4px solid #10B981; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{format_name(r["製品名"])}</span> <span style="float:right; font-weight:900; color:#059669;">{int(r["ケース数"])}cs</span></div>' for _,r in manus_df[manus_df["製造予定日"]==d].iterrows()]) if not manus_df.empty else ""
-            o_h = "".join([f'<div style="background:#F0F7FF; border-left:4px solid #2563EB; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{r["顧客名"]}: {format_name(r["製品名"])}</span> <span style="float:right; font-weight:900; color:#1D4ED8;">{int(r["ケース数"])}cs</span></div>' for _,r in orders_df[orders_df["納品予定日"]==d].iterrows()]) if not orders_df.empty else ""
+            
+            # 出荷セル（在庫不足の赤字ハイライト対応）
+            o_h = ""
+            for _, r in orders_df[orders_df["納品予定日"] == d].iterrows():
+                p = r["製品名"]
+                qty = int(r["ケース数"])
+                stock_on_day = future_stocks.get(p, {}).get(d, 0)
+                
+                if stock_on_day < 0:
+                    qty_html = f'<span style="color:#DC2626;">{qty}cs (不足)</span>'
+                    bg_color, border_color = "#FEE2E2", "#DC2626"
+                else:
+                    qty_html = f'<span style="color:#1D4ED8;">{qty}cs</span>'
+                    bg_color, border_color = "#F0F7FF", "#2563EB"
+                    
+                o_h += f'<div style="background:{bg_color}; border-left:4px solid {border_color}; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{r["顧客名"]}: {format_name(p)}</span> <span style="float:right; font-weight:900;">{qty_html}</span></div>'
+                
             html += f'<tr><td><b>{d.strftime("%m/%d")}</b><br>{["月","火","水","木","金","土","日"][d.dayofweek]}曜</td><td>{m_h}</td><td>{o_h}</td></tr>'
         st.markdown(html + '</table>', unsafe_allow_html=True)
 
@@ -398,7 +414,6 @@ elif page == "📦 在庫・スケジュール":
         if master_df.empty:
             st.info("製品が登録されていません。")
         else:
-            # 【UI改善】 製品選択をカテゴリピルズ＋検索に
             cat_full_det = st.pills("カテゴリ詳細", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed", key="pills_det")
             cat_det = cat_full_det.split(" ", 1)[1] if cat_full_det else CATEGORIES[0].split(" ", 1)[1]
             sc1_det, sc2_det = st.columns([1.5, 2.5])
@@ -413,7 +428,8 @@ elif page == "📦 在庫・スケジュール":
                 
                 detail_list = []
                 temp_stock = prod_cur_stock
-                for d in dates:
+                show_dates = pd.date_range(today, today + timedelta(days=30))
+                for d in show_dates:
                     day_o = p_o_ev[p_o_ev["納品予定日"].dt.date == d.date()]
                     out_qty = day_o["ケース数"].sum() if not day_o.empty else 0
                     out_detail = " / ".join([f"{r['顧客名']}({r['ケース数']}cs)" for _, r in day_o.iterrows()]) if not day_o.empty else "-"
@@ -433,7 +449,6 @@ elif page == "📦 在庫・スケジュール":
                 st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(df_detail.style.map(lambda x: 'color: #DC2626; font-weight: bold; background-color: #FEE2E2;' if isinstance(x, int) and x < 0 else '', subset=["予定在庫"]), use_container_width=True, hide_index=True)
 
-    # 【新規】 顧客別 発送スケジュール
     with t4:
         st.markdown('### 👤 顧客別 今後の発送スケジュール')
         cust_list_sch = sorted(orders_df[orders_df["顧客名"].str.strip() != ""]["顧客名"].unique().tolist()) if not orders_df.empty else []
@@ -449,12 +464,11 @@ elif page == "📦 在庫・スケジュール":
             else:
                 cust_orders = cust_orders.sort_values("納品予定日")
                 
-                # 欠品予測の判定 (共通在庫エンジンを活用)
                 def check_shortage(row):
                     d = pd.Timestamp(row["納品予定日"]).normalize()
                     p = row["製品名"]
                     if d in dates and p in future_stocks:
-                        if future_stocks[p][d] < 0: return "❌ 欠品注意"
+                        if future_stocks[p][d] < 0: return f"❌ 欠品注意 ({future_stocks[p][d]})"
                     return "✅ OK"
 
                 cust_orders["在庫状況"] = cust_orders.apply(check_shortage, axis=1)
@@ -479,10 +493,10 @@ elif page == "📊 統計・分析":
         if not cust_abc.empty:
             st.plotly_chart(px.bar(cust_abc, x="ケース数", y="顧客名", orientation='h', title="主要顧客TOP15"), use_container_width=True)
 
-# 【新規】 ⚙️ マスタ管理
+# --- ⚙️ マスタ管理 ---
 elif page == "⚙️ マスタ管理":
     st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #475569 0%, #1E293B 100%);"><h1>⚙️ マスタ・顧客データ管理</h1></div>', unsafe_allow_html=True)
-    st.info("💡 ここでデータを追加・修正すると、アプリ全体の設定（ドロップダウン等）に即座に反映されます。行の下の「＋」ボタンで新規追加が可能です。")
+    st.info("💡 ここでデータを追加・修正すると、アプリ全体の設定（ドロップダウン等）に即座に反映されます。表の下にある「＋」を押して行を追加できます。")
     
     tab_m1, tab_m2 = st.tabs(["📦 製品マスタ", "🏢 顧客マスタ"])
     
@@ -496,7 +510,7 @@ elif page == "⚙️ マスタ管理":
             column_config={
                 "大カテゴリ": st.column_config.SelectboxColumn("大カテゴリ", options=[c.split(" ", 1)[1] for c in CATEGORIES], required=True),
                 "製品名": st.column_config.TextColumn("製品名", required=True),
-                "初期在庫数": st.column_config.NumberColumn("初期在庫数 (システム導入時点)", min_value=-9999, default=0, required=True)
+                "初期在庫数": st.column_config.NumberColumn("初期在庫数", min_value=-9999, default=0, required=True)
             },
             key="edit_master"
         )
