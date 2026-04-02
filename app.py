@@ -92,7 +92,7 @@ def load_data_from_cloud(name):
         df = pd.DataFrame(data[1:], columns=data[0])
         for c in cols:
             if c not in df.columns: df[c] = ""
-        # 厳密な型変換（エラー回避）
+        # 厳密な型変換
         if "ケース数" in df.columns: df["ケース数"] = pd.to_numeric(df["ケース数"], errors='coerce').fillna(0).astype(int)
         if "初期在庫数" in df.columns: df["初期在庫数"] = pd.to_numeric(df["初期在庫数"], errors='coerce').fillna(0).astype(int)
         for c in ["納品予定日", "製造予定日", "登録日時"]:
@@ -159,13 +159,13 @@ current_stocks = {}
 future_stocks = {}
 
 if not master_df.empty:
-    # 出荷（orders）: qtyをマイナス化（もしマイナス入力があれば -(-) でプラスになり在庫復帰ロジック完成）
+    # 出荷(orders)は「在庫を減らす」ためマイナス反転。もしマイナス入力があれば -(-10) = +10 となり在庫が増える（リパックロジック）
     o_ev = orders_df[["納品予定日", "製品名", "ケース数"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日", "製品名", "ケース数"])
     if not o_ev.empty:
         o_ev = o_ev.rename(columns={"納品予定日":"日付", "ケース数":"qty"})
         o_ev["qty"] = -pd.to_numeric(o_ev["qty"], errors='coerce').fillna(0).astype(int)
     
-    # 製造（manus）: qtyはそのままプラス
+    # 製造(manus)は「在庫を増やす」ためそのままプラス
     m_ev = manus_df[["製造予定日", "製品名", "ケース数"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日", "製品名", "ケース数"])
     if not m_ev.empty:
         m_ev = m_ev.rename(columns={"製造予定日":"日付", "ケース数":"qty"})
@@ -220,7 +220,7 @@ if page == "📋 受注登録":
         o_date = c1.date_input("📅 納品日", value=date.today() + timedelta(days=1))
         cust_list = sorted(cust_df[cust_df["顧客名"].str.strip() != ""]["顧客名"].unique().tolist()) if not cust_df.empty else []
         c_name = c2.selectbox("🏢 顧客名", options=cust_list, index=None, placeholder="検索...")
-        qty = c3.number_input("📦 ケース数", min_value=1, value=None, placeholder="数字...")
+        qty = c3.number_input("📦 ケース数", min_value=-9999, value=None, placeholder="数字...") # マイナス入力も一応可能に
         cat_full = st.pills("カテゴリ", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed")
         cat = cat_full.split(" ", 1)[1] if cat_full else CATEGORIES[0].split(" ", 1)[1]
         
@@ -230,14 +230,13 @@ if page == "📋 受注登録":
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="選択してください", format_func=format_name)
         rem = sc2.text_input("📝 備考")
         
-        # 【追加】代替品 ＆ イレギュラーチェックボックス
         col_chk1, col_chk2 = sc2.columns(2)
         is_substitute = col_chk1.checkbox("🔄 代替品として送付")
         is_irregular = col_chk2.checkbox("⚠️ イレギュラー(水漏れ等)")
         
         st.write("---")
 
-        if prod and qty:
+        if prod and qty is not None:
             cur_stock = current_stocks.get(prod, 0)
             if cur_stock < qty:
                 st.warning(f"⚠️ 在庫が不足します（現在庫: **{cur_stock}** cs / 不足: **{qty - cur_stock}** cs）", icon="🚨")
@@ -246,10 +245,9 @@ if page == "📋 受注登録":
         msg_slot = st.empty()
 
         if submit_btn:
-            if not prod or not qty: 
+            if not prod or qty is None: 
                 msg_slot.error("⚠️ 【製品・ケース数】は必須です。")
             else:
-                # 備考欄の自動付与ロジック
                 prefix = ""
                 if is_substitute: prefix += "【代替品】"
                 if is_irregular: prefix += "【イレギュラー】"
@@ -272,6 +270,21 @@ if page == "📋 受注登録":
         if st.session_state.success_msg:
             msg_slot.success(st.session_state.success_msg)
             st.session_state.success_msg = None
+
+    # 【復活・拡張】かんたん修正（直近5件）
+    st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近5件）</h2>', unsafe_allow_html=True)
+    if not st.session_state.orders_df.empty:
+        recent = st.session_state.orders_df.sort_values("登録日時", ascending=False).head(5).copy()
+        recent["納品予定日"] = recent["納品予定日"].dt.date
+        edited = st.data_editor(recent, use_container_width=True, hide_index=True, column_config={
+            "納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD"), 
+            "ケース数": st.column_config.NumberColumn("ケース数"),
+            "登録日時": None
+        }, key="edit_o")
+        if st.button("💾 修正保存", key="btn_edit_o"):
+            others = st.session_state.orders_df[~st.session_state.orders_df["ID"].isin(recent["ID"])]
+            save_and_sync("orders", pd.concat([others, edited], ignore_index=True))
+            st.rerun()
 
 # --- 🏭 製造登録 ---
 elif page == "🏭 製造登録":
@@ -303,6 +316,21 @@ elif page == "🏭 製造登録":
             m_msg_slot.success(st.session_state.success_msg)
             st.session_state.success_msg = None
 
+    # 【復活・拡張】かんたん修正（直近5件）
+    st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近5件）</h2>', unsafe_allow_html=True)
+    if not st.session_state.manus_df.empty:
+        recent_m = st.session_state.manus_df.sort_values("登録日時", ascending=False).head(5).copy()
+        recent_m["製造予定日"] = recent_m["製造予定日"].dt.date
+        edited_m = st.data_editor(recent_m, use_container_width=True, hide_index=True, column_config={
+            "製造予定日": st.column_config.DateColumn("製造日", format="YYYY-MM-DD"), 
+            "ケース数": st.column_config.NumberColumn("ケース数"),
+            "登録日時": None
+        }, key="edit_m")
+        if st.button("💾 修正を保存", key="smb"):
+            others_m = st.session_state.manus_df[~st.session_state.manus_df["ID"].isin(recent_m["ID"])]
+            save_and_sync("manufactures", pd.concat([others_m, edited_m], ignore_index=True))
+            st.rerun()
+
 # --- 📑 登録一覧・編集 ---
 elif page == "📑 登録一覧・編集":
     st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #0F766E 0%, #14B8A6 100%);"><h1>📑 登録一覧・データ編集</h1></div>', unsafe_allow_html=True)
@@ -315,7 +343,6 @@ elif page == "📑 登録一覧・編集":
         cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日", "製品名", "ケース数", "備考"]
         edit_df = edit_df[[c for c in cols if c in edit_df.columns]]
         
-        # 動的な在庫状況（過不足）の算出
         def get_stock_status(row):
             try:
                 d = pd.Timestamp(row["納品予定日"]).normalize()
@@ -331,18 +358,18 @@ elif page == "📑 登録一覧・編集":
 
         edit_df.insert(7, "在庫状況", edit_df.apply(get_stock_status, axis=1))
 
-        # 【追加】 イレギュラー品＆在庫不足の複合ハイライト
+        # 【ハイライト】イレギュラー品（黄）と欠品（赤）の判定
         def highlight_row(row):
             color_style = ''
             is_irregular = "【イレギュラー】" in str(row.get("備考", ""))
             is_shortage = "不足" in str(row.get("在庫状況", ""))
             
             if is_shortage and is_irregular:
-                color_style = 'background-color: #FEF08A; color: #DC2626; font-weight: bold;' # 背景黄、文字赤
+                color_style = 'background-color: #FEF08A; color: #DC2626; font-weight: bold;'
             elif is_shortage:
-                color_style = 'background-color: #FEE2E2; color: #DC2626; font-weight: bold;' # 背景薄赤、文字赤
+                color_style = 'background-color: #FEE2E2; color: #DC2626; font-weight: bold;'
             elif is_irregular:
-                color_style = 'background-color: #FEF08A; color: #854D0E; font-weight: bold;' # 背景黄、文字茶色
+                color_style = 'background-color: #FEF08A; color: #854D0E; font-weight: bold;'
             return [color_style] * len(row)
 
         st.markdown("""
@@ -350,7 +377,7 @@ elif page == "📑 登録一覧・編集":
             <b>🎨 色の見方：</b> 
             <span style="background-color:#FEE2E2; color:#DC2626; padding:2px 6px; border-radius:4px;">在庫不足（赤字）</span> / 
             <span style="background-color:#FEF08A; color:#854D0E; padding:2px 6px; border-radius:4px;">イレギュラー対応（黄色）</span><br>
-            <b>🔄 リパック対応：</b> イレギュラー品を在庫に戻す場合、「ケース数」に<b>マイナスの数値（例：-10）</b>を入力して保存すると、在庫がプラスに復帰します。
+            <b>🔄 リパック対応：</b> イレギュラー品を在庫に戻す場合、「ケース数」に<b>マイナスの数値（例：-10）</b>を入力して保存すると、自動で在庫がプラスに復帰します。
         </div>
         """, unsafe_allow_html=True)
         
@@ -364,7 +391,7 @@ elif page == "📑 登録一覧・編集":
                 "登録日時": None,
                 "大カテゴリ": None,
                 "納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD", required=True),
-                # min_valueの制限を外し、マイナス入力（在庫復帰）を可能にする
+                # マイナス入力を許可
                 "ケース数": st.column_config.NumberColumn("ケース数", required=True), 
                 "在庫状況": st.column_config.TextColumn("在庫状況 (出庫後)", disabled=True)
             },
@@ -413,7 +440,7 @@ elif page == "📦 在庫・スケジュール":
             
             m_h = "".join([f'<div style="background:#F0FFF4; border-left:4px solid #10B981; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{format_name(r["製品名"])}</span> <span style="float:right; font-weight:900; color:#059669;">{int(r["ケース数"])}cs</span></div>' for _,r in manus_df[manus_df["製造予定日"]==d].iterrows()]) if not manus_df.empty else ""
             
-            # 【追加】 カレンダーでの在庫不足時の赤太字表示
+            # 【欠品赤字警告】
             o_h = ""
             for _, r in orders_df[orders_df["納品予定日"] == d].iterrows():
                 p = r["製品名"]
@@ -486,7 +513,6 @@ elif page == "📦 在庫・スケジュール":
                 st.info("今後の納品予定はありません。")
             else:
                 cust_orders = cust_orders.sort_values("納品予定日")
-                
                 def check_shortage(row):
                     d = pd.Timestamp(row["納品予定日"]).normalize()
                     p = row["製品名"]
