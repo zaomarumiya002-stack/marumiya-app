@@ -201,7 +201,7 @@ if not master_df_unique.empty:
         p_future_cumsum = p_future_row.reindex(dates, fill_value=0).fillna(0).cumsum()
         future_stocks[p] = {d: curr_stock + to_int(p_future_cumsum.get(d, 0)) for d in dates}
 
-# --- 資材推移サマリ（★製造連動へ移行完了） ---
+# --- 資材推移サマリ（製造連動） ---
 pack_summary = {}
 pack_mst_unique = pack_mst_df.drop_duplicates(subset=["資材名"]) if not pack_mst_df.empty else pd.DataFrame(columns=["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"])
 
@@ -222,7 +222,7 @@ if not pack_log_df.empty:
             if "入庫" in p_type: pack_summary[p_name]["期間入庫累計"] += qty
             elif "出庫" in p_type: pack_summary[p_name]["期間出庫消費"] += qty
 
-# ★製造時（manufactures）の自動資材消費計算
+# 製造時（manufactures）の自動資材消費計算
 if not manus_df.empty and not master_df_unique.empty:
     master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
     for _, r in manus_df.iterrows():
@@ -273,12 +273,19 @@ if page == "📋 受注登録":
         col_chk1, col_chk2 = sc2.columns(2)
         is_substitute = col_chk1.checkbox("🔄 代替品として送付")
         is_irregular = col_chk2.checkbox("⚠️ イレギュラー(水漏れ等)")
+        
         st.write("---")
 
+        # ★ 受注登録時の在庫不足アラート（不足分を赤字で強調）
         if prod and qty is not None and qty > 0:
             cur_stock = current_stocks.get(prod, 0)
             if cur_stock < qty:
-                st.markdown(f"<div style='background-color:#FEE2E2; padding:12px; border-radius:8px; color:#DC2626; font-size:16px;'>🚨 <b>製品在庫が不足します！</b> （現在庫: <b>{cur_stock}</b> cs / <span style='font-size:1.1em; font-weight:900;'>不足分: {cur_stock - qty} cs</span>）</div>", unsafe_allow_html=True)
+                shortage = qty - cur_stock
+                st.markdown(f"""
+                <div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
+                    🚨 <b>製品在庫が不足します！</b> （現在庫: <b>{cur_stock}</b> cs / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: {shortage} cs</span>）
+                </div>
+                """, unsafe_allow_html=True)
                 st.write("")
 
         if st.button("✅ 受注（出庫・復帰）を登録する", type="primary", use_container_width=True):
@@ -312,7 +319,6 @@ if page == "📋 受注登録":
             save_and_sync("orders", edited_all)
             st.toast("全データの更新・削除を完了しました", icon="✅"); st.rerun()
 
-
 # --- 🏭 製造登録 ---
 elif page == "🏭 製造登録":
     st.markdown('<div class="slim-header header-manu"><h1>🏭 製造データ登録 (資材自動連動)</h1></div>', unsafe_allow_html=True)
@@ -330,7 +336,7 @@ elif page == "🏭 製造登録":
         is_pack_link = st.checkbox("📦 製造と同時に、紐づく段ボール(資材)の在庫も減らす", value=True)
         st.write("---")
 
-        # ★製造登録時の資材不足アラート（赤太字）
+        # ★ 製造登録時の資材不足アラート（不足分を赤字で強調）
         if prod_m and m_qty is not None and m_qty > 0:
             master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
             if prod_m in master_pack_info:
@@ -340,7 +346,12 @@ elif page == "🏭 製造登録":
                     req_pack_qty = m_qty * p_usage
                     cur_pack_stock = pack_summary.get(p_name, {}).get("現在庫", 0)
                     if cur_pack_stock < req_pack_qty:
-                        st.markdown(f"<div style='background-color:#FEE2E2; padding:12px; border-radius:8px; color:#DC2626; font-size:16px;'>🚨 <b>資材({p_name})が不足します！</b> （現在庫: <b>{cur_pack_stock}</b> / <span style='font-size:1.1em; font-weight:900;'>不足分: {cur_pack_stock - req_pack_qty}</span>）</div>", unsafe_allow_html=True)
+                        shortage_pack = req_pack_qty - cur_pack_stock
+                        st.markdown(f"""
+                        <div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
+                            🚨 <b>資材({p_name})が不足します！</b> （現在庫: <b>{cur_pack_stock}</b> / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: {shortage_pack}</span>）
+                        </div>
+                        """, unsafe_allow_html=True)
                         st.write("")
 
         if st.button("➕ 製造を記録する", type="primary", use_container_width=True):
@@ -436,7 +447,7 @@ elif page == "📦 資材・入出庫":
                 pivot_analysis = df_analysis.pivot_table(index="製品名", columns="資材名", values="使用総数", aggfunc="sum", fill_value=0)
                 st.write("▼ 製品別・資材別の製造時消費実績 (自動計算)")
                 st.dataframe(pivot_analysis, use_container_width=True)
-            else: st.info("指定期間内の資材使用実績はありません。")
+            else: st.info("指定期間内の製造連動の実績はありません。")
 
         if not pack_log_df.empty:
             mask_log = (pack_log_df["登録日"].dt.date >= start_d) & (pack_log_df["登録日"].dt.date <= end_d)
@@ -484,7 +495,7 @@ elif page == "📦 資材・入出庫":
                         "関連製品名": "", "理論在庫": "", "備考": p_rem, "登録日時": datetime.now()
                     }])
                     append_and_sync("packaging_logs", new_pack)
-                    st.toast(f"資材ログを登録しました: {sel_pack} ({final_p_type})", icon="✅")
+                    st.toast(f"資材ログを登録しました: {sel_pack} ({final_p_type} {log_qty})", icon="✅")
                     st.rerun()
                 else: st.info("現在の計算在庫と一致しているため、調整は不要です。")
 
@@ -509,50 +520,56 @@ elif page == "📦 資材・入出庫":
                 save_and_sync("packaging_logs", edited_all_p)
                 st.toast("全データの更新・削除を完了しました", icon="✅"); st.rerun()
 
-
 # --- 📑 登録一覧 ---
 elif page == "📑 登録一覧":
     st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #0F766E 0%, #14B8A6 100%);"><h1>📑 登録データ一覧・出力</h1></div>', unsafe_allow_html=True)
+    t_list1, t_list2 = st.tabs(["📋 受注・出荷データ", "📦 資材利用ログ"])
     
-    if orders_df.empty: st.info("登録データがありません。")
-    else:
-        edit_df = orders_df.sort_values("登録日時", ascending=False).copy()
-        
-        # 曜日付きの表示用カラムを作成
-        edit_df["納品予定日(表示)"] = edit_df["納品予定日"].apply(format_date_jp)
-        cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日(表示)", "製品名", "ケース数", "備考"]
-        edit_df = edit_df[[c for c in cols if c in edit_df.columns]]
-        
-        def get_stock_status(row):
-            try:
-                # 文字列から日付に戻して計算
-                d_str = row["納品予定日(表示)"].split(" ")[0]
-                d, p, qty = pd.Timestamp(d_str).normalize(), row["製品名"], to_int(row.get("ケース数", 0))
-                stock = future_stocks[p][d] if d >= today and p in future_stocks and d in future_stocks[p] else current_stocks.get(p, 0)
-                if qty < 0: return f"⤴️ 復帰 (+{-qty})"
-                elif stock < 0: return f"在庫不足 ({stock})"
-                else: return f"OK (+{stock})"
-            except: return "不明"
+    with t_list1:
+        if orders_df.empty: st.info("登録データがありません。")
+        else:
+            edit_df = orders_df.sort_values("登録日時", ascending=False).copy()
+            edit_df["納品予定日(表示)"] = edit_df["納品予定日"].apply(format_date_jp)
+            cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日(表示)", "製品名", "ケース数", "備考"]
+            edit_df = edit_df[[c for c in cols if c in edit_df.columns]]
+            
+            def get_stock_status(row):
+                try:
+                    d_str = row["納品予定日(表示)"].split(" ")[0]
+                    d, p, qty = pd.Timestamp(d_str).normalize(), row["製品名"], to_int(row.get("ケース数", 0))
+                    stock = future_stocks[p][d] if d >= today and p in future_stocks and d in future_stocks[p] else current_stocks.get(p, 0)
+                    if qty < 0: return f"⤴️ 復帰 (+{-qty})"
+                    elif stock < 0: return f"在庫不足 ({stock})"
+                    else: return f"OK (+{stock})"
+                except: return "不明"
 
-        edit_df.insert(7, "在庫状況", edit_df.apply(get_stock_status, axis=1))
+            edit_df.insert(7, "在庫状況", edit_df.apply(get_stock_status, axis=1))
 
-        def highlight_row(row):
-            is_return = to_int(row.get("ケース数", 0)) < 0
-            is_irregular = "【イレギュラー】" in str(row.get("備考", ""))
-            is_shortage = "不足" in str(row.get("在庫状況", ""))
-            if is_return: return ['background-color: #DBEAFE; color: #1E3A8A; font-weight: bold;'] * len(row)
-            if is_shortage and is_irregular: return ['background-color: #FEF08A; color: #DC2626; font-weight: bold;'] * len(row)
-            if is_shortage: return ['background-color: #FEE2E2; color: #DC2626; font-weight: bold;'] * len(row)
-            if is_irregular: return ['background-color: #FEF08A; color: #854D0E; font-weight: bold;'] * len(row)
-            return [''] * len(row)
+            def highlight_row(row):
+                is_return = to_int(row.get("ケース数", 0)) < 0
+                is_irregular = "【イレギュラー】" in str(row.get("備考", ""))
+                is_shortage = "不足" in str(row.get("在庫状況", ""))
+                if is_return: return ['background-color: #DBEAFE; color: #1E3A8A; font-weight: bold;'] * len(row)
+                if is_shortage and is_irregular: return ['background-color: #FEF08A; color: #DC2626; font-weight: bold;'] * len(row)
+                if is_shortage: return ['background-color: #FEE2E2; color: #DC2626; font-weight: bold;'] * len(row)
+                if is_irregular: return ['background-color: #FEF08A; color: #854D0E; font-weight: bold;'] * len(row)
+                return [''] * len(row)
 
-        st.download_button("📥 受注データをCSV出力", data=edit_df.to_csv(index=False, encoding="utf-8-sig"), file_name=f"受注一覧_{date.today()}.csv", use_container_width=True)
-        st.markdown("""<div style="font-size:14px; margin-bottom:10px;">
-            <b>🎨 色：</b> <span style="background-color:#FEE2E2; color:#DC2626; padding:2px 6px;">在庫不足（赤字）</span> / <span style="background-color:#FEF08A; color:#854D0E; padding:2px 6px;">イレギュラー対応（黄色）</span> / <span style="background-color:#DBEAFE; color:#1E3A8A; padding:2px 6px;">⤴️ 在庫復帰（青色）</span>
-        </div>""", unsafe_allow_html=True)
-        
-        # 編集ではなく一覧（閲覧のみ）の用途として割り切る
-        st.dataframe(edit_df.style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True, height=600)
+            st.download_button("📥 受注データをCSV出力", data=edit_df.to_csv(index=False, encoding="utf-8-sig"), file_name=f"受注一覧_{date.today()}.csv", use_container_width=True)
+            st.markdown("""<div style="font-size:14px; margin-bottom:10px;">
+                <b>🎨 色：</b> <span style="background-color:#FEE2E2; color:#DC2626; padding:2px 6px;">在庫不足（赤字）</span> / <span style="background-color:#FEF08A; color:#854D0E; padding:2px 6px;">イレギュラー対応（黄色）</span> / <span style="background-color:#DBEAFE; color:#1E3A8A; padding:2px 6px;">⤴️ 在庫復帰（青色）</span>
+            </div>""", unsafe_allow_html=True)
+            
+            st.dataframe(edit_df.style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True, height=600)
+
+    with t_list2:
+        if pack_log_df.empty: st.info("資材ログがありません。")
+        else:
+            e_pack = pack_log_df.sort_values("登録日時", ascending=False).copy()
+            e_pack["登録日(表示)"] = e_pack["登録日"].apply(format_date_jp)
+            
+            st.download_button("📥 資材ログをCSV出力", data=e_pack.to_csv(index=False, encoding="utf-8-sig"), file_name=f"資材ログ_{date.today()}.csv", use_container_width=True)
+            st.dataframe(e_pack[["ID", "登録日(表示)", "資材名", "処理区分", "数量", "理由", "関連製品名", "備考"]], use_container_width=True, hide_index=True, height=600)
 
 # --- 📊 在庫・スケジュール ---
 elif page == "📊 在庫・スケジュール":
