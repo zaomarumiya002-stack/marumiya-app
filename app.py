@@ -28,9 +28,10 @@ def to_int(v):
 
 def format_date_jp(d):
     """ 日付に曜日を追加してフォーマットする関数 (例: 2026/04/06 (月)) """
-    if pd.isna(d): return ""
+    if pd.isna(d) or d == "": return ""
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
     try:
+        if isinstance(d, str): d = pd.to_datetime(d)
         return f"{d.strftime('%Y/%m/%d')} ({weekdays[d.weekday()]})"
     except: return str(d)
 
@@ -56,6 +57,8 @@ st.markdown("""
     .sched-table { width: 100%; border-collapse: collapse; background: white; font-size: 15px; border-radius: 10px; overflow: hidden; }
     .sched-table th { background: #F8FAFC; padding: 10px; border-bottom: 2px solid #E2E8F0; }
     .sched-table td { padding: 10px; border-bottom: 1px solid #F1F5F9; vertical-align: top; }
+    /* 中央通知用 */
+    .center-msg { padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; margin-bottom: 15px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,7 +79,7 @@ def check_password():
 check_password()
 
 # ─────────────────────────────────────────────
-# 3. GSpread 同期ロジック (KeyError・列名正規化対応)
+# 3. GSpread 同期ロジック & 自動シート・列作成
 # ─────────────────────────────────────────────
 @st.cache_resource
 def get_client():
@@ -87,35 +90,64 @@ client = get_client()
 sheet = client.open_by_url(st.secrets["spreadsheet_url"])
 
 def load_data_from_cloud(name):
+    cols_def = {
+        # 【追加】運送会社、荷姿チェック、賞味期限1〜5、発送備考を追加
+        "orders": ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","登録日時"],
+        "manufactures": ["ID","製造予定日","備考","大カテゴリ","製品名","ケース数","登録日時"],
+        "master": ["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"],
+        "customers": ["顧客名","ふりがな"],
+        "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"],
+        "packaging_logs": ["ID","登録日","資材名","処理区分","数量","理由","備考","登録日時","関連製品名","理論在庫"],
+        "shipping_master": ["運送会社名"] # 【新規作成】運送会社マスタ
+    }
+    
+    target_cols = cols_def[name]
+    
     try:
         ws = sheet.worksheet(name)
+    except gspread.exceptions.WorksheetNotFound:
+        # シートが存在しない場合は自動作成
+        ws = sheet.add_worksheet(title=name, rows="1000", cols=str(len(target_cols)))
+        if name == "shipping_master":
+            # デフォルト値をセット
+            ws.update(values=[target_cols, ["ヤマト運輸"], ["佐川急便"], ["自社配送"]], range_name="A1")
+        else:
+            ws.update(values=[target_cols], range_name="A1")
+    
+    try:
         data = ws.get_all_values()
-        cols = {
-            "orders": ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","備考","登録日時"],
-            "manufactures": ["ID","製造予定日","備考","大カテゴリ","製品名","ケース数","登録日時"],
-            "master": ["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"],
-            "customers": ["顧客名","ふりがな"],
-            "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"],
-            "packaging_logs": ["ID","登録日","資材名","処理区分","数量","理由","備考","登録日時","関連製品名","理論在庫"]
-        }[name]
-        
-        if len(data) <= 1: return pd.DataFrame(columns=cols)
+        if len(data) <= 1: 
+            return pd.DataFrame(columns=target_cols)
+            
         df = pd.DataFrame(data[1:], columns=data[0])
-        
-        # 列名の空白除去と重複排除（エラー防止）
         df.columns = df.columns.str.strip().str.replace(' ', '').str.replace('　', '')
         df = df.loc[:, ~df.columns.duplicated()]
         
-        for c in cols:
-            if c not in df.columns: df[c] = ""
+        # 【自動列追加ロジック】定義に存在するが、スプレッドシートにない列を追加
+        needs_update = False
+        for c in target_cols:
+            if c not in df.columns: 
+                df[c] = ""
+                needs_update = True
+        
+        if needs_update and len(df) > 0:
+            # スプレッドシートの1行目（ヘッダー）を更新し、列を拡張する
+            try: ws.update(values=[df.columns.tolist()], range_name="A1")
+            except: pass
             
         for c in ["ケース数", "初期在庫数", "資材使用数", "初期在庫", "発注点", "数量", "理論在庫"]:
             if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).apply(to_int)
-        for c in ["納品予定日", "製造予定日", "登録日", "登録日時"]:
+        
+        for c in ["納品予定日", "製造予定日", "登録日", "登録日時", "賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5"]:
             if c in df.columns: df[c] = pd.to_datetime(df[c], errors='coerce')
-        return df[cols]
+            
+        # 荷姿チェックのブール値変換
+        if "荷姿チェック" in df.columns:
+            df["荷姿チェック"] = df["荷姿チェック"].astype(str).str.upper() == "TRUE"
+            
+        return df[target_cols]
     except Exception: 
-        return pd.DataFrame(columns={"orders":["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","備考","登録日時"],"manufactures":["ID","製造予定日","備考","大カテゴリ","製品名","ケース数","登録日時"],"master":["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"],"customers":["顧客名","ふりがな"],"packaging_master":["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"],"packaging_logs":["ID","登録日","資材名","処理区分","数量","理由","備考","登録日時","関連製品名","理論在庫"]}[name])
+        return pd.DataFrame(columns=target_cols)
 
 def save_and_sync(name, df):
     try: ws = sheet.worksheet(name)
@@ -150,9 +182,15 @@ def append_and_sync(name, new_row_df):
     st.cache_data.clear()
     st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], new_row_df], ignore_index=True)
 
-for sheet_name in ["orders", "manufactures", "master", "customers", "packaging_master", "packaging_logs"]:
+# ─────────────────────────────────────────────
+# セッション初期化
+# ─────────────────────────────────────────────
+sheet_names = ["orders", "manufactures", "master", "customers", "packaging_master", "packaging_logs", "shipping_master"]
+for sheet_name in sheet_names:
     if f"{sheet_name}_df" not in st.session_state: st.session_state[f"{sheet_name}_df"] = load_data_from_cloud(sheet_name)
+
 if "current_page" not in st.session_state: st.session_state.current_page = "📋 受注登録"
+if "success_msg" not in st.session_state: st.session_state.success_msg = None
 
 orders_df = st.session_state.orders_df
 manus_df = st.session_state.manufactures_df
@@ -160,12 +198,13 @@ master_df = st.session_state.master_df
 cust_df = st.session_state.customers_df
 pack_mst_df = st.session_state.packaging_master_df
 pack_log_df = st.session_state.packaging_logs_df
+ship_mst_df = st.session_state.shipping_master_df
 
 CATEGORIES = ["🍝 つきこん", "🟫 平こん", "🍜 糸こん・しらたき", "🔺 三角こん", "🟤 玉こん", "🎲 ダイスこん", "🏷️ 短冊", "🇯🇵 国産", "🤲 ちぎりこん", "🏮 大黒屋", "🏭 かねこ", "❄️ 冷凍耐性", "📦 その他"]
 def format_name(n): return f"⚫️ {n}" if "黒" in str(n) else f"⚪️ {n}" if "白" in str(n) else f"📦 {n}"
 
 # ─────────────────────────────────────────────
-# 4. 在庫計算エンジン（製品 ＆ 資材の完全連動）
+# 4. 在庫計算エンジン
 # ─────────────────────────────────────────────
 today = pd.Timestamp.today().normalize()
 dates = pd.date_range(today, today + timedelta(days=60))
@@ -201,7 +240,7 @@ if not master_df_unique.empty:
         p_future_cumsum = p_future_row.reindex(dates, fill_value=0).fillna(0).cumsum()
         future_stocks[p] = {d: curr_stock + to_int(p_future_cumsum.get(d, 0)) for d in dates}
 
-# --- 資材推移サマリ（製造連動） ---
+# --- 資材推移サマリ ---
 pack_summary = {}
 pack_mst_unique = pack_mst_df.drop_duplicates(subset=["資材名"]) if not pack_mst_df.empty else pd.DataFrame(columns=["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"])
 
@@ -218,11 +257,10 @@ if not pack_log_df.empty:
     for _, r in pack_log_df.iterrows():
         p_name, qty, p_type = r.get("資材名", ""), to_int(r.get("数量", 0)), str(r.get("処理区分", ""))
         if p_name in pack_summary:
-            if "連動" in p_type: continue # 二重計算防止
+            if "連動" in p_type: continue
             if "入庫" in p_type: pack_summary[p_name]["期間入庫累計"] += qty
             elif "出庫" in p_type: pack_summary[p_name]["期間出庫消費"] += qty
 
-# 製造時（manufactures）の自動資材消費計算
 if not manus_df.empty and not master_df_unique.empty:
     master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
     for _, r in manus_df.iterrows():
@@ -243,11 +281,18 @@ for d in pack_summary.values():
 with st.sidebar:
     st.markdown("<p style='font-size:20px; font-weight:900; color:#1E3A8A; margin-bottom:20px;'>🏭 丸実屋システム</p>", unsafe_allow_html=True)
     st.write("---")
-    menu_items = ["📋 受注登録", "🏭 製造登録", "📦 資材・入出庫", "📑 登録一覧", "📊 在庫・スケジュール", "⚙️ マスタ・分析"]
+    # 【追加】出荷・発送管理 メニューを追加
+    menu_items = ["📋 受注登録", "🏭 製造登録", "🚚 出荷・発送管理", "📦 資材・入出庫", "📑 登録一覧", "📊 在庫・スケジュール", "⚙️ マスタ・分析"]
     for item in menu_items:
         if st.button(item, key=f"menu_{item}", use_container_width=True, type="primary" if st.session_state.current_page == item else "secondary"):
             st.session_state.current_page = item; st.rerun()
 page = st.session_state.current_page
+
+# 通知表示用プレースホルダー
+msg_global = st.empty()
+if st.session_state.success_msg:
+    msg_global.markdown(f"<div class='center-msg' style='background-color:#D1FAE5; color:#065F46; border:1px solid #10B981;'>{st.session_state.success_msg}</div>", unsafe_allow_html=True)
+    st.session_state.success_msg = None
 
 # ─────────────────────────────────────────────
 # 6. 画面描画
@@ -268,23 +313,29 @@ if page == "📋 受注登録":
         search_p = sc1.text_input("🔍 製品検索", placeholder="名称の一部を入力...")
         prods = [p for p in master_df_unique["製品名"].tolist() if search_p in p] if search_p else (master_df_unique[master_df_unique["大カテゴリ"] == cat]["製品名"].tolist() if not master_df_unique.empty else [])
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="選択してください", format_func=format_name)
-        rem = sc2.text_input("📝 備考")
+        
+        # 【追加】 運送会社のプルダウンを備考の左に配置
+        r1, r2 = sc2.columns([1, 2])
+        ship_list = ship_mst_df["運送会社名"].tolist() if not ship_mst_df.empty else []
+        ship_comp = r1.selectbox("🚚 運送会社", options=ship_list, index=None, placeholder="未定")
+        rem = r2.text_input("📝 備考")
         
         col_chk1, col_chk2 = sc2.columns(2)
         is_substitute = col_chk1.checkbox("🔄 代替品として送付")
         is_irregular = col_chk2.checkbox("⚠️ イレギュラー(水漏れ等)")
         
+        is_pack_link = True
+        if is_irregular:
+            is_pack_link = st.checkbox("📦 製品の復帰と同時に、段ボール(資材)の在庫も戻す", value=True)
+            
         st.write("---")
 
-        # ★ 受注登録時の在庫不足アラート（不足分を赤字で強調）
         if prod and qty is not None and qty > 0:
             cur_stock = current_stocks.get(prod, 0)
             if cur_stock < qty:
                 shortage = qty - cur_stock
-                st.markdown(f"""
-                <div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
-                    🚨 <b>製品在庫が不足します！</b> （現在庫: <b>{cur_stock}</b> cs / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: {shortage} cs</span>）
-                </div>
+                st.markdown(f"""<div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
+                    🚨 <b>製品在庫が不足します！</b> （現在庫: <b>{cur_stock}</b> cs / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: {shortage} cs</span>）</div>
                 """, unsafe_allow_html=True)
                 st.write("")
 
@@ -295,29 +346,95 @@ if page == "📋 受注登録":
                 if is_substitute: prefix += "【代替品】"
                 if is_irregular: prefix += "【イレギュラー】"
                 if qty < 0: prefix += "【在庫復帰】"
+                if not is_pack_link: prefix += "【資材非連動】"
                 
                 new_row = pd.DataFrame([{
                     "ID": str(uuid.uuid4())[:6].upper(), "納品予定日": pd.to_datetime(o_date), "顧客名": c_name if c_name else "未指定",
-                    "大カテゴリ": cat, "製品名": prod, "ケース数": to_int(qty), "備考": f"{prefix} {rem}".strip(), "登録日時": datetime.now()
+                    "大カテゴリ": cat, "製品名": prod, "ケース数": to_int(qty), "運送会社": ship_comp if ship_comp else "", 
+                    "備考": f"{prefix} {rem}".strip(), "荷姿チェック": False, "賞味期限1": "", "賞味期限2": "", "賞味期限3": "", "賞味期限4": "", "賞味期限5": "", "発送備考": "",
+                    "登録日時": datetime.now()
                 }])
                 append_and_sync("orders", new_row)
-                st.toast(f"受注登録を完了しました: {prod}", icon="✅")
+                st.session_state.success_msg = f"✨ 受注登録を完了しました: {prod}"
                 st.rerun()
 
     st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近5件）</h2>', unsafe_allow_html=True)
     if not orders_df.empty:
         recent = orders_df.sort_values("登録日時", ascending=False).head(5).copy()
         recent["納品予定日"] = recent["納品予定日"].dt.date
-        edited = st.data_editor(recent, num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD"), "ケース数": st.column_config.NumberColumn("ケース数", step=1, format="%d"), "登録日時": None}, key="edit_o")
+        edited = st.data_editor(recent[["ID", "納品予定日", "顧客名", "製品名", "ケース数", "運送会社", "備考", "登録日時"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"納品予定日": st.column_config.DateColumn("納品日", format="YYYY-MM-DD"), "ケース数": st.column_config.NumberColumn("ケース数", step=1, format="%d"), "登録日時": None}, key="edit_o")
         if st.button("💾 直近データを修正・削除保存", key="btn_edit_o"):
-            save_and_sync("orders", pd.concat([orders_df[~orders_df["ID"].isin(recent["ID"])], edited], ignore_index=True))
-            st.toast("受注データの修正を完了しました", icon="✅"); st.rerun()
+            # 必要なカラムを保持して結合
+            updated_orders = pd.concat([orders_df[~orders_df["ID"].isin(recent["ID"])], edited], ignore_index=True)
+            save_and_sync("orders", updated_orders)
+            st.session_state.success_msg = "✅ 受注データの修正を保存しました"
+            st.rerun()
             
     with st.expander("📂 過去の全データを一括編集・削除（拡大表示）"):
         edited_all = st.data_editor(orders_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="edit_all_o")
         if st.button("💾 全データを上書き保存", key="btn_edit_all_o"):
             save_and_sync("orders", edited_all)
-            st.toast("全データの更新・削除を完了しました", icon="✅"); st.rerun()
+            st.session_state.success_msg = "✅ 全データの更新を完了しました"
+            st.rerun()
+
+# --- 🚚 出荷・発送管理（新機能） ---
+elif page == "🚚 出荷・発送管理":
+    st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #047857 0%, #10B981 100%);"><h1>🚚 出荷・発送 消込管理</h1></div>', unsafe_allow_html=True)
+    st.markdown("💡 その日の出荷予定に対して、**運送会社の変更**、**賞味期限（最大5つ）の記録**、**荷姿確認の消込（チェック）** が行えます。")
+    
+    target_date = st.date_input("📅 表示する納品予定日を選択", value=date.today())
+    
+    day_orders = orders_df[orders_df["納品予定日"].dt.date == target_date].copy()
+    
+    if day_orders.empty:
+        st.info(f"{format_date_jp(target_date)} の出荷予定データはありません。")
+    else:
+        edit_cols = ["ID", "顧客名", "製品名", "ケース数", "運送会社", "荷姿チェック", "賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5", "発送備考"]
+        disp_df = day_orders[edit_cols].copy()
+        
+        for c in ["賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5"]:
+            disp_df[c] = pd.to_datetime(disp_df[c], errors="coerce").dt.date
+            
+        def highlight_shipped(row):
+            is_checked = row.get("荷姿チェック", False)
+            if str(is_checked).upper() == "TRUE" or is_checked == True:
+                return ['background-color: #D1FAE5; color: #065F46; text-decoration: line-through;'] * len(row)
+            return [''] * len(row)
+            
+        edited_ship = st.data_editor(
+            disp_df.style.apply(highlight_shipped, axis=1),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "ID": None,
+                "顧客名": st.column_config.TextColumn("顧客名", disabled=True),
+                "製品名": st.column_config.TextColumn("製品名", disabled=True),
+                "ケース数": st.column_config.NumberColumn("ケース数", disabled=True),
+                "運送会社": st.column_config.SelectboxColumn("運送会社", options=ship_mst_df["運送会社名"].tolist() if not ship_mst_df.empty else []),
+                "荷姿チェック": st.column_config.CheckboxColumn("✅ 荷姿", default=False),
+                "賞味期限1": st.column_config.DateColumn("賞味1", format="YYYY-MM-DD"),
+                "賞味期限2": st.column_config.DateColumn("賞味2", format="YYYY-MM-DD"),
+                "賞味期限3": st.column_config.DateColumn("賞味3", format="YYYY-MM-DD"),
+                "賞味期限4": st.column_config.DateColumn("賞味4", format="YYYY-MM-DD"),
+                "賞味期限5": st.column_config.DateColumn("賞味5", format="YYYY-MM-DD"),
+                "発送備考": st.column_config.TextColumn("発送備考")
+            }, key="edit_shipping"
+        )
+        
+        if st.button("💾 発送・消込データを保存", type="primary", use_container_width=True):
+            updated_orders = orders_df.copy()
+            for idx, row in edited_ship.iterrows():
+                row_mask = updated_orders["ID"] == row["ID"]
+                if row_mask.any():
+                    updated_orders.loc[row_mask, "運送会社"] = str(row.get("運送会社", ""))
+                    updated_orders.loc[row_mask, "荷姿チェック"] = str(row.get("荷姿チェック", False))
+                    for c in ["賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5"]:
+                        val = row.get(c)
+                        updated_orders.loc[row_mask, c] = val.strftime("%Y-%m-%d") if pd.notnull(val) else ""
+                    updated_orders.loc[row_mask, "発送備考"] = str(row.get("発送備考", ""))
+                    
+            save_and_sync("orders", updated_orders)
+            st.session_state.success_msg = "✅ 発送・消込データを保存しました！"
+            st.rerun()
 
 # --- 🏭 製造登録 ---
 elif page == "🏭 製造登録":
@@ -336,7 +453,6 @@ elif page == "🏭 製造登録":
         is_pack_link = st.checkbox("📦 製造と同時に、紐づく段ボール(資材)の在庫も減らす", value=True)
         st.write("---")
 
-        # ★ 製造登録時の資材不足アラート（不足分を赤字で強調）
         if prod_m and m_qty is not None and m_qty > 0:
             master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
             if prod_m in master_pack_info:
@@ -347,10 +463,8 @@ elif page == "🏭 製造登録":
                     cur_pack_stock = pack_summary.get(p_name, {}).get("現在庫", 0)
                     if cur_pack_stock < req_pack_qty:
                         shortage_pack = req_pack_qty - cur_pack_stock
-                        st.markdown(f"""
-                        <div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
-                            🚨 <b>資材({p_name})が不足します！</b> （現在庫: <b>{cur_pack_stock}</b> / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: {shortage_pack}</span>）
-                        </div>
+                        st.markdown(f"""<div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
+                            🚨 <b>資材({p_name})が不足します！</b> （現在庫: <b>{cur_pack_stock}</b> / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: {shortage_pack}</span>）</div>
                         """, unsafe_allow_html=True)
                         st.write("")
 
@@ -362,7 +476,6 @@ elif page == "🏭 製造登録":
                 new_row = pd.DataFrame([{"ID": new_m_id, "製造予定日": pd.to_datetime(m_date), "備考": rem, "大カテゴリ": cat_m, "製品名": prod_m, "ケース数": to_int(m_qty), "登録日時": datetime.now()}])
                 append_and_sync("manufactures", new_row)
                 
-                # 製造連動で資材ログに自動記録
                 if is_pack_link and not master_df_unique.empty:
                     master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
                     if prod_m in master_pack_info:
@@ -381,7 +494,7 @@ elif page == "🏭 製造登録":
                             }])
                             append_and_sync("packaging_logs", new_pack_log)
                 
-                st.toast(f"製造登録を完了しました: {prod_m}", icon="✅")
+                st.session_state.success_msg = f"✨ 製造登録を完了しました: {prod_m}"
                 st.rerun()
 
     st.markdown('<h2 style="font-size:18px; margin-top:20px;">✏️ かんたん修正（直近5件）</h2>', unsafe_allow_html=True)
@@ -391,13 +504,15 @@ elif page == "🏭 製造登録":
         edited_m = st.data_editor(recent_m, num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"製造予定日": st.column_config.DateColumn("製造日", format="YYYY-MM-DD"), "ケース数": st.column_config.NumberColumn("ケース数", step=1, format="%d"), "登録日時": None}, key="edit_m")
         if st.button("💾 直近データを修正・削除保存", key="smb"):
             save_and_sync("manufactures", pd.concat([manus_df[~manus_df["ID"].isin(recent_m["ID"])], edited_m], ignore_index=True))
-            st.toast("製造データの修正を完了しました", icon="✅"); st.rerun()
+            st.session_state.success_msg = "✅ 製造データの修正を保存しました"
+            st.rerun()
             
     with st.expander("📂 過去の全データを一括編集・削除（拡大表示）"):
         edited_all_m = st.data_editor(manus_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="edit_all_m")
         if st.button("💾 全データを上書き保存", key="btn_edit_all_m"):
             save_and_sync("manufactures", edited_all_m)
-            st.toast("全データの更新・削除を完了しました", icon="✅"); st.rerun()
+            st.session_state.success_msg = "✅ 全データの更新を完了しました"
+            st.rerun()
 
 # --- 📦 資材管理 ---
 elif page == "📦 資材・入出庫":
@@ -495,7 +610,7 @@ elif page == "📦 資材・入出庫":
                         "関連製品名": "", "理論在庫": "", "備考": p_rem, "登録日時": datetime.now()
                     }])
                     append_and_sync("packaging_logs", new_pack)
-                    st.toast(f"資材ログを登録しました: {sel_pack} ({final_p_type} {log_qty})", icon="✅")
+                    st.session_state.success_msg = f"✨ 資材ログを登録しました: {sel_pack} ({final_p_type} {log_qty})"
                     st.rerun()
                 else: st.info("現在の計算在庫と一致しているため、調整は不要です。")
 
@@ -506,19 +621,21 @@ elif page == "📦 資材・入出庫":
             recent_p["登録日"] = recent_p["登録日"].dt.date
             edited_p = st.data_editor(recent_p, num_rows="dynamic", use_container_width=True, hide_index=True, column_config={
                 "登録日": st.column_config.DateColumn("登録日", format="YYYY-MM-DD"), 
-                "処理区分": st.column_config.SelectboxColumn("処理区分", options=["入庫", "出庫", "製造連動", "製造復帰"]),
+                "処理区分": st.column_config.SelectboxColumn("処理区分", options=["入庫", "出庫", "製造連動", "製造復帰", "出荷連動", "復帰連動"]),
                 "数量": st.column_config.NumberColumn("数量", min_value=1, step=1, format="%d"),
                 "登録日時": None, "関連製品名": None, "理論在庫": None
             }, key="edit_p")
             if st.button("💾 直近データを修正・削除保存", key="btn_edit_p"):
                 save_and_sync("packaging_logs", pd.concat([pack_log_df[~pack_log_df["ID"].isin(recent_p["ID"])], edited_p], ignore_index=True))
-                st.toast("資材ログの修正を完了しました", icon="✅"); st.rerun()
+                st.session_state.success_msg = "✅ 資材ログの修正を保存しました"
+                st.rerun()
         
         with st.expander("📂 過去の全データを一括編集・削除（拡大表示）"):
             edited_all_p = st.data_editor(pack_log_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="edit_all_p")
             if st.button("💾 全データを上書き保存", key="btn_edit_all_p"):
                 save_and_sync("packaging_logs", edited_all_p)
-                st.toast("全データの更新・削除を完了しました", icon="✅"); st.rerun()
+                st.session_state.success_msg = "✅ 全データの更新を完了しました"
+                st.rerun()
 
 # --- 📑 登録一覧 ---
 elif page == "📑 登録一覧":
@@ -530,7 +647,7 @@ elif page == "📑 登録一覧":
         else:
             edit_df = orders_df.sort_values("登録日時", ascending=False).copy()
             edit_df["納品予定日(表示)"] = edit_df["納品予定日"].apply(format_date_jp)
-            cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日(表示)", "製品名", "ケース数", "備考"]
+            cols = ["ID", "登録日時", "大カテゴリ", "顧客名", "納品予定日(表示)", "製品名", "ケース数", "運送会社", "備考", "荷姿チェック", "発送備考"]
             edit_df = edit_df[[c for c in cols if c in edit_df.columns]]
             
             def get_stock_status(row):
@@ -549,6 +666,9 @@ elif page == "📑 登録一覧":
                 is_return = to_int(row.get("ケース数", 0)) < 0
                 is_irregular = "【イレギュラー】" in str(row.get("備考", ""))
                 is_shortage = "不足" in str(row.get("在庫状況", ""))
+                is_checked = row.get("荷姿チェック") == True or str(row.get("荷姿チェック")).upper() == "TRUE"
+                
+                if is_checked: return ['background-color: #D1FAE5; color: #065F46;'] * len(row)
                 if is_return: return ['background-color: #DBEAFE; color: #1E3A8A; font-weight: bold;'] * len(row)
                 if is_shortage and is_irregular: return ['background-color: #FEF08A; color: #DC2626; font-weight: bold;'] * len(row)
                 if is_shortage: return ['background-color: #FEE2E2; color: #DC2626; font-weight: bold;'] * len(row)
@@ -557,7 +677,7 @@ elif page == "📑 登録一覧":
 
             st.download_button("📥 受注データをCSV出力", data=edit_df.to_csv(index=False, encoding="utf-8-sig"), file_name=f"受注一覧_{date.today()}.csv", use_container_width=True)
             st.markdown("""<div style="font-size:14px; margin-bottom:10px;">
-                <b>🎨 色：</b> <span style="background-color:#FEE2E2; color:#DC2626; padding:2px 6px;">在庫不足（赤字）</span> / <span style="background-color:#FEF08A; color:#854D0E; padding:2px 6px;">イレギュラー対応（黄色）</span> / <span style="background-color:#DBEAFE; color:#1E3A8A; padding:2px 6px;">⤴️ 在庫復帰（青色）</span>
+                <b>🎨 色：</b> <span style="background-color:#FEE2E2; color:#DC2626; padding:2px 6px;">在庫不足（赤字）</span> / <span style="background-color:#FEF08A; color:#854D0E; padding:2px 6px;">イレギュラー対応（黄色）</span> / <span style="background-color:#DBEAFE; color:#1E3A8A; padding:2px 6px;">⤴️ 在庫復帰（青色）</span> / <span style="background-color:#D1FAE5; color:#065F46; padding:2px 6px;">✅ 荷姿完了（緑色）</span>
             </div>""", unsafe_allow_html=True)
             
             st.dataframe(edit_df.style.apply(highlight_row, axis=1), use_container_width=True, hide_index=True, height=600)
@@ -567,7 +687,6 @@ elif page == "📑 登録一覧":
         else:
             e_pack = pack_log_df.sort_values("登録日時", ascending=False).copy()
             e_pack["登録日(表示)"] = e_pack["登録日"].apply(format_date_jp)
-            
             st.download_button("📥 資材ログをCSV出力", data=e_pack.to_csv(index=False, encoding="utf-8-sig"), file_name=f"資材ログ_{date.today()}.csv", use_container_width=True)
             st.dataframe(e_pack[["ID", "登録日(表示)", "資材名", "処理区分", "数量", "理由", "関連製品名", "備考"]], use_container_width=True, hide_index=True, height=600)
 
@@ -591,7 +710,7 @@ elif page == "📊 在庫・スケジュール":
 
     with t2:
         cal_data = []
-        html = '<table class="sched-table"><tr><th style="width:100px;">日付</th><th style="width:45%;">製造</th><th style="width:45%;">出荷/復帰</th></tr>'
+        html = '<table class="sched-table"><tr><th style="width:120px;">日付</th><th style="width:40%;">製造</th><th style="width:40%;">出荷/復帰</th></tr>'
         for i in range(7):
             d = today + timedelta(days=i)
             m_h = "".join([f'<div style="background:#F0FFF4; border-left:4px solid #10B981; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{format_name(r["製品名"])}</span> <span style="float:right; font-weight:900; color:#059669;">{to_int(r["ケース数"])}cs</span></div>' for _,r in manus_df[manus_df["製造予定日"]==d].iterrows()]) if not manus_df.empty else ""
@@ -599,11 +718,14 @@ elif page == "📊 在庫・スケジュール":
             for _, r in orders_df[orders_df["納品予定日"] == d].iterrows():
                 p, qty = r["製品名"], to_int(r.get("ケース数", 0))
                 stock_on_day = future_stocks.get(p, {}).get(d, 0)
-                if qty < 0: qty_html, bg_color, border_color = f'<span style="color:#1E3A8A; font-weight:900;">⤴️ {-qty}cs 復帰</span>', "#DBEAFE", "#1E3A8A"
+                is_checked = r.get("荷姿チェック") == True or str(r.get("荷姿チェック")).upper() == "TRUE"
+                
+                if is_checked: qty_html, bg_color, border_color = f'<span style="color:#065F46; font-weight:900; text-decoration:line-through;">{qty}cs</span>', "#D1FAE5", "#059669"
+                elif qty < 0: qty_html, bg_color, border_color = f'<span style="color:#1E3A8A; font-weight:900;">⤴️ {-qty}cs 復帰</span>', "#DBEAFE", "#1E3A8A"
                 elif stock_on_day < 0: qty_html, bg_color, border_color = f'<span style="color:#DC2626; font-weight:900;">{qty}cs (不足)</span>', "#FEE2E2", "#DC2626"
                 else: qty_html, bg_color, border_color = f'<span style="color:#1D4ED8; font-weight:900;">{qty}cs</span>', "#F0F7FF", "#2563EB"
                 o_h += f'<div style="background:{bg_color}; border-left:4px solid {border_color}; padding:6px; margin-bottom:4px; border-radius:4px;"><span style="font-weight:700;">{r["顧客名"]}: {format_name(p)}</span> <span style="float:right;">{qty_html}</span></div>'
-            html += f'<tr><td><b>{d.strftime("%m/%d")}</b><br>{["月","火","水","木","金","土","日"][d.dayofweek]}曜</td><td>{m_h}</td><td>{o_h}</td></tr>'
+            html += f'<tr><td><b>{format_date_jp(d)}</b></td><td>{m_h}</td><td>{o_h}</td></tr>'
             
             m_txt = "\n".join([f"製: {r['製品名']} ({to_int(r['ケース数'])}cs)" for _, r in manus_df[manus_df["製造予定日"]==d].iterrows()]) if not manus_df.empty else ""
             o_txt = "\n".join([f"出: {r['顧客名']} : {r['製品名']} ({to_int(r['ケース数'])}cs)" for _, r in orders_df[orders_df["納品予定日"]==d].iterrows()]) if not orders_df.empty else ""
@@ -666,7 +788,7 @@ elif page == "⚙️ マスタ・分析":
     st.markdown('<div class="slim-header" style="background: linear-gradient(135deg, #475569 0%, #1E293B 100%);"><h1>⚙️ マスタ・データ分析</h1></div>', unsafe_allow_html=True)
     st.info("💡 ここでデータを追加・修正すると、アプリ全体の設定（ドロップダウン等）に即座に反映されます。表の下にある「＋」を押して行を追加できます。")
     
-    t_m1, t_m2, t_m3, t_m4 = st.tabs(["📦 製品マスタ (資材紐付け)", "🏢 顧客マスタ", "📦 資材マスタ (段ボール等)", "📊 ABC分析"])
+    t_m1, t_m2, t_m3, t_m4, t_m5 = st.tabs(["📦 製品マスタ (資材紐付け)", "🏢 顧客マスタ", "📦 資材マスタ (段ボール等)", "🚚 運送会社マスタ", "📊 ABC分析"])
     
     with t_m1:
         st.markdown("### 製品カテゴリ・初期在庫・資材連動の編集")
@@ -682,13 +804,13 @@ elif page == "⚙️ マスタ・分析":
             }, key="edit_master"
         )
         if st.button("💾 製品マスタを保存・同期", type="primary", use_container_width=True):
-            save_and_sync("master", edited_master); st.toast("製品マスタを更新しました！", icon="✅"); st.rerun()
+            save_and_sync("master", edited_master); st.session_state.success_msg = "✅ 製品マスタを更新しました！"; st.rerun()
             
     with t_m2:
         st.markdown("### 顧客リストの編集")
         edited_cust = st.data_editor(cust_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"顧客名": st.column_config.TextColumn("顧客名", required=True), "ふりがな": st.column_config.TextColumn("ふりがな")}, key="edit_cust")
         if st.button("💾 顧客マスタを保存・同期", type="primary", use_container_width=True):
-            save_and_sync("customers", edited_cust); st.toast("顧客マスタを更新しました！", icon="✅"); st.rerun()
+            save_and_sync("customers", edited_cust); st.session_state.success_msg = "✅ 顧客マスタを更新しました！"; st.rerun()
 
     with t_m3:
         st.markdown("### 段ボール等 資材マスタの編集")
@@ -706,7 +828,13 @@ elif page == "⚙️ マスタ・分析":
             }, key="edit_pack_mst"
         )
         if st.button("💾 資材マスタを保存・同期", type="primary", use_container_width=True):
-            save_and_sync("packaging_master", edited_pack); st.toast("資材マスタを更新しました！", icon="✅"); st.rerun()
+            save_and_sync("packaging_master", edited_pack); st.session_state.success_msg = "✅ 資材マスタを更新しました！"; st.rerun()
+
+    with t_m5:
+        st.markdown("### 運送会社リストの編集")
+        edited_ship = st.data_editor(ship_mst_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"運送会社名": st.column_config.TextColumn("運送会社名", required=True)}, key="edit_ship_mst")
+        if st.button("💾 運送会社マスタを保存・同期", type="primary", use_container_width=True):
+            save_and_sync("shipping_master", edited_ship); st.session_state.success_msg = "✅ 運送会社マスタを更新しました！"; st.rerun()
 
     with t_m4:
         if not orders_df.empty:
