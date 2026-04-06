@@ -28,13 +28,13 @@ def to_int(v):
     except: return 0
 
 def format_date_jp(d):
-    """ 日付に曜日を追加してフォーマットする関数 (例: 2026/04/06 (月)) """
+    """ 時間(00:00:00)を排除し、日付に曜日を追加してフォーマットする関数 """
     if pd.isna(d) or d == "": return ""
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
     try:
-        if isinstance(d, str): d = pd.to_datetime(d)
+        if isinstance(d, str): d = pd.to_datetime(d.split(" ")[0])
         return f"{d.strftime('%Y/%m/%d')} ({weekdays[d.weekday()]})"
-    except: return str(d)
+    except: return str(d).split(" ")[0]
 
 # ─────────────────────────────────────────────
 # 1. ページ基本設定 & CSS
@@ -112,18 +112,13 @@ def load_data_from_cloud(name):
         data = ws.get_all_values()
         if len(data) <= 1: return pd.DataFrame(columns=target_cols)
         df = pd.DataFrame(data[1:], columns=data[0])
+        
         df.columns = df.columns.str.strip().str.replace(' ', '').str.replace('　', '')
         df = df.loc[:, ~df.columns.duplicated()]
         
-        needs_update = False
-        for c in target_cols:
-            if c not in df.columns: 
-                df[c] = ""
-                needs_update = True
-        if needs_update and len(df) > 0:
-            try: ws.update(values=[df.columns.tolist()], range_name="A1")
-            except: pass
-            
+        # 【KeyError完全修復】スプレッドシートに無い列を自動で空列として補完（reindex）
+        df = df.reindex(columns=target_cols, fill_value="")
+        
         num_cols = ["ケース数", "初期在庫数", "資材使用数", "初期在庫", "発注点", "数量", "理論在庫", "入数", "出来高数", "残業時間"]
         for c in num_cols:
             if c in df.columns: 
@@ -149,11 +144,16 @@ def save_and_sync(name, df):
     df_save = df.copy()
     
     for col in df_save.columns:
-        if pd.api.types.is_datetime64_any_dtype(df_save[col]): df_save[col] = df_save[col].dt.strftime('%Y-%m-%d %H:%M:%S').replace('NaT', '')
-        elif pd.api.types.is_bool_dtype(df_save[col]): df_save[col] = df_save[col].astype(str).str.upper()
-        elif col in ["残業時間"]: df_save[col] = df_save[col].fillna(0).astype(str)
-        elif pd.api.types.is_numeric_dtype(df_save[col]): df_save[col] = df_save[col].fillna(0).apply(to_int).astype(str)
-        else: df_save[col] = df_save[col].astype(str)
+        if pd.api.types.is_datetime64_any_dtype(df_save[col]): 
+            df_save[col] = df_save[col].dt.strftime('%Y-%m-%d %H:%M:%S').replace('NaT', '')
+        elif pd.api.types.is_bool_dtype(df_save[col]):
+            df_save[col] = df_save[col].astype(str).str.upper()
+        elif col in ["残業時間"]:
+            df_save[col] = df_save[col].fillna(0).astype(str)
+        elif pd.api.types.is_numeric_dtype(df_save[col]): 
+            df_save[col] = df_save[col].fillna(0).apply(to_int).astype(str)
+        else:
+            df_save[col] = df_save[col].astype(str)
             
     df_save = df_save.fillna("").replace(["nan", "None", "NaT"], "")
     ws.update(values=[df_save.columns.values.tolist()] + df_save.values.tolist(), range_name='A1')
@@ -173,8 +173,10 @@ def append_and_sync(name, new_row_df):
     row_copy = row_copy[existing_cols]
 
     for col in row_copy.columns:
-        if pd.api.types.is_datetime64_any_dtype(row_copy[col]): row_copy[col] = row_copy[col].dt.strftime('%Y-%m-%d %H:%M:%S').replace('NaT', '')
-        elif pd.api.types.is_bool_dtype(row_copy[col]): row_copy[col] = row_copy[col].astype(str).str.upper()
+        if pd.api.types.is_datetime64_any_dtype(row_copy[col]): 
+            row_copy[col] = row_copy[col].dt.strftime('%Y-%m-%d %H:%M:%S').replace('NaT', '')
+        elif pd.api.types.is_bool_dtype(row_copy[col]):
+            row_copy[col] = row_copy[col].astype(str).str.upper()
             
     row_to_send = row_copy.fillna("").astype(str).replace(["nan", "None", "NaT"], "").values[0].tolist()
     ws.append_row(row_to_send)
@@ -321,14 +323,11 @@ if page == "📋 受注登録":
         
         st.write("---")
 
-        # ★ 在庫不足の視覚的強調（赤字太文字）
         if prod and qty is not None and qty > 0:
             cur_stock = current_stocks.get(prod, 0)
             if cur_stock < qty:
-                st.markdown(f"""
-                <div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
-                    🚨 <b>製品在庫が不足します！</b> （現在庫: <b>{cur_stock}</b> cs / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: -{qty - cur_stock} cs</span>）
-                </div>
+                st.markdown(f"""<div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
+                    🚨 <b>製品在庫が不足します！</b> （現在庫: <b>{cur_stock}</b> cs / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: -{qty - cur_stock} cs</span>）</div>
                 """, unsafe_allow_html=True)
                 st.write("")
 
@@ -349,31 +348,42 @@ if page == "📋 受注登録":
                 append_and_sync("orders", new_row)
                 msg_slot_add.success(f"✨ 登録を完了しました: {prod} ({qty}cs)")
 
-    # ★ 「簡単修正」機能の拡張（削除・編集の一元化＆拡大表示）
+    # ★ 拡張版：削除・並び替え可能な直近5件と拡大表示
     st.markdown('<h2 style="font-size:18px; margin-top:30px;">✏️ 登録データのかんたん修正・削除</h2>', unsafe_allow_html=True)
     if not orders_df.empty:
         disp_orders = orders_df.sort_values("登録日時", ascending=False).copy()
         disp_orders["納品予定日(表示)"] = disp_orders["納品予定日"].apply(format_date_jp)
         disp_cols = ["ID", "納品予定日(表示)", "顧客名", "製品名", "ケース数", "運送会社", "備考", "不良廃棄フラグ"]
         
-        # expanderを使って拡大画面での全体確認・一括編集・削除を実現
-        with st.expander("📂 過去の全データを一括編集・削除（クリックで拡大展開）", expanded=True):
-            st.info("💡 **操作方法:** セルをクリックして直接文字や数字を打ち変えることができます。左端のチェックボックスを選択してキーボードの「Delete」を押すと行（データ）の削除が可能です。")
-            edited_all_o = st.data_editor(
+        recent = disp_orders.head(5).copy()
+        edited = st.data_editor(
+            recent[disp_cols], num_rows="dynamic", use_container_width=True, hide_index=True, 
+            column_config={"ケース数": st.column_config.NumberColumn("ケース数", min_value=1, step=1, format="%d"), "ID": None}, 
+            key="edit_o"
+        )
+        msg_slot_edit = st.empty()
+        if st.button("💾 直近データを修正・削除保存", key="btn_edit_o"):
+            save_df = edited.copy()
+            save_df["納品予定日"] = pd.to_datetime(save_df["納品予定日(表示)"].str.split(" ").str[0], errors="coerce")
+            merged_df = pd.merge(save_df, orders_df[["ID", "大カテゴリ", "荷姿チェック", "賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5", "発送備考", "登録日時"]], on="ID", how="left")
+            updated_orders = pd.concat([orders_df[~orders_df["ID"].isin(recent["ID"])], merged_df], ignore_index=True)
+            save_and_sync("orders", updated_orders)
+            msg_slot_edit.success("✅ 受注データの修正を保存しました")
+            
+        with st.expander("📂 過去の全データを一括編集・削除（クリックで拡大展開）", expanded=False):
+            st.info("💡 **操作方法:** セルをクリックして直接文字や数字を打ち変えられます。左端のチェックボックスを選択してキーボードの「Delete」を押すと行（データ）の削除が可能です。列名をクリックすると並び替えもできます。")
+            edited_all = st.data_editor(
                 disp_orders[disp_cols], num_rows="dynamic", use_container_width=True, hide_index=True, 
-                column_config={"ケース数": st.column_config.NumberColumn("ケース数", min_value=1, step=1, format="%d")}, 
+                column_config={"ケース数": st.column_config.NumberColumn("ケース数", min_value=1, step=1, format="%d"), "ID": None}, 
                 key="edit_all_o", height=400
             )
-            msg_slot_all_o = st.empty()
-            if st.button("💾 上記の変更（修正・削除）をすべて保存する", key="btn_edit_all_o"):
-                # 表示用カラムを本来の日付型に戻して保存
-                save_df = edited_all_o.copy()
-                save_df["納品予定日"] = pd.to_datetime(save_df["納品予定日(表示)"].str.split(" ").str[0], errors="coerce")
-                
-                # 欠落している列（賞味期限など）を元のorders_dfからマージ（復元）
-                merged_df = pd.merge(save_df, orders_df[["ID", "大カテゴリ", "荷姿チェック", "賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5", "発送備考", "登録日時"]], on="ID", how="left")
-                save_and_sync("orders", merged_df)
-                msg_slot_all_o.success("✅ 全データの更新・削除を完了しました！")
+            msg_slot_all = st.empty()
+            if st.button("💾 全データを上書き保存", key="btn_edit_all_o"):
+                save_df_all = edited_all.copy()
+                save_df_all["納品予定日"] = pd.to_datetime(save_df_all["納品予定日(表示)"].str.split(" ").str[0], errors="coerce")
+                merged_all = pd.merge(save_df_all, orders_df[["ID", "大カテゴリ", "荷姿チェック", "賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5", "発送備考", "登録日時"]], on="ID", how="left")
+                save_and_sync("orders", merged_all)
+                msg_slot_all.success("✅ 全データの更新・削除を完了しました")
 
 # --- 🚚 出荷・発送管理 ---
 elif page == "🚚 出荷・発送管理":
@@ -392,6 +402,7 @@ elif page == "🚚 出荷・発送管理":
 
         edit_cols = ["ID", "顧客名", "製品名", "ケース数", "運送会社", "荷姿チェック", "賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5", "発送備考"]
         disp_df = day_orders[edit_cols].copy()
+        
         for c in ["賞味期限1", "賞味期限2", "賞味期限3", "賞味期限4", "賞味期限5"]:
             disp_df[c] = pd.to_datetime(disp_df[c], errors="coerce").dt.date
             
@@ -467,7 +478,6 @@ elif page == "🏭 製造・日報登録":
             is_pack_link = r2.checkbox("📦 同時に、紐づく段ボール(資材)の在庫も減らす", value=True)
             st.write("---")
 
-            # ★ 製造時の資材不足アラート（赤字太文字）
             if prod_m and m_qty is not None and m_qty > 0:
                 master_pack_info = master_df_unique.set_index("製品名")[["使用資材名", "資材使用数"]].to_dict('index')
                 if prod_m in master_pack_info:
@@ -477,10 +487,8 @@ elif page == "🏭 製造・日報登録":
                         req_pack_qty = m_qty * p_usage
                         cur_pack_stock = pack_summary.get(p_name, {}).get("現在庫", 0)
                         if cur_pack_stock < req_pack_qty:
-                            st.markdown(f"""
-                            <div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
-                                🚨 <b>資材({p_name})が不足します！</b> （現在庫: <b>{cur_pack_stock}</b> / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: -{req_pack_qty - cur_pack_stock}</span>）
-                            </div>
+                            st.markdown(f"""<div style='background-color:#FEE2E2; padding:12px; border-radius:8px; border:1px solid #FCA5A5; color:#DC2626; font-size:16px;'>
+                                🚨 <b>資材({p_name})が不足します！</b> （現在庫: <b>{cur_pack_stock}</b> / <span style='font-size:1.1em; font-weight:900; color:#FF0000;'>不足分: -{req_pack_qty - cur_pack_stock}</span>）</div>
                             """, unsafe_allow_html=True)
                             st.write("")
 
@@ -519,27 +527,42 @@ elif page == "🏭 製造・日報登録":
                     
                     msg_slot_m_add.success(f"✨ 製造登録を完了しました: {prod_m}")
 
-        # ★ 拡張版：かんたん修正（一括編集・削除）
+        # ★ 拡張版：削除・並び替え可能な直近5件と拡大表示
         st.markdown('<h2 style="font-size:18px; margin-top:30px;">✏️ 登録データのかんたん修正・削除</h2>', unsafe_allow_html=True)
         if not manus_df.empty:
             disp_manus = manus_df.sort_values("登録日時", ascending=False).copy()
             disp_manus["製造予定日(表示)"] = disp_manus["製造予定日"].apply(format_date_jp)
-            disp_cols = ["ID", "製造予定日(表示)", "製品名", "ケース数", "出来高数", "担当者", "品質チェック", "リパックフラグ"]
+            disp_manus["賞味期限"] = pd.to_datetime(disp_manus["賞味期限"], errors='coerce').dt.date
+            disp_cols = ["ID", "製造予定日(表示)", "製品名", "ケース数", "出来高数", "賞味期限", "担当者", "品質チェック", "リパックフラグ"]
             
-            with st.expander("📂 過去の全データを一括編集・削除（クリックで拡大展開）", expanded=True):
-                st.info("💡 **操作方法:** セルをクリックして直接文字や数字を打ち変えることができます。左端のチェックボックスを選択してキーボードの「Delete」を押すと行（データ）の削除が可能です。")
+            recent_m = disp_manus.head(5).copy()
+            edited_m = st.data_editor(
+                recent_m[disp_cols], num_rows="dynamic", use_container_width=True, hide_index=True, 
+                column_config={"ケース数": st.column_config.NumberColumn("CS数", step=1, format="%d"), "出来高数": st.column_config.NumberColumn("出来高", step=1, format="%d"), "賞味期限": st.column_config.DateColumn("賞味期限", format="YYYY-MM-DD"), "ID": None}, 
+                key="edit_m"
+            )
+            msg_slot_m_edit = st.empty()
+            if st.button("💾 直近データを修正・削除保存", key="smb"):
+                save_df_m = edited_m.copy()
+                save_df_m["製造予定日"] = pd.to_datetime(save_df_m["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
+                merged_m = pd.merge(save_df_m, manus_df[["ID", "大カテゴリ", "品質コメント", "備考", "登録日時"]], on="ID", how="left")
+                save_and_sync("manufactures", pd.concat([manus_df[~manus_df["ID"].isin(recent_m["ID"])], merged_m], ignore_index=True))
+                msg_slot_m_edit.success("✅ 製造データの修正を保存しました")
+                
+            with st.expander("📂 過去の全データを一括編集・削除（クリックで拡大展開）"):
+                st.info("💡 セルをクリックして修正、左端のチェックボックスを選択してDeleteキーで削除が可能です。")
                 edited_all_m = st.data_editor(
                     disp_manus[disp_cols], num_rows="dynamic", use_container_width=True, hide_index=True, 
-                    column_config={"ケース数": st.column_config.NumberColumn("CS数", step=1, format="%d"), "出来高数": st.column_config.NumberColumn("出来高", step=1, format="%d")}, 
+                    column_config={"ケース数": st.column_config.NumberColumn("CS数", step=1, format="%d"), "出来高数": st.column_config.NumberColumn("出来高", step=1, format="%d"), "賞味期限": st.column_config.DateColumn("賞味期限", format="YYYY-MM-DD"), "ID": None}, 
                     key="edit_all_m", height=400
                 )
-                msg_slot_all_m = st.empty()
-                if st.button("💾 上記の変更（修正・削除）をすべて保存する", key="btn_edit_all_m"):
-                    save_df = edited_all_m.copy()
-                    save_df["製造予定日"] = pd.to_datetime(save_df["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
-                    merged_df = pd.merge(save_df, manus_df[["ID", "大カテゴリ", "賞味期限", "品質コメント", "備考", "登録日時"]], on="ID", how="left")
-                    save_and_sync("manufactures", merged_df)
-                    msg_slot_all_m.success("✅ 全データの更新・削除を完了しました！")
+                msg_slot_m_all = st.empty()
+                if st.button("💾 全データを上書き保存", key="btn_edit_all_m"):
+                    save_df_all_m = edited_all_m.copy()
+                    save_df_all_m["製造予定日"] = pd.to_datetime(save_df_all_m["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
+                    merged_all_m = pd.merge(save_df_all_m, manus_df[["ID", "大カテゴリ", "品質コメント", "備考", "登録日時"]], on="ID", how="left")
+                    save_and_sync("manufactures", merged_all_m)
+                    msg_slot_m_all.success("✅ 全データの更新を完了しました")
 
     with t_m2:
         st.markdown("### 👷 労務・作業内容の登録")
@@ -667,19 +690,18 @@ elif page == "📦 資材・入出庫":
                     msg_slot_p_add.success(f"✨ 資材ログを登録しました: {sel_pack} ({final_p_type} {log_qty})")
                 else: msg_slot_p_add.info("現在の計算在庫と一致しているため、調整は不要です。")
 
-    with t_p3:
-        # ★ 拡張版：資材ログの一括編集・削除
+    with t_p2:
         st.markdown('### ✏️ 登録データのかんたん修正・削除')
         if not pack_log_df.empty:
             disp_pack = pack_log_df.sort_values("登録日時", ascending=False).copy()
             disp_pack["登録日(表示)"] = disp_pack["登録日"].apply(format_date_jp)
+            disp_cols = ["ID", "登録日(表示)", "資材名", "処理区分", "数量", "理由", "関連製品名", "備考"]
             
             with st.expander("📂 過去の全データを一括編集・削除（クリックで拡大展開）", expanded=True):
                 st.info("💡 **操作方法:** セルをクリックして直接文字や数字を打ち変えられます。左端のチェックボックスを選択してキーボードの「Delete」を押すと行（データ）の削除が可能です。")
                 edited_all_p = st.data_editor(
-                    disp_pack[["ID", "登録日(表示)", "資材名", "処理区分", "数量", "理由", "関連製品名", "備考"]], 
-                    num_rows="dynamic", use_container_width=True, hide_index=True, 
-                    column_config={"登録日(表示)": st.column_config.TextColumn("登録日 (表示用)", disabled=True), "処理区分": st.column_config.SelectboxColumn("処理区分", options=["入庫", "出庫", "製造連動"]), "数量": st.column_config.NumberColumn("数量", min_value=1, step=1, format="%d")}, 
+                    disp_pack[disp_cols], num_rows="dynamic", use_container_width=True, hide_index=True, 
+                    column_config={"登録日(表示)": st.column_config.TextColumn("登録日 (表示用)", disabled=True), "処理区分": st.column_config.SelectboxColumn("処理区分", options=["入庫", "出庫", "製造連動"]), "数量": st.column_config.NumberColumn("数量", min_value=1, step=1, format="%d"), "ID": None}, 
                     key="edit_all_p", height=500
                 )
                 msg_slot_all_p = st.empty()
