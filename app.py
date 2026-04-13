@@ -240,15 +240,26 @@ future_stocks  = {}
 master_df_unique = master_df.drop_duplicates(subset=["製品名"]) if not master_df.empty else pd.DataFrame(columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数"])
 
 if not master_df_unique.empty:
-    o_ev = orders_df[["納品予定日","製品名","ケース数"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日","製品名","ケース数"])
-    if not o_ev.empty:
+    # 受注イベント（常に 日付/製品名/qty の列を持つ空DFで統一）
+    _EMPTY_EV = pd.DataFrame(columns=["日付","製品名","qty"])
+    if not orders_df.empty:
+        o_ev = orders_df[["納品予定日","製品名","ケース数"]].copy()
         o_ev = o_ev.rename(columns={"納品予定日":"日付","ケース数":"qty"})
         o_ev["qty"] = -pd.to_numeric(o_ev["qty"], errors='coerce').fillna(0).abs()
-    m_ev = manus_df[["製造予定日","製品名","ケース数"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日","製品名","ケース数"])
-    if not m_ev.empty:
+    else:
+        o_ev = _EMPTY_EV.copy()
+    # 製造イベント
+    if not manus_df.empty:
+        m_ev = manus_df[["製造予定日","製品名","ケース数"]].copy()
         m_ev = m_ev.rename(columns={"製造予定日":"日付","ケース数":"qty"})
         m_ev["qty"] = pd.to_numeric(m_ev["qty"], errors='coerce').fillna(0).abs()
-    all_ev = pd.concat([o_ev, m_ev]).dropna(subset=["製品名","日付"])
+    else:
+        m_ev = _EMPTY_EV.copy()
+    all_ev = pd.concat([o_ev, m_ev], ignore_index=True)
+    # 列が確実に存在する状態でdropna
+    for _c in ["日付","製品名","qty"]:
+        if _c not in all_ev.columns: all_ev[_c] = None
+    all_ev = all_ev.dropna(subset=["製品名","日付"])
     all_ev["qty"] = all_ev["qty"].apply(to_int)
     past_ev  = all_ev[all_ev["日付"] < today].groupby("製品名")["qty"].sum()
     future_ev = all_ev[all_ev["日付"] >= today]
