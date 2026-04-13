@@ -306,7 +306,14 @@ with st.sidebar:
     st.markdown("<p style='font-size:20px; font-weight:900; color:#1E3A8A; margin-bottom:8px;'>🏭 丸実屋システム</p>", unsafe_allow_html=True)
 
     # KPIサマリをサイドバーに表示
-    today_orders = orders_df[orders_df["納品予定日"].dt.date == date.today()] if not orders_df.empty else pd.DataFrame()
+    try:
+        if not orders_df.empty and "納品予定日" in orders_df.columns:
+            _delivery = pd.to_datetime(orders_df["納品予定日"], errors='coerce')
+            today_orders = orders_df[_delivery.dt.date == date.today()]
+        else:
+            today_orders = pd.DataFrame()
+    except Exception:
+        today_orders = pd.DataFrame()
     shortage_count = sum(1 for p, fs in future_stocks.items() if any(v < 0 for v in list(fs.values())[:7]))
     st.markdown(f"""
     <div style="background:#EFF6FF; border-radius:8px; padding:10px 14px; margin-bottom:10px; font-size:13px;">
