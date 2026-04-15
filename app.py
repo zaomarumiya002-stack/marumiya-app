@@ -202,8 +202,8 @@ def load_data_from_cloud(name):
     cols_def = {
         "orders":           ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
         "manufactures":     ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
-        "master":           ["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分"],
-        "customers":        ["顧客名","ふりがな"],
+        "master":           ["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分","特注フラグ","チャーターフラグ"],
+        "customers":        ["顧客名","ふりがな","帳合先","支店名"],
         "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点"],
         "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
         "shipping_master":  ["運送会社名"],
@@ -230,7 +230,7 @@ def load_data_from_cloud(name):
         date_cols = ["納品予定日","製造予定日","登録日","登録日時","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","出荷予定日","更新日時"]
         for c in date_cols:
             if c in df.columns: df[c] = pd.to_datetime(df[c], errors='coerce')
-        bool_cols = ["荷姿チェック","不良廃棄フラグ","リパックフラグ","日付未定フラグ"]
+        bool_cols = ["荷姿チェック","不良廃棄フラグ","リパックフラグ","日付未定フラグ","特注フラグ","チャーターフラグ"]
         for c in bool_cols:
             if c in df.columns: df[c] = df[c].astype(str).str.upper() == "TRUE"
         return df[target_cols]
@@ -319,6 +319,27 @@ def is_date_undefined(row):
         return pd.isna(d)
     except: return False
 
+# 帳合先リスト取得
+def get_toriatsuki_list():
+    if cust_df.empty: return []
+    col = "帳合先" if "帳合先" in cust_df.columns else "顧客名"
+    return sorted(cust_df[col].dropna().unique().tolist())
+
+def get_shiten_list(toriatsuki):
+    if cust_df.empty or not toriatsuki: return []
+    if "帳合先" not in cust_df.columns or "支店名" not in cust_df.columns: return []
+    rows = cust_df[cust_df["帳合先"] == toriatsuki]
+    return sorted(rows["支店名"].dropna().replace("","").unique().tolist())
+
+def get_product_special_flags(prod_name):
+    """マスタに設定された特注フラグ・チャーターフラグを取得"""
+    if master_df_unique.empty or not prod_name: return False, False
+    row = master_df_unique[master_df_unique["製品名"] == prod_name]
+    if row.empty: return False, False
+    sp_f = str(row.iloc[0].get("特注フラグ","")).upper() in ["TRUE","1","YES","○","◯"]
+    ch_f = str(row.iloc[0].get("チャーターフラグ","")).upper() in ["TRUE","1","YES","○","◯"]
+    return sp_f, ch_f
+
 # ─────────────────────────────────────────────
 # 4. 在庫計算エンジン（堅牢版）
 # ─────────────────────────────────────────────
@@ -327,7 +348,7 @@ dates = pd.date_range(today, today + timedelta(days=60))
 
 current_stocks = {}
 future_stocks  = {}
-master_df_unique = master_df.drop_duplicates(subset=["製品名"]) if not master_df.empty else pd.DataFrame(columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分"])
+master_df_unique = master_df.drop_duplicates(subset=["製品名"]) if not master_df.empty else pd.DataFrame(columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分","特注フラグ","チャーターフラグ"])
 
 if not master_df_unique.empty:
     _EMPTY_EV = pd.DataFrame(columns=["日付","製品名","qty"])
@@ -460,71 +481,98 @@ if page == "📋 受注登録":
     page_header("📋 受注 登録")
 
     with st.container():
-        # ── 日付未定チェック（最初に）
+        # ── 日付未定チェック
         is_date_undef = st.checkbox(
-            "📅 納品日を後で決める（日付未定で登録）",
-            value=False,
-            help="チェックすると日付なしで登録。後から「日付未定一覧」で日付を確定できます。"
+            "📅 納品日を後で決める（日付未定で登録）", value=False,
+            help="チェックすると日付なしで登録。後から「🟡 日付未定受注の確定」で確定できます。"
         )
         if is_date_undef:
             st.markdown(
                 '<div class="info-card yellow" style="background:#FFFBEB;padding:10px 16px;">'
-                '🟡 <b>日付未定</b> として登録されます。後から「日付未定受注の確定」で日付・顧客名を追加できます。'
-                '</div>', unsafe_allow_html=True
-            )
+                '🟡 <b>日付未定</b> として登録されます。後から納品日・帳合先を確定できます。'
+                '</div>', unsafe_allow_html=True)
             o_date = None
         else:
             o_date = st.date_input("📅 納品日", value=date.today() + timedelta(days=1))
 
-        # ── 基本情報行
-        c2, c3, c4 = st.columns([2, 1, 1])
-        c_name    = c2.selectbox("🏢 顧客名", options=sorted(cust_df["顧客名"].unique()) if not cust_df.empty else [], index=None, placeholder="顧客名を検索…（後からでも可）")
+        # ── 帳合先 ＋ 支店名/店舗名
         ship_list = ship_mst_df["運送会社名"].tolist() if not ship_mst_df.empty else []
-        ship_comp = c4.selectbox("🚚 運送会社", options=ship_list, index=None, placeholder="未定")
+        tori_list = get_toriatsuki_list()
+        ta1, ta2, ta3 = st.columns([2, 2, 1])
+        sel_toriatsuki = ta1.selectbox(
+            "🏢 帳合先", options=tori_list, index=None,
+            placeholder="帳合先を選択…（後からでも可）", key="sel_tori"
+        )
+        # 支店・店舗リスト
+        shiten_candidates = get_shiten_list(sel_toriatsuki) if sel_toriatsuki else []
+        if shiten_candidates:
+            shiten_input = ta2.selectbox(
+                "🏬 支店・店舗名", options=["（なし）"] + shiten_candidates,
+                index=0, key="sel_shiten"
+            )
+            shiten_val = "" if shiten_input == "（なし）" else shiten_input
+        else:
+            shiten_val = ta2.text_input("🏬 支店・店舗名（直接入力可）", key="txt_shiten", placeholder="例：仙台支店")
+        ship_comp = ta3.selectbox("🚚 運送会社", options=ship_list, index=None, placeholder="未定")
 
-        # ── カテゴリ選択（大きなPills）
+        # 表示用顧客名を合成（帳合先＋支店）
+        def build_cust_name(tori, shiten):
+            if not tori: return "未指定"
+            return f"{tori} {shiten}".strip() if shiten else tori
+
+        # ── カテゴリ選択
         cat_full = st.pills("カテゴリ", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed")
         cat = cat_full.split(" ",1)[1] if cat_full else CATEGORIES[0].split(" ",1)[1]
 
         # ── 製品選択
         sc1, sc2, sc3 = st.columns([1.5, 2.5, 1.5])
-        search_p = sc1.text_input("🔍 製品検索", placeholder="名称の一部を入力...")
+        search_p = sc1.text_input("🔍 製品検索", placeholder="名称の一部を入力...", key="search_prod")
         prods = ([p for p in master_df_unique["製品名"].tolist() if search_p in p] if search_p
                  else master_df_unique[master_df_unique["大カテゴリ"] == cat]["製品名"].tolist() if not master_df_unique.empty else [])
         prod = sc2.selectbox("確定製品", options=prods, index=None, placeholder="選択してください", format_func=format_name)
 
-        # ── 特注・チャーター便 選択式
-        special_type = sc3.selectbox("⭐ 種別", options=SPECIAL_TYPES, index=0)
+        # ── 製品選択時、マスタの特注/チャーターフラグを自動反映
+        prod_sp_flag, prod_ch_flag = get_product_special_flags(prod)
+        if prod_sp_flag:
+            auto_sp = "⭐ 特注"
+        elif prod_ch_flag:
+            auto_sp = "🚌 チャーター便"
+        else:
+            auto_sp = "（なし）"
+        sp_idx = SPECIAL_TYPES.index(auto_sp) if auto_sp in SPECIAL_TYPES else 0
+        special_type = sc3.selectbox("⭐ 種別", options=SPECIAL_TYPES, index=sp_idx, key="sel_special")
 
         # ── 数量入力（個数 or ケース数）
         nyusuu, tani = get_product_unit_info(prod)
-        use_individual = (tani != "ケース" and nyusuu > 1)
+        # 単位区分が「ケース」以外かつ入数>1のとき個数入力対応
+        use_individual = (tani not in ["ケース","","nan","None"] and nyusuu > 1)
 
-        qty_col1, qty_col2 = st.columns([1, 2])
         if use_individual:
-            input_mode = qty_col1.radio("入力単位", ["個数で入力", "ケース数で入力"], horizontal=True, key="qty_mode")
+            q1, q2 = st.columns([1, 2])
+            input_mode = q1.radio(
+                f"入力単位（1cs＝{nyusuu}{tani}）",
+                ["個数で入力", "ケース数で入力"], horizontal=True, key="qty_mode"
+            )
             if input_mode == "個数で入力":
-                raw_qty = qty_col2.number_input(
-                    f"📦 個数（1ケース = {nyusuu}個）", min_value=1, step=1, format="%d", value=None
+                raw_qty = q2.number_input(
+                    f"📦 個数（{tani}）", min_value=1, step=1, format="%d", value=None, key="raw_qty"
                 )
-                if raw_qty is not None:
-                    cs_from_ind = int(raw_qty) // nyusuu
+                if raw_qty is not None and int(raw_qty) > 0:
+                    cs_val = int(raw_qty) // nyusuu
                     rem_ind = int(raw_qty) % nyusuu
-                    qty = cs_from_ind if cs_from_ind > 0 else None
-                    qty_col2.markdown(
-                        f"<div style='font-size:13px;color:#475569;margin-top:4px;'>"
-                        f"➡ <b>{cs_from_ind} ケース</b>"
-                        + (f" <span style='color:#F59E0B;'>（端数 {rem_ind} 個は切り捨て）</span>" if rem_ind > 0 else "")
-                        + "</div>", unsafe_allow_html=True
-                    )
+                    qty = cs_val if cs_val > 0 else None
+                    hint = f"➡ <b>{cs_val} ケース</b>"
+                    if rem_ind > 0:
+                        hint += f" <span style='color:#F59E0B;'>（端数 {rem_ind} {tani}は切り捨て）</span>"
+                    q2.markdown(f"<div style='font-size:13px;color:#475569;margin-top:2px;'>{hint}</div>", unsafe_allow_html=True)
                 else:
                     qty = None
             else:
-                qty = qty_col2.number_input(f"📦 ケース数", min_value=1, step=1, format="%d", value=None)
+                qty = q2.number_input("📦 ケース数", min_value=1, step=1, format="%d", value=None, key="cs_qty")
                 if qty:
-                    qty_col2.markdown(f"<div style='font-size:13px;color:#475569;margin-top:4px;'>≒ <b>{to_int(qty)*nyusuu} 個</b></div>", unsafe_allow_html=True)
+                    q2.markdown(f"<div style='font-size:13px;color:#475569;margin-top:2px;'>≒ <b>{to_int(qty)*nyusuu} {tani}</b></div>", unsafe_allow_html=True)
         else:
-            qty = c3.number_input("📦 ケース数", min_value=1, step=1, format="%d", value=None)
+            qty = st.number_input("📦 ケース数", min_value=1, step=1, format="%d", value=None, key="cs_qty_plain")
 
         # ── 備考・オプション
         r1, r2 = st.columns([2, 2])
@@ -534,8 +582,8 @@ if page == "📋 受注登録":
         is_irregular  = col_chk2.checkbox("⚠️ 不良廃棄")
         st.write("---")
 
-        # 欠品アラート（マイナス数を赤文字）
-        if prod and qty is not None and qty > 0:
+        # 欠品アラート
+        if prod and qty is not None and to_int(qty) > 0:
             cur_stock = current_stocks.get(prod, 0)
             if cur_stock < to_int(qty):
                 shortage_num = to_int(qty) - cur_stock
@@ -543,61 +591,62 @@ if page == "📋 受注登録":
                 <div class="info-card red" style="background:#FEF2F2;">
                     🚨 <b>製品在庫が不足します！</b>　現在庫: <b>{cur_stock} cs</b>
                     &nbsp;／&nbsp; 不足分: <span class="shortage-red">－{shortage_num} cs</span>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>""", unsafe_allow_html=True)
 
-        # 特注バッジ表示
+        # 特注バッジ
         if special_type != "（なし）":
             bc = "badge-special" if "特注" in special_type else "badge-charter"
-            st.markdown(f'<span class="badge {bc}">{special_type} として登録します</span>', unsafe_allow_html=True)
+            lbl = "⭐ 特注" if "特注" in special_type else "🚌 チャーター便"
+            if prod_sp_flag or prod_ch_flag:
+                st.markdown(f'<span class="badge {bc}">{lbl}（マスタ自動設定）として登録します</span>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span class="badge {bc}">{lbl} として登録します</span>', unsafe_allow_html=True)
 
         msg_slot_add = st.empty()
         if st.session_state.get("msg_order_add"):
             msg_slot_add.success(st.session_state.msg_order_add); st.session_state.msg_order_add = None
 
         if st.button("✅ 受注を登録する", type="primary", use_container_width=True):
-            if not prod or qty is None:
-                msg_slot_add.error("⚠️ 【製品・ケース数】は必須です。")
+            if not prod or qty is None or to_int(qty) < 1:
+                msg_slot_add.error("⚠️ 【製品・ケース数（1以上）】は必須です。")
             else:
                 prefix = ""
                 if is_substitute: prefix += "【代替品】"
                 if is_irregular:  prefix += "【不良廃棄】"
                 sp_label = ""
-                if "特注" in special_type:          sp_label = "特注"
-                elif "チャーター便" in special_type: sp_label = "チャーター便"
+                if "特注" in special_type:           sp_label = "特注"
+                elif "チャーター便" in special_type:  sp_label = "チャーター便"
                 full_rem = f"{prefix} {sp_label} {rem}".strip()
-
+                cust_name = build_cust_name(sel_toriatsuki, shiten_val)
                 new_id = str(uuid.uuid4())[:6].upper()
                 delivery_date = pd.to_datetime(o_date) if o_date else pd.NaT
                 new_row = pd.DataFrame([{
-                    "ID": new_id,
-                    "納品予定日": delivery_date,
-                    "顧客名": c_name if c_name else "未指定",
+                    "ID": new_id, "納品予定日": delivery_date,
+                    "顧客名": cust_name,
                     "大カテゴリ": cat, "製品名": prod, "ケース数": to_int(qty),
                     "運送会社": ship_comp if ship_comp else "",
                     "備考": full_rem, "荷姿チェック": False,
                     "賞味期限1":"","賞味期限2":"","賞味期限3":"","賞味期限4":"","賞味期限5":"",
                     "発送備考":"", "不良廃棄フラグ": is_irregular,
-                    "日付未定フラグ": is_date_undef,
-                    "登録日時": datetime.now()
+                    "日付未定フラグ": is_date_undef, "登録日時": datetime.now()
                 }])
                 append_and_sync("orders", new_row)
                 if sp_label and o_date:
                     new_sp = pd.DataFrame([{
                         "ID": str(uuid.uuid4())[:6].upper(), "受注ID": new_id,
-                        "製品名": prod, "顧客名": c_name if c_name else "未指定",
+                        "製品名": prod, "顧客名": cust_name,
                         "納品予定日": delivery_date,
                         "出荷予定日": delivery_date - timedelta(days=1),
                         "備考": full_rem, "更新日時": datetime.now()
                     }])
                     append_and_sync("special_schedule", new_sp)
                 date_str = format_date_jp(o_date) if o_date else "日付未定"
-                st.session_state.msg_order_add = f"✨ 登録完了: {prod} ({qty}cs)　{date_str}"
+                st.session_state.msg_order_add = f"✨ 登録完了: {prod} ({to_int(qty)}cs) {date_str}"
                 st.rerun()
 
     # ══ 日付未定受注の確定パネル ══
     if not orders_df.empty and "日付未定フラグ" in orders_df.columns:
-        undef_orders = orders_df[orders_df["日付未定フラグ"] == True].copy()
+        undef_orders = orders_df[orders_df["日付未定フラグ"] == True].copy().reset_index(drop=True)
     else:
         undef_orders = pd.DataFrame()
 
@@ -605,36 +654,35 @@ if page == "📋 受注登録":
         st.markdown(f"""
         <div style="background:linear-gradient(135deg,#FFFBEB,#FEF3C7);border:2px solid #F59E0B;
              border-radius:12px;padding:14px 18px;margin:16px 0;">
-            <span style="font-size:18px;">🟡</span>
-            <b style="font-size:16px;color:#92400E;"> 日付未定の受注が {len(undef_orders)} 件あります — 納品日・顧客名を確定してください</b>
-        </div>
-        """, unsafe_allow_html=True)
+            🟡 <b style="font-size:16px;color:#92400E;">日付未定の受注が {len(undef_orders)} 件あります</b>
+            　— 納品日を確定してください（帳合先は任意）
+        </div>""", unsafe_allow_html=True)
 
-        with st.expander("🟡 日付未定受注を確定する（クリックで展開）", expanded=True):
-            st.info("💡 「納品予定日(確定)」と「顧客名」を入力して保存すると、目印（🟡）が消去されます。")
-            undef_display = undef_orders.copy()
-            undef_display["納品予定日(確定)"] = pd.NaT
-            undef_display["顧客名(確定)"] = undef_display["顧客名"].replace("未指定","")
-            undef_cols = ["ID","製品名","ケース数","備考","納品予定日(確定)","顧客名(確定)","運送会社"]
-            undef_cols = [c for c in undef_cols if c in undef_display.columns] +                          [c for c in ["納品予定日(確定)","顧客名(確定)"] if c not in undef_cols]
+        with st.expander("🟡 日付未定受注を確定する", expanded=True):
+            st.info("💡 「納品予定日(確定)」を入力して保存すると🟡が消えます。帳合先・運送会社は任意です。")
+
+            # 表示用DF準備（indexを 0,1,2... に揃える）
+            undef_disp = undef_orders[["ID","製品名","ケース数","備考","顧客名","運送会社"]].copy()
+            undef_disp.insert(4, "納品予定日(確定)", None)
+            undef_disp.insert(5, "帳合先(確定)", "")
+            undef_disp.insert(6, "支店名(確定)", "")
+
+            cust_opts = get_toriatsuki_list()
+            ship_opts = ship_mst_df["運送会社名"].tolist() if not ship_mst_df.empty else []
 
             edited_undef = st.data_editor(
-                undef_display[["ID","製品名","ケース数","備考","納品予定日(確定)","顧客名(確定)","運送会社"]],
+                undef_disp,
                 use_container_width=True, hide_index=True,
                 column_config={
                     "ID": None,
                     "製品名": st.column_config.TextColumn("製品名", disabled=True),
                     "ケース数": st.column_config.NumberColumn("ケース数", disabled=True),
                     "備考": st.column_config.TextColumn("備考", disabled=True),
-                    "納品予定日(確定)": st.column_config.DateColumn("📅 納品日（ここに入力）", format="YYYY/MM/DD"),
-                    "顧客名(確定)": st.column_config.SelectboxColumn(
-                        "🏢 顧客名（確定）",
-                        options=sorted(cust_df["顧客名"].unique().tolist()) if not cust_df.empty else []
-                    ),
-                    "運送会社": st.column_config.SelectboxColumn(
-                        "🚚 運送会社",
-                        options=ship_mst_df["運送会社名"].tolist() if not ship_mst_df.empty else []
-                    ),
+                    "顧客名": st.column_config.TextColumn("現在の顧客名", disabled=True),
+                    "納品予定日(確定)": st.column_config.DateColumn("📅 納品日【必須】", format="YYYY/MM/DD"),
+                    "帳合先(確定)": st.column_config.SelectboxColumn("🏢 帳合先（任意）", options=cust_opts),
+                    "支店名(確定)": st.column_config.TextColumn("🏬 支店名（任意）"),
+                    "運送会社": st.column_config.SelectboxColumn("🚚 運送会社", options=ship_opts),
                 }, key="edit_undef"
             )
 
@@ -645,24 +693,41 @@ if page == "📋 受注登録":
             if st.button("✅ 日付を確定して消込する", type="primary", use_container_width=True, key="btn_undef_confirm"):
                 updated_orders = orders_df.copy()
                 confirmed_count = 0
-                for idx, row in edited_undef.iterrows():
-                    oid = undef_display.iloc[idx]["ID"]
-                    new_date = row.get("納品予定日(確定)")
-                    new_cust = row.get("顧客名(確定)","")
-                    new_ship = row.get("運送会社","")
-                    mask = updated_orders["ID"] == oid
-                    if mask.any() and pd.notnull(new_date) and new_date:
+                errors = []
+                for i in range(len(edited_undef)):
+                    try:
+                        row = edited_undef.iloc[i]
+                        # IndexErrorを防ぐため iloc で安全取得
+                        oid = undef_orders.iloc[i]["ID"] if i < len(undef_orders) else None
+                        if oid is None: continue
+                        new_date = row.get("納品予定日(確定)")
+                        new_tori = str(row.get("帳合先(確定)","")).strip()
+                        new_shiten = str(row.get("支店名(確定)","")).strip()
+                        new_ship = str(row.get("運送会社","")).strip()
+                        # 納品日のみ必須、顧客名は任意
+                        if pd.isnull(new_date) or not new_date:
+                            continue  # 日付未入力はスキップ
+                        mask = updated_orders["ID"] == oid
+                        if not mask.any(): continue
                         updated_orders.loc[mask, "納品予定日"] = pd.to_datetime(new_date)
                         updated_orders.loc[mask, "日付未定フラグ"] = False
-                        if new_cust and new_cust != "未指定":
-                            updated_orders.loc[mask, "顧客名"] = new_cust
+                        # 帳合先が入力されていれば顧客名を更新
+                        if new_tori:
+                            new_cust_combined = f"{new_tori} {new_shiten}".strip() if new_shiten else new_tori
+                            updated_orders.loc[mask, "顧客名"] = new_cust_combined
                         if new_ship:
                             updated_orders.loc[mask, "運送会社"] = new_ship
                         confirmed_count += 1
+                    except Exception as e:
+                        errors.append(str(e))
+                        continue
+
                 if confirmed_count > 0:
                     save_and_sync("orders", updated_orders)
-                    st.session_state.msg_undef_save = f"✅ {confirmed_count} 件の受注日付を確定しました！"
+                    st.session_state.msg_undef_save = f"✅ {confirmed_count} 件の受注を確定しました！"
                     st.rerun()
+                elif errors:
+                    msg_undef.error(f"エラーが発生しました: {errors[0]}")
                 else:
                     msg_undef.warning("⚠️ 「納品予定日(確定)」を入力してから保存してください。")
 
@@ -670,10 +735,9 @@ if page == "📋 受注登録":
     if not orders_df.empty:
         disp_orders = orders_df.sort_values("登録日時", ascending=False).copy()
         disp_orders["納品予定日(表示)"] = disp_orders["納品予定日"].apply(format_date_jp)
-        # 日付未定フラグがある行に🟡マークを付与
         if "日付未定フラグ" in disp_orders.columns:
             disp_orders["納品予定日(表示)"] = disp_orders.apply(
-                lambda r: ("🟡 " + r["納品予定日(表示)"]) if (r.get("日付未定フラグ") is True) else r["納品予定日(表示)"],
+                lambda r: ("🟡 日付未定" if r.get("日付未定フラグ") is True else r["納品予定日(表示)"]),
                 axis=1
             )
         disp_cols = ["ID","納品予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]
@@ -685,7 +749,10 @@ if page == "📋 受注登録":
             msg_slot_edit.success(st.session_state.msg_order_edit); st.session_state.msg_order_edit = None
         if st.button("💾 直近データを修正・削除保存", key="btn_edit_o"):
             save_df = edited.copy()
-            save_df["納品予定日"] = pd.to_datetime(save_df["納品予定日(表示)"].str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
+            save_df["納品予定日"] = pd.to_datetime(
+                save_df["納品予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0],
+                errors="coerce"
+            )
             keep_cols = [c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in orders_df.columns]
             merged_df = pd.merge(save_df, orders_df[keep_cols], on="ID", how="left")
             updated = pd.concat([orders_df[~orders_df["ID"].isin(recent["ID"])], merged_df], ignore_index=True)
@@ -700,7 +767,10 @@ if page == "📋 受注登録":
                 msg_slot_all.success(st.session_state.msg_order_all); st.session_state.msg_order_all = None
             if st.button("💾 全データを上書き保存", key="btn_edit_all_o"):
                 save_df_all = edited_all.copy()
-                save_df_all["納品予定日"] = pd.to_datetime(save_df_all["納品予定日(表示)"].str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
+                save_df_all["納品予定日"] = pd.to_datetime(
+                    save_df_all["納品予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0],
+                    errors="coerce"
+                )
                 keep_cols2 = [c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in orders_df.columns]
                 merged_all = pd.merge(save_df_all, orders_df[keep_cols2], on="ID", how="left")
                 save_and_sync("orders", merged_all)
@@ -1490,15 +1560,20 @@ elif page == "⚙️ マスタ・分析":
         section("製品カテゴリ・初期在庫・資材連動の編集")
         pn_list = pack_mst_unique["資材名"].tolist() if not pack_mst_unique.empty else []
         em = st.data_editor(master_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={"大カテゴリ": st.column_config.SelectboxColumn("大カテゴリ",options=[c.split(" ",1)[1] for c in CATEGORIES],required=True),"製品名": st.column_config.TextColumn("製品名",required=True),"初期在庫数": st.column_config.NumberColumn("初期在庫数",min_value=-9999,step=1,format="%d",default=0,required=True),"使用資材名": st.column_config.SelectboxColumn("使用資材名",options=pn_list),"資材使用数": st.column_config.NumberColumn("1ケースあたりの資材数",min_value=0,step=1,format="%d",default=1),"入数": st.column_config.NumberColumn("入数（個/cs）",min_value=1,step=1,format="%d",default=1,help="1ケースに何個入るか。個数入力対応に使用します。"),"単位区分": st.column_config.SelectboxColumn("単位区分",options=["ケース","個","本","袋","パック","箱"],help="個数入力を使う場合は「個」等を選択")}, key="edit_master")
+            column_config={"大カテゴリ": st.column_config.SelectboxColumn("大カテゴリ",options=[c.split(" ",1)[1] for c in CATEGORIES],required=True),"製品名": st.column_config.TextColumn("製品名",required=True),"初期在庫数": st.column_config.NumberColumn("初期在庫数",min_value=-9999,step=1,format="%d",default=0,required=True),"使用資材名": st.column_config.SelectboxColumn("使用資材名",options=pn_list),"資材使用数": st.column_config.NumberColumn("1ケースあたりの資材数",min_value=0,step=1,format="%d",default=1),"入数": st.column_config.NumberColumn("入数（個/cs）",min_value=1,step=1,format="%d",default=1,help="1ケースに何個入るか（例：12）。個数入力対応で使用。"),"単位区分": st.column_config.SelectboxColumn("単位区分",options=["ケース","個","本","袋","パック","箱"],help="「ケース」以外を選ぶと個数入力モードが有効になります。"),"特注フラグ": st.column_config.CheckboxColumn("⭐ 特注品",default=False,help="チェックすると受注登録時に自動で特注扱いになります。"),"チャーターフラグ": st.column_config.CheckboxColumn("🚌 チャーター",default=False,help="チェックすると受注登録時に自動でチャーター便扱いになります。")}, key="edit_master")
         msg_mst = st.empty()
         if st.session_state.get("msg_mst_prod"): msg_mst.success(st.session_state.msg_mst_prod); st.session_state.msg_mst_prod = None
         if st.button("💾 製品マスタを保存・同期", type="primary", use_container_width=True):
             save_and_sync("master", em); st.session_state.msg_mst_prod = "✅ 製品マスタを更新しました！"; st.rerun()
     with t_m2:
         section("顧客リストの編集")
+        st.markdown("""
+        <div style="font-size:13px;color:#475569;background:#EFF6FF;border-radius:8px;padding:10px 14px;margin-bottom:10px;">
+        📌 <b>帳合先</b>＝取引先の親会社名（例：イオン）、<b>支店名</b>＝店舗・支店名（例：仙台店）。<br>
+        受注登録時に帳合先→支店名の順で選択できます。既存の「顧客名」は互換維持のため残してください。
+        </div>""", unsafe_allow_html=True)
         ec2 = st.data_editor(cust_df.copy(), num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={"顧客名": st.column_config.TextColumn("顧客名",required=True),"ふりがな": st.column_config.TextColumn("ふりがな")}, key="edit_cust")
+            column_config={"顧客名": st.column_config.TextColumn("顧客名（旧形式・互換用）"),"ふりがな": st.column_config.TextColumn("ふりがな"),"帳合先": st.column_config.TextColumn("🏢 帳合先（親会社・取引先名）",help="例：イオン、コープ、業務スーパー"),"支店名": st.column_config.TextColumn("🏬 支店・店舗名",help="例：仙台店、東北支店")}, key="edit_cust")
         msg_cust = st.empty()
         if st.session_state.get("msg_mst_cust"): msg_cust.success(st.session_state.msg_mst_cust); st.session_state.msg_mst_cust = None
         if st.button("💾 顧客マスタを保存・同期", type="primary", use_container_width=True):
