@@ -166,21 +166,7 @@ p, span, label, div { color: #0F172A !important; }
 [data-testid="stAppViewContainer"].fullscreen-mode [data-testid="stSidebar"] {
     display: none !important;
 }
-/* ── dataframe フルスクリーン時に真全画面表示 ── */
-[data-testid="stFullScreenFrame"] {
-    position: fixed !important;
-    top: 0 !important; left: 0 !important;
-    width: 100vw !important; height: 100vh !important;
-    z-index: 9999 !important;
-    background: white !important;
-    overflow: auto !important;
-    padding: 16px !important;
-    box-sizing: border-box !important;
-}
-[data-testid="stFullScreenFrame"] > div {
-    width: 100% !important;
-    height: calc(100vh - 32px) !important;
-}
+
 /* ── ガントチャート用 ── */
 .gantt-wrap { overflow-x: auto; background:white; border-radius:12px; padding:16px; }
 .gantt-bar-critical { background: linear-gradient(90deg,#DC2626,#F87171); border-radius:4px; }
