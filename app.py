@@ -1252,7 +1252,7 @@ elif page == "📊 在庫・スケジュール":
             with col_inv1:
                 st.markdown(
                     '<div style="font-size:13px; color:#64748B; margin-bottom:6px;">'
-                    '💡 <b>テーブルの行をクリックして選択</b>すると下に詳細が展開されます。'
+                    '💡 <b>「製品名」列のセルをダブルクリック</b>すると下に詳細が展開されます。'
                     '右上の <b>⛶</b> ボタンで全画面表示（全列・全行が確認できます）。'
                     '</div>', unsafe_allow_html=True)
             with col_inv2:
@@ -1261,9 +1261,9 @@ elif page == "📊 在庫・スケジュール":
 
             all_prods = inv_df["製品名"].tolist()
 
-            # ── テーブル（行選択モード） ── クリックで製品選択
+            # ── テーブル（製品名列クリック選択モード）
             tbl_row_count = len(inv_df)
-            tbl_height = min(max(tbl_row_count * 35 + 50, 200), 700)  # 全行表示、最大700px
+            tbl_height = min(max(tbl_row_count * 35 + 50, 200), 700)
             sel_event = st.dataframe(
                 inv_df.style.map(style_stock_cell),
                 use_container_width=True,
@@ -1273,15 +1273,15 @@ elif page == "📊 在庫・スケジュール":
                 selection_mode="single-row",
                 key="inv_tbl_sel"
             )
-            # 行クリックで製品名を取得
+            # 製品名列ダブルクリック → 行選択イベントで製品名取得
             selected_rows = sel_event.selection.get("rows", []) if hasattr(sel_event, "selection") else []
             if selected_rows:
                 clicked_prod = inv_df.iloc[selected_rows[0]]["製品名"]
                 if st.session_state.drill_product != clicked_prod:
                     st.session_state.drill_product = clicked_prod
-                    st.rerun()
+                    # rerunはせずセレクトボックスに反映させる
 
-            # セレクトボックス（補助・キーボード操作用）
+            # セレクトボックス（キーボード・検索操作用）
             drill_default_idx = 0
             if st.session_state.drill_product and st.session_state.drill_product in all_prods:
                 drill_default_idx = all_prods.index(st.session_state.drill_product) + 1
@@ -1291,13 +1291,13 @@ elif page == "📊 在庫・スケジュール":
                 index=drill_default_idx, key="drill_sel"
             )
             if sel_drill != "（選択して詳細を表示）":
-                if st.session_state.drill_product != sel_drill:
-                    st.session_state.drill_product = sel_drill
-                    st.rerun()
-            elif drill_default_idx == 0:
-                pass  # 選択なし状態を維持
+                st.session_state.drill_product = sel_drill
+            elif not selected_rows:
+                st.session_state.drill_product = None
 
-            st.download_button("📥 在庫予測CSVを出力", data=make_csv_bytes(inv_df), file_name=f"在庫予測_{date.today()}.csv", mime="text/csv", use_container_width=True)
+            st.download_button("📥 在庫予測CSVを出力", data=make_csv_bytes(inv_df),
+                file_name=f"在庫予測_{date.today()}.csv", mime="text/csv",
+                use_container_width=True, key="dl_inv_forecast")
 
             # ── ドリルダウンパネル（製品別 過去1年＋今後60日間 詳細）
             dp = st.session_state.drill_product
@@ -1350,7 +1350,8 @@ elif page == "📊 在庫・スケジュール":
                                 "📥 出荷履歴CSV",
                                 data=make_csv_bytes(p_o_hist_disp[hist_show_cols]),
                                 file_name=f"出荷履歴_{dp}_{date.today()}.csv",
-                                mime="text/csv"
+                                mime="text/csv",
+                                key="dl_t1_ship_hist"
                             )
 
                     with hist_tab2:
@@ -1503,7 +1504,7 @@ elif page == "📊 在庫・スケジュール":
                 o_txt = " / ".join([f"{r['顧客名']}:{r['製品名']}({to_int(r['ケース数'])}cs)" for _,r in orders_df[pd.to_datetime(orders_df["納品予定日"],errors='coerce').dt.normalize()==d2].iterrows()])
             else: o_txt = ""
             cal_data.append({"日付": format_date_jp(d2), "製造予定": m_txt, "出荷予定": o_txt})
-        st.download_button("🖨️ カレンダーCSVを出力", data=make_csv_bytes(pd.DataFrame(cal_data)), file_name=f"カレンダー_{today.strftime('%Y%m%d')}.csv", type="primary", use_container_width=True)
+        st.download_button("🖨️ カレンダーCSVを出力", data=make_csv_bytes(pd.DataFrame(cal_data)), file_name=f"カレンダー_{today.strftime('%Y%m%d')}.csv", type="primary", use_container_width=True, key="dl_cal_csv")
         st.markdown(html + '</table>', unsafe_allow_html=True)
 
     # ── タブ3: 製品別詳細ビュー（過去1年履歴 ＋ 今後60日予測）
@@ -1570,7 +1571,8 @@ elif page == "📊 在庫・スケジュール":
                             )
                             st.download_button("📥 出荷履歴CSV",
                                 data=make_csv_bytes(po_disp[show_cols_po]),
-                                file_name=f"出荷履歴_{sel_prod}_{date.today()}.csv", mime="text/csv")
+                                file_name=f"出荷履歴_{sel_prod}_{date.today()}.csv", mime="text/csv",
+                                key="dl_t3_ship_hist")
 
                     with htab_m:
                         if past_m_all.empty:
