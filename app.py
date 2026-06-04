@@ -1041,8 +1041,185 @@ elif page == "📦 資材・入出庫":
     shortage_packs = [pn for pn,d in pack_summary.items() if d["現在庫"] < d["発注点"]]
     if shortage_packs:
         st.error("🚨 **要発注アラート（現在庫が発注点未満）:**　" + "、".join(shortage_packs))
-    t_p1, t_p2, t_p3 = st.tabs(["📊 状況サマリ＆分析","📝 単体入出庫・棚卸","✏️ 履歴・かんたん修正"])
+    t_p1, t_p2, t_p3, t_p4 = st.tabs(["📦 発注日予測（リードタイム連動）","📊 状況サマリ＆分析","📝 単体入出庫・棚卸","✏️ 履歴・かんたん修正"])
+
+    # ── タブ1: 発注日予測（★新機能）
     with t_p1:
+        section("📦 資材 発注日予測（出荷予測 × リードタイム）")
+        st.info("""
+        **使い方：** 各資材のリードタイム（発注→入荷までの日数）を設定すると、
+        受注登録済みの出荷予測をもとに **いつまでに発注すべきか** を自動計算します。
+        🔴 = 今すぐ発注必要　🟡 = 近日中に発注　✅ = 在庫十分
+        """)
+
+        if pack_mst_unique.empty:
+            st.warning("⚙️ マスタ管理から資材を登録してください。")
+        else:
+            # ── リードタイム設定（セッションで保持）
+            if "pack_lead_times" not in st.session_state:
+                st.session_state.pack_lead_times = {}
+
+            with st.expander("⚙️ リードタイム設定（発注→入荷の日数）", expanded=True):
+                lead_cols = st.columns(min(len(pack_mst_unique), 4))
+                for i, (_, pm_row) in enumerate(pack_mst_unique.iterrows()):
+                    pn = pm_row["資材名"]
+                    default_lt = st.session_state.pack_lead_times.get(pn, 7)
+                    lt_val = lead_cols[i % 4].number_input(
+                        f"📦 {pn[:12]}{'…' if len(pn)>12 else ''}",
+                        min_value=0, max_value=180, value=default_lt, step=1,
+                        key=f"lt_{i}", help=f"「{pn}」の発注リードタイム（日数）"
+                    )
+                    st.session_state.pack_lead_times[pn] = lt_val
+
+            st.write("")
+
+            # ── 出荷予測から資材消費量を日別計算
+            if master_df_unique.empty or orders_df.empty:
+                st.info("製品マスタまたは受注データがありません。")
+            else:
+                _mpi_lt = master_df_unique.set_index("製品名")[["使用資材名","資材使用数"]].to_dict("index")
+                forecast_days = 90  # 3ヶ月先まで予測
+
+                # 資材ごとに将来消費量を積算
+                pack_forecast = {}  # {資材名: {日付: 消費量}}
+                for _, o_row in orders_df.iterrows():
+                    prod = str(o_row.get("製品名",""))
+                    qty  = to_int(o_row.get("ケース数", 0))
+                    dt   = pd.to_datetime(o_row.get("納品予定日"), errors="coerce")
+                    if pd.isna(dt) or dt < today or dt > today + timedelta(days=forecast_days): continue
+                    if prod not in _mpi_lt: continue
+                    pn_lt = str(_mpi_lt[prod].get("使用資材名",""))
+                    pu_lt = to_int(_mpi_lt[prod].get("資材使用数", 0))
+                    if not pn_lt or pu_lt <= 0: continue
+                    pack_forecast.setdefault(pn_lt, {})
+                    pack_forecast[pn_lt][dt.normalize()] = pack_forecast[pn_lt].get(dt.normalize(), 0) + qty * pu_lt
+
+                if not pack_forecast:
+                    st.info("今後90日以内に資材を使用する出荷予定が見つかりません。")
+                else:
+                    order_alerts = []
+                    for pn_lt, daily_use in pack_forecast.items():
+                        lt_days = st.session_state.pack_lead_times.get(pn_lt, 7)
+                        curr_inv = pack_summary.get(pn_lt, {}).get("現在庫", 0)
+                        ord_pt   = pack_summary.get(pn_lt, {}).get("発注点", 0)
+
+                        # 在庫推移シミュレーション
+                        running_inv = curr_inv
+                        shortage_date = None
+                        cumulative_need = 0
+                        for d_lt in pd.date_range(today, today + timedelta(days=forecast_days)):
+                            use = daily_use.get(d_lt, 0)
+                            running_inv -= use
+                            cumulative_need += use
+                            if running_inv < ord_pt and shortage_date is None:
+                                shortage_date = d_lt
+                                break
+
+                        # 発注推奨日 = 欠品予測日 - リードタイム
+                        if shortage_date is not None:
+                            order_date = shortage_date - timedelta(days=lt_days)
+                            days_until_order = (order_date.date() - date.today()).days
+                            if days_until_order < 0:
+                                urgency = "🔴 今すぐ発注！"
+                                urgency_color = "#FEE2E2"
+                            elif days_until_order <= 3:
+                                urgency = f"🟠 {days_until_order}日以内に発注"
+                                urgency_color = "#FEF3C7"
+                            elif days_until_order <= 7:
+                                urgency = f"🟡 {days_until_order}日以内に発注"
+                                urgency_color = "#FFFBEB"
+                            else:
+                                urgency = f"🔵 {days_until_order}日後に発注"
+                                urgency_color = "#EFF6FF"
+                        else:
+                            order_date = None
+                            days_until_order = 999
+                            urgency = "✅ 当面問題なし"
+                            urgency_color = "#F0FDF4"
+
+                        order_alerts.append({
+                            "資材名": pn_lt,
+                            "現在庫": curr_inv,
+                            "発注点": ord_pt,
+                            "リードタイム(日)": lt_days,
+                            "90日間 消費予測": int(cumulative_need),
+                            "発注推奨日": order_date.strftime("%Y/%m/%d") if order_date else "―",
+                            "在庫切れ予測日": shortage_date.strftime("%Y/%m/%d") if shortage_date else "―（余裕あり）",
+                            "緊急度": urgency,
+                            "_sort": days_until_order,
+                            "_color": urgency_color,
+                        })
+
+                    df_alerts = pd.DataFrame(order_alerts).sort_values("_sort").reset_index(drop=True)
+
+                    # アラートカード（上位3件）
+                    urgent = df_alerts[df_alerts["_sort"] <= 7]
+                    if not urgent.empty:
+                        st.markdown("### 🚨 直近7日以内に発注が必要な資材")
+                        for _, al in urgent.iterrows():
+                            st.markdown(f"""
+                            <div style="background:{al['_color']};border-left:5px solid #DC2626;
+                                border-radius:10px;padding:12px 16px;margin-bottom:8px;">
+                                <b style="font-size:15px;">📦 {al['資材名']}</b>
+                                <span style="float:right;font-size:16px;font-weight:900;">{al['緊急度']}</span><br>
+                                現在庫: <b>{al['現在庫']:,}</b>　発注点: <b>{al['発注点']:,}</b>　
+                                発注推奨日: <b>{al['発注推奨日']}</b>　在庫切れ予測: <b>{al['在庫切れ予測日']}</b>
+                            </div>""", unsafe_allow_html=True)
+
+                    st.markdown("### 📋 全資材 発注スケジュール一覧")
+
+                    def hl_alerts(row):
+                        c = str(row.get("緊急度",""))
+                        if "今すぐ" in c: return ['background-color:#FEE2E2; font-weight:bold;']*len(row)
+                        if "🟠" in c: return ['background-color:#FFEDD5;']*len(row)
+                        if "🟡" in c: return ['background-color:#FFFBEB;']*len(row)
+                        if "✅" in c: return ['background-color:#F0FDF4;']*len(row)
+                        return ['']*len(row)
+
+                    show_alert_cols = ["資材名","現在庫","発注点","リードタイム(日)","90日間 消費予測","発注推奨日","在庫切れ予測日","緊急度"]
+                    st.dataframe(
+                        df_alerts[show_alert_cols].style.apply(hl_alerts, axis=1),
+                        use_container_width=True, hide_index=True,
+                        height=min(len(df_alerts)*38+55, 500)
+                    )
+                    st.download_button("📥 発注スケジュールCSV",
+                        data=make_csv_bytes(df_alerts[show_alert_cols]),
+                        file_name=f"発注スケジュール_{date.today()}.csv", mime="text/csv",
+                        key="dl_order_schedule")
+
+                    # ── 資材別 消費予測グラフ
+                    st.write("")
+                    section("📈 資材別 消費予測グラフ（今後90日）")
+                    sel_pack_graph = st.selectbox("資材を選択", options=list(pack_forecast.keys()), key="pack_graph_sel")
+                    if sel_pack_graph:
+                        lt_g = st.session_state.pack_lead_times.get(sel_pack_graph, 7)
+                        inv_g = pack_summary.get(sel_pack_graph, {}).get("現在庫", 0)
+                        ord_pt_g = pack_summary.get(sel_pack_graph, {}).get("発注点", 0)
+                        graph_dates, graph_stock, graph_use = [], [], []
+                        running_g = inv_g
+                        for d_g in pd.date_range(today, today + timedelta(days=forecast_days)):
+                            use_g = pack_forecast[sel_pack_graph].get(d_g, 0)
+                            running_g -= use_g
+                            graph_dates.append(d_g.strftime("%m/%d"))
+                            graph_stock.append(running_g)
+                            graph_use.append(use_g)
+                        fig_pack = go.Figure()
+                        fig_pack.add_trace(go.Bar(x=graph_dates, y=graph_use, name="消費量（出荷連動）", marker_color="#F43F5E", opacity=0.6))
+                        fig_pack.add_trace(go.Scatter(x=graph_dates, y=graph_stock, name="推定在庫推移", mode="lines", line=dict(color="#2563EB", width=2.5)))
+                        fig_pack.add_hline(y=ord_pt_g, line_dash="dash", line_color="#F59E0B", annotation_text=f"発注点({ord_pt_g})")
+                        fig_pack.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
+                        # 発注推奨日に縦線
+                        order_day_g = next((df_alerts[df_alerts["資材名"]==sel_pack_graph]["発注推奨日"].values[0] for _ in [0] if sel_pack_graph in df_alerts["資材名"].values), None)
+                        if order_day_g and order_day_g != "―":
+                            try:
+                                od_str = pd.to_datetime(order_day_g).strftime("%m/%d")
+                                fig_pack.add_vline(x=od_str, line_dash="dash", line_color="#DC2626", annotation_text="発注推奨日", annotation_position="top right")
+                            except: pass
+                        fig_pack.update_layout(title=f"【{sel_pack_graph}】 在庫推移予測（今後90日）",
+                            hovermode="x unified", margin=dict(l=10,r=10,t=50,b=10), height=350,
+                            legend=dict(orientation="h", y=1.1))
+                        st.plotly_chart(fig_pack, use_container_width=True)
+    with t_p2:
         section("📊 資材の在庫推移サマリ")
         if pack_mst_unique.empty: st.info("⚙️ マスタ管理から資材を登録してください。")
         else:
@@ -1080,7 +1257,7 @@ elif page == "📦 資材・入出庫":
             if not abn.empty:
                 st.write("▼ 異常消費・手動出庫履歴")
                 st.dataframe(abn[["登録日","資材名","数量","理由","備考"]], hide_index=True, use_container_width=True)
-    with t_p2:
+    with t_p3:
         section("📝 資材の単体入出庫・棚卸調整")
         p_date = st.date_input("📅 処理日", value=date.today())
         sc1p, sc2p = st.columns([1.5,2.5])
@@ -1111,7 +1288,7 @@ elif page == "📦 資材・入出庫":
                     append_and_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(p_date),"資材名":sel_pack,"処理区分":final_pt,"数量":log_qty,"理由":p_reason,"関連製品名":"","理論在庫":"","備考":p_rem,"登録日時":datetime.now()}]))
                     st.session_state.msg_pack_add = f"✨ 資材ログ登録: {sel_pack} ({final_pt} {log_qty})"; st.rerun()
                 else: msg_slot_p_add.info("現在の計算在庫と一致しているため調整不要です。")
-    with t_p3:
+    with t_p4:
         section("✏️ 登録データのかんたん修正・削除")
         if not pack_log_df.empty:
             disp_pack = pack_log_df.sort_values("登録日時", ascending=False).copy()
@@ -1247,21 +1424,22 @@ elif page == "📊 在庫・スケジュール":
                     return 'color:#DC2626; font-weight:bold; background-color:#FEE2E2;'
                 return ''
 
-            # ── 操作ガイド ＋ 閉じるボタン
+            # ── ガイド ＋ 閉じるボタン
             col_inv1, col_inv2 = st.columns([3, 1])
             with col_inv1:
                 st.markdown(
                     '<div style="font-size:13px; color:#64748B; margin-bottom:6px;">'
-                    '💡 <b>「製品名」列のセルをダブルクリック</b>すると下に詳細が展開されます。'
-                    '右上の <b>⛶</b> ボタンで全画面表示（全列・全行が確認できます）。'
+                    '💡 テーブルの <b>行をクリック</b> して製品名を選択 → 下の詳細が展開されます。'
+                    '右上の <b>⛶</b> ボタンで全画面表示。'
                     '</div>', unsafe_allow_html=True)
             with col_inv2:
                 if st.button("🔄 詳細を閉じる", key="close_drill"):
-                    st.session_state.drill_product = None; st.rerun()
+                    st.session_state.drill_product = None
+                    st.rerun()
 
             all_prods = inv_df["製品名"].tolist()
 
-            # ── テーブル（製品名列クリック選択モード）
+            # ── テーブル（行クリック → 製品選択）
             tbl_row_count = len(inv_df)
             tbl_height = min(max(tbl_row_count * 35 + 50, 200), 700)
             sel_event = st.dataframe(
@@ -1273,27 +1451,27 @@ elif page == "📊 在庫・スケジュール":
                 selection_mode="single-row",
                 key="inv_tbl_sel"
             )
-            # 製品名列ダブルクリック → 行選択イベントで製品名取得
             selected_rows = sel_event.selection.get("rows", []) if hasattr(sel_event, "selection") else []
             if selected_rows:
-                clicked_prod = inv_df.iloc[selected_rows[0]]["製品名"]
-                if st.session_state.drill_product != clicked_prod:
-                    st.session_state.drill_product = clicked_prod
-                    # rerunはせずセレクトボックスに反映させる
+                st.session_state.drill_product = inv_df.iloc[selected_rows[0]]["製品名"]
 
-            # セレクトボックス（キーボード・検索操作用）
-            drill_default_idx = 0
-            if st.session_state.drill_product and st.session_state.drill_product in all_prods:
-                drill_default_idx = all_prods.index(st.session_state.drill_product) + 1
-            sel_drill = st.selectbox(
-                "📦 または製品名を検索して詳細表示",
-                options=["（選択して詳細を表示）"] + all_prods,
-                index=drill_default_idx, key="drill_sel"
-            )
-            if sel_drill != "（選択して詳細を表示）":
-                st.session_state.drill_product = sel_drill
-            elif not selected_rows:
-                st.session_state.drill_product = None
+            # ── 製品名リンクボタン（カテゴリ別グループ表示）
+            st.markdown('<div style="font-size:12px;color:#64748B;margin:8px 0 4px;">または製品名をクリックして詳細表示：</div>', unsafe_allow_html=True)
+            cat_groups = {}
+            for _, r in inv_df.iterrows():
+                cat_groups.setdefault(r["カテゴリ"], []).append(r["製品名"])
+            for cat, prods in cat_groups.items():
+                with st.expander(f"📂 {cat}（{len(prods)}品）", expanded=False):
+                    btn_cols = st.columns(min(len(prods), 3))
+                    for i, pname in enumerate(prods):
+                        is_sel = (st.session_state.drill_product == pname)
+                        btn_label = f"{'✅ ' if is_sel else ''}{pname}"
+                        safe_key = f"drill_btn_{cat}_{i}"
+                        if btn_cols[i % 3].button(btn_label, key=safe_key,
+                                                   type="primary" if is_sel else "secondary",
+                                                   use_container_width=True):
+                            st.session_state.drill_product = None if is_sel else pname
+                            st.rerun()
 
             st.download_button("📥 在庫予測CSVを出力", data=make_csv_bytes(inv_df),
                 file_name=f"在庫予測_{date.today()}.csv", mime="text/csv",
@@ -1546,49 +1724,91 @@ elif page == "📊 在庫・スケジュール":
                 st.write("")
                 dtab_hist, dtab_future, dtab_graph = st.tabs(["📜 過去1年の履歴", "📅 今後60日の予定", "📈 月次グラフ（1年+予測）"])
 
-                # ── 過去1年履歴タブ
+                # ── 過去1年履歴タブ（出荷・製造を統合タイムライン表示）
                 with dtab_hist:
-                    htab_o, htab_m = st.tabs(["🚚 出荷履歴", "🏭 製造履歴"])
+                    # 出荷・製造を1本のタイムラインに統合
+                    unified_hist = []
+                    if not past_o_all.empty:
+                        for _, r in past_o_all.iterrows():
+                            qty = to_int(r.get("ケース数", 0))
+                            chk = r.get("荷姿チェック", False)
+                            irr = r.get("不良廃棄フラグ", False)
+                            sp  = "⭐特注" if "特注" in str(r.get("備考","")) else ("🚌チャーター" if "チャーター" in str(r.get("備考","")) else "")
+                            unified_hist.append({
+                                "日付_sort": pd.to_datetime(r["納品予定日"], errors="coerce"),
+                                "日付": format_date_jp(r["納品予定日"]),
+                                "区分": "🚚 出荷",
+                                "増減(cs)": -qty,
+                                "数量表示": f"－{qty:,} cs",
+                                "相手先": str(r.get("顧客名", "")),
+                                "状態": ("⚠️廃棄" if irr else ("✅済" if chk else "⏳未")),
+                                "種別": sp,
+                                "備考": str(r.get("備考", "")),
+                            })
+                    if not past_m_all.empty:
+                        for _, r in past_m_all.iterrows():
+                            qty = to_int(r.get("ケース数", 0))
+                            is_rp = r.get("リパックフラグ", False)
+                            unified_hist.append({
+                                "日付_sort": pd.to_datetime(r["製造予定日"], errors="coerce"),
+                                "日付": format_date_jp(r["製造予定日"]),
+                                "区分": "🔄 リパック" if is_rp else "🏭 製造",
+                                "増減(cs)": qty,
+                                "数量表示": f"＋{qty:,} cs",
+                                "相手先": "（製造）",
+                                "状態": "🔄リパック" if is_rp else "🏭製造",
+                                "種別": "",
+                                "備考": str(r.get("備考", "")),
+                            })
 
-                    with htab_o:
-                        if past_o_all.empty:
-                            st.info("過去1年の出荷履歴はありません。")
-                        else:
-                            po_disp = past_o_all.copy()
-                            po_disp["納品予定日"] = po_disp["納品予定日"].apply(format_date_jp)
-                            po_disp["荷姿"] = po_disp["荷姿チェック"].map({True:"✅ 済", False:"⏳ 未"}).fillna("") if "荷姿チェック" in po_disp.columns else ""
-                            po_disp["廃棄"] = po_disp["不良廃棄フラグ"].map({True:"⚠️", False:""}).fillna("") if "不良廃棄フラグ" in po_disp.columns else ""
-                            po_disp["種別"] = po_disp["備考"].apply(lambda x: "⭐特注" if "特注" in str(x) else ("🚌チャーター" if "チャーター" in str(x) else ""))
-                            def hl_po(row):
-                                if str(row.get("廃棄","")) == "⚠️": return ['background-color:#FEF3C7; color:#B45309;']*len(row)
-                                if str(row.get("荷姿","")) == "⏳ 未": return ['background-color:#FFF7F7;']*len(row)
-                                return ['background-color:#F0FDF4; color:#065F46;']*len(row)
-                            show_cols_po = [c for c in ["納品予定日","顧客名","ケース数","荷姿","廃棄","種別","備考"] if c in po_disp.columns]
-                            st.dataframe(
-                                po_disp[show_cols_po].sort_values("納品予定日", ascending=False).style.apply(hl_po, axis=1),
-                                use_container_width=True, hide_index=True,
-                                height=min(len(po_disp)*35+50, 500)
-                            )
-                            st.download_button("📥 出荷履歴CSV",
-                                data=make_csv_bytes(po_disp[show_cols_po]),
-                                file_name=f"出荷履歴_{sel_prod}_{date.today()}.csv", mime="text/csv",
-                                key="dl_t3_ship_hist")
+                    if not unified_hist:
+                        st.info("過去1年の履歴データがありません。")
+                    else:
+                        df_unified = pd.DataFrame(unified_hist).sort_values("日付_sort", ascending=False).reset_index(drop=True)
 
-                    with htab_m:
-                        if past_m_all.empty:
-                            st.info("過去1年の製造履歴はありません。")
-                        else:
-                            pm_disp = past_m_all.copy()
-                            pm_disp["製造予定日"] = pm_disp["製造予定日"].apply(format_date_jp)
-                            pm_disp["種別"] = pm_disp["リパックフラグ"].map({True:"🔄 リパック", False:"🏭 通常製造"}).fillna("🏭 通常製造") if "リパックフラグ" in pm_disp.columns else "🏭 通常製造"
-                            def hl_pm(row):
-                                if "リパック" in str(row.get("種別","")): return ['background-color:#DBEAFE; color:#1E3A8A;']*len(row)
-                                return ['background-color:#F0FDF4; color:#065F46;']*len(row)
-                            st.dataframe(
-                                pm_disp[["製造予定日","ケース数","種別","備考"]].sort_values("製造予定日", ascending=False).style.apply(hl_pm, axis=1),
-                                use_container_width=True, hide_index=True,
-                                height=min(len(pm_disp)*35+50, 500)
-                            )
+                        # 在庫推移を逆算（過去方向）
+                        running = current_stocks.get(sel_prod, 0)
+                        stock_vals = []
+                        for _, r in df_unified.iterrows():
+                            stock_vals.append(running)
+                            running -= r["増減(cs)"]  # 逆算
+                        df_unified["その時の在庫"] = stock_vals
+
+                        # サマリKPI
+                        s1, s2, s3 = st.columns(3)
+                        total_out = df_unified[df_unified["増減(cs)"] < 0]["増減(cs)"].abs().sum()
+                        total_in  = df_unified[df_unified["増減(cs)"] > 0]["増減(cs)"].sum()
+                        s1.metric("過去1年 出荷合計", f"{int(total_out):,} cs")
+                        s2.metric("過去1年 製造合計", f"{int(total_in):,} cs")
+                        s3.metric("差引（製造－出荷）", f"{int(total_in - total_out):+,} cs",
+                                  delta_color="normal" if total_in >= total_out else "inverse")
+
+                        # 統合テーブル（±カラー付き）
+                        def hl_unified(row):
+                            kbn = str(row.get("区分", ""))
+                            inc = row.get("増減(cs)", 0)
+                            if "出荷" in kbn:
+                                return ['background-color:#FFF0F0; color:#DC2626;' if i == 2 else
+                                        'background-color:#FFF0F0;' for i in range(len(row))]
+                            elif "リパック" in kbn:
+                                return ['background-color:#EFF6FF; color:#1D4ED8;' if i == 2 else
+                                        'background-color:#EFF6FF;' for i in range(len(row))]
+                            else:  # 製造
+                                return ['background-color:#F0FDF4; color:#059669;' if i == 2 else
+                                        'background-color:#F0FDF4;' for i in range(len(row))]
+
+                        show_cols_u = ["日付","区分","数量表示","その時の在庫","相手先","状態","種別","備考"]
+                        st.markdown('<div style="font-size:12px;color:#64748B;margin-bottom:4px;">🟢 製造＝在庫増（＋）　🔴 出荷＝在庫減（－）　数値は予定日時点の推定在庫</div>', unsafe_allow_html=True)
+                        st.dataframe(
+                            df_unified[show_cols_u].style.apply(hl_unified, axis=1),
+                            use_container_width=True, hide_index=True,
+                            height=min(len(df_unified) * 35 + 50, 550)
+                        )
+                        export_u = df_unified[show_cols_u].copy()
+                        st.download_button("📥 統合履歴CSV",
+                            data=make_csv_bytes(export_u),
+                            file_name=f"統合履歴_{sel_prod}_{date.today()}.csv", mime="text/csv",
+                            key="dl_t3_ship_hist")
 
                 # ── 今後60日予定タブ
                 with dtab_future:
