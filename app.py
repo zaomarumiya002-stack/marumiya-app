@@ -166,6 +166,21 @@ p, span, label, div { color: #0F172A !important; }
 [data-testid="stAppViewContainer"].fullscreen-mode [data-testid="stSidebar"] {
     display: none !important;
 }
+/* ── dataframe フルスクリーン時に真全画面表示 ── */
+[data-testid="stFullScreenFrame"] {
+    position: fixed !important;
+    top: 0 !important; left: 0 !important;
+    width: 100vw !important; height: 100vh !important;
+    z-index: 9999 !important;
+    background: white !important;
+    overflow: auto !important;
+    padding: 16px !important;
+    box-sizing: border-box !important;
+}
+[data-testid="stFullScreenFrame"] > div {
+    width: 100% !important;
+    height: calc(100vh - 32px) !important;
+}
 /* ── ガントチャート用 ── */
 .gantt-wrap { overflow-x: auto; background:white; border-radius:12px; padding:16px; }
 .gantt-bar-critical { background: linear-gradient(90deg,#DC2626,#F87171); border-radius:4px; }
@@ -867,20 +882,71 @@ elif page == "🚚 出荷・発送管理":
                 st.session_state.msg_ship_edit = "✅ 発送・消込データを保存しました！"; st.rerun()
 
     with tab_ship2:
-        start_wk = st.date_input("開始日", value=date.today(), key="wk_start")
-        for i in range(7):
-            d = pd.Timestamp(start_wk) + timedelta(days=i)
-            if not orders_df.empty:
-                _m = safe_dt_date(orders_df["納品予定日"]) == d.date()
-                wk_ord = orders_df[_m].copy()
-            else: wk_ord = pd.DataFrame()
-            if wk_ord.empty: continue
-            done_c = len(wk_ord[wk_ord["荷姿チェック"] == True])
-            with st.expander(f"**{format_date_jp(d)}**　{len(wk_ord)}件 ✅{done_c}件完了", expanded=(d.date()==date.today())):
-                def hl_wk(row):
-                    if row.get("荷姿チェック") == True: return ['background-color:#D1FAE5;'] * len(row)
+        col_wk1, col_wk2 = st.columns([2, 2])
+        start_wk = col_wk1.date_input("開始日", value=date.today(), key="wk_start")
+        wk_days  = col_wk2.number_input("表示日数", min_value=1, max_value=30, value=7, step=1, key="wk_days")
+
+        # ── 一覧モード切替
+        view_mode = st.radio("表示モード", ["📋 日別折りたたみ", "📊 全件一覧（フルスクリーン対応）"], horizontal=True, key="wk_view_mode")
+        st.markdown('<div style="font-size:12px;color:#94A3B8;margin-bottom:6px;">📌 「全件一覧」モードでテーブル右上の ⛶ ボタンを押すと全画面表示できます</div>', unsafe_allow_html=True)
+
+        if view_mode == "📋 日別折りたたみ":
+            for i in range(int(wk_days)):
+                d = pd.Timestamp(start_wk) + timedelta(days=i)
+                if not orders_df.empty:
+                    _m = safe_dt_date(orders_df["納品予定日"]) == d.date()
+                    wk_ord = orders_df[_m].copy()
+                else: wk_ord = pd.DataFrame()
+                if wk_ord.empty: continue
+                done_c = len(wk_ord[wk_ord["荷姿チェック"] == True])
+                with st.expander(f"**{format_date_jp(d)}**　{len(wk_ord)}件 ✅{done_c}件完了", expanded=(d.date()==date.today())):
+                    def hl_wk(row):
+                        if row.get("荷姿チェック") == True: return ['background-color:#D1FAE5;'] * len(row)
+                        return [''] * len(row)
+                    st.dataframe(wk_ord[["顧客名","製品名","ケース数","運送会社","荷姿チェック","発送備考"]].style.apply(hl_wk,axis=1), use_container_width=True, hide_index=True)
+        else:
+            # 全件一覧（フルスクリーン対応）
+            all_wk_rows = []
+            for i in range(int(wk_days)):
+                d = pd.Timestamp(start_wk) + timedelta(days=i)
+                if not orders_df.empty:
+                    _m = safe_dt_date(orders_df["納品予定日"]) == d.date()
+                    wk_ord = orders_df[_m].copy()
+                else: wk_ord = pd.DataFrame()
+                if wk_ord.empty: continue
+                wk_ord["納品日"] = format_date_jp(d)
+                all_wk_rows.append(wk_ord)
+
+            if not all_wk_rows:
+                st.info("該当期間の出荷予定はありません。")
+            else:
+                all_wk_df = pd.concat(all_wk_rows, ignore_index=True)
+                total_cs  = all_wk_df["ケース数"].apply(to_int).sum()
+                done_cnt  = len(all_wk_df[all_wk_df["荷姿チェック"] == True])
+                c_w1, c_w2, c_w3 = st.columns(3)
+                c_w1.metric("期間 出荷件数", f"{len(all_wk_df)} 件")
+                c_w2.metric("✅ 消込済", f"{done_cnt} 件")
+                c_w3.metric("総出荷数", f"{total_cs:,} cs")
+
+                show_cols_wk = ["納品日","顧客名","製品名","ケース数","運送会社","荷姿チェック","発送備考","備考"]
+                show_cols_wk = [c for c in show_cols_wk if c in all_wk_df.columns]
+
+                def hl_wk_all(row):
+                    if row.get("荷姿チェック") == True:
+                        return ['background-color:#D1FAE5; color:#065F46;'] * len(row)
                     return [''] * len(row)
-                st.dataframe(wk_ord[["顧客名","製品名","ケース数","運送会社","荷姿チェック","発送備考"]].style.apply(hl_wk,axis=1), use_container_width=True, hide_index=True)
+
+                st.dataframe(
+                    all_wk_df[show_cols_wk].style.apply(hl_wk_all, axis=1),
+                    use_container_width=True, hide_index=True,
+                    height=min(600, max(300, len(all_wk_df) * 38 + 60))
+                )
+                st.download_button(
+                    "📥 週間出荷一覧をCSV出力",
+                    data=make_csv_bytes(all_wk_df[show_cols_wk]),
+                    file_name=f"週間出荷一覧_{start_wk}.csv",
+                    mime="text/csv", use_container_width=True
+                )
 
     with tab_ship3:
         col_e1, col_e2 = st.columns(2)
@@ -1174,7 +1240,7 @@ elif page == "📊 在庫・スケジュール":
 
     t1, t2, t3, t4 = st.tabs(["📉 1ヶ月在庫予測", "📅 週間カレンダー", "🔍 製品別詳細ビュー", "👤 顧客別スケジュール"])
 
-    # ── タブ1: 1ヶ月在庫予測（製品名クリックでドリルダウン）
+    # ── タブ1: 1ヶ月在庫予測（製品名ダブルクリックでドリルダウン）
     with t1:
         if master_df_unique.empty:
             st.info("製品マスタが空です。")
@@ -1195,33 +1261,156 @@ elif page == "📊 在庫・スケジュール":
                     return 'color:#DC2626; font-weight:bold; background-color:#FEE2E2;'
                 return ''
 
-            # ドリルダウン選択UI
+            # ── ドリルダウン選択UI（セレクトボックス ＋ ダブルクリック案内）
             col_inv1, col_inv2 = st.columns([3, 1])
             with col_inv1:
-                st.markdown('<div style="font-size:13px; color:#64748B; margin-bottom:6px;">💡 製品名を選択するとその製品の詳細スケジュールが展開されます</div>', unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="font-size:13px; color:#64748B; margin-bottom:6px;">'
+                    '💡 下の製品名セレクトボックスで選択、またはテーブルの製品名セルを<b>ダブルクリック</b>して製品名をコピー→選択すると詳細が展開されます'
+                    '</div>', unsafe_allow_html=True)
             with col_inv2:
                 if st.button("🔄 詳細を閉じる", key="close_drill"):
                     st.session_state.drill_product = None; st.rerun()
 
             # 製品選択ボックス（ドリルダウントリガー）
             all_prods = inv_df["製品名"].tolist()
-            sel_drill = st.selectbox("📦 製品を選んで詳細表示（ダブルクリック相当）",
-                options=["（選択して詳細を表示）"] + all_prods, index=0, key="drill_sel")
+            drill_default_idx = 0
+            if st.session_state.drill_product and st.session_state.drill_product in all_prods:
+                drill_default_idx = all_prods.index(st.session_state.drill_product) + 1
+            sel_drill = st.selectbox(
+                "📦 製品を選んで詳細表示（製品名ダブルクリック後ここで選択）",
+                options=["（選択して詳細を表示）"] + all_prods,
+                index=drill_default_idx, key="drill_sel"
+            )
             if sel_drill != "（選択して詳細を表示）":
                 st.session_state.drill_product = sel_drill
+            elif drill_default_idx == 0:
+                st.session_state.drill_product = None
 
-            # テーブル表示
+            # ── テーブル表示（フルスクリーンボタン付き）
+            st.markdown(
+                '<div style="font-size:12px;color:#94A3B8;margin-bottom:4px;">'
+                '📌 テーブル右上の ⛶ ボタンで全画面表示できます</div>',
+                unsafe_allow_html=True
+            )
             st.dataframe(
                 inv_df.style.map(style_stock_cell),
                 use_container_width=True, hide_index=True, height=480
             )
             st.download_button("📥 在庫予測CSVを出力", data=make_csv_bytes(inv_df), file_name=f"在庫予測_{date.today()}.csv", mime="text/csv", use_container_width=True)
 
-            # ── ドリルダウンパネル（製品別1〜2ヶ月詳細）
+            # ── ドリルダウンパネル（製品別 過去1年＋今後60日間 詳細）
             dp = st.session_state.drill_product
-            if dp and dp in current_stocks:
+            if dp:
                 st.markdown(f'<div class="drill-panel">', unsafe_allow_html=True)
-                st.markdown(f"### 📦 {format_name(dp)} の詳細スケジュール（60日間）")
+                st.markdown(f"### 📦 {format_name(dp)} の詳細スケジュール")
+
+                # ── 過去1年の履歴セクション
+                one_year_ago = today - timedelta(days=365)
+
+                p_o_hist = orders_df[
+                    (orders_df["製品名"] == dp) &
+                    (pd.to_datetime(orders_df["納品予定日"], errors='coerce') >= one_year_ago) &
+                    (pd.to_datetime(orders_df["納品予定日"], errors='coerce') < today)
+                ][["納品予定日","顧客名","ケース数","備考","荷姿チェック","不良廃棄フラグ"]].copy() if not orders_df.empty else pd.DataFrame()
+
+                p_m_hist = manus_df[
+                    (manus_df["製品名"] == dp) &
+                    (pd.to_datetime(manus_df["製造予定日"], errors='coerce') >= one_year_ago) &
+                    (pd.to_datetime(manus_df["製造予定日"], errors='coerce') < today)
+                ][["製造予定日","ケース数","リパックフラグ","備考"]].copy() if not manus_df.empty else pd.DataFrame()
+
+                with st.expander("📜 過去1年の履歴を確認する", expanded=False):
+                    hist_tab1, hist_tab2, hist_tab3 = st.tabs(["📊 出荷履歴", "🏭 製造履歴", "📈 月次推移グラフ"])
+
+                    with hist_tab1:
+                        if p_o_hist.empty:
+                            st.info("過去1年の出荷履歴はありません。")
+                        else:
+                            p_o_hist_disp = p_o_hist.copy()
+                            p_o_hist_disp["納品予定日"] = p_o_hist_disp["納品予定日"].apply(format_date_jp)
+                            p_o_hist_disp["荷姿"] = p_o_hist_disp["荷姿チェック"].map({True:"✅ 済", False:"⏳ 未"}).fillna("")
+                            p_o_hist_disp["廃棄"] = p_o_hist_disp["不良廃棄フラグ"].map({True:"⚠️ 廃棄", False:""}).fillna("")
+                            p_o_hist_disp["種別"] = p_o_hist_disp["備考"].apply(
+                                lambda x: "⭐ 特注" if "特注" in str(x) else ("🚌 チャーター" if "チャーター" in str(x) else "")
+                            )
+                            def hl_hist_o(row):
+                                if str(row.get("廃棄","")) != "": return ['background-color:#FEF3C7; color:#B45309;']*len(row)
+                                if str(row.get("荷姿","")) == "⏳ 未": return ['background-color:#FFF7F7;']*len(row)
+                                return ['background-color:#F0FDF4; color:#065F46;']*len(row)
+                            hist_show_cols = ["納品予定日","顧客名","ケース数","荷姿","廃棄","種別","備考"]
+                            hist_show_cols = [c for c in hist_show_cols if c in p_o_hist_disp.columns]
+                            total_shipped = p_o_hist["ケース数"].apply(to_int).sum()
+                            st.metric("過去1年 出荷合計", f"{total_shipped:,} cs", delta=f"{len(p_o_hist)} 件")
+                            st.dataframe(
+                                p_o_hist_disp[hist_show_cols].sort_values("納品予定日", ascending=False).style.apply(hl_hist_o, axis=1),
+                                use_container_width=True, hide_index=True, height=400
+                            )
+                            st.download_button(
+                                "📥 出荷履歴CSV",
+                                data=make_csv_bytes(p_o_hist_disp[hist_show_cols]),
+                                file_name=f"出荷履歴_{dp}_{date.today()}.csv",
+                                mime="text/csv"
+                            )
+
+                    with hist_tab2:
+                        if p_m_hist.empty:
+                            st.info("過去1年の製造履歴はありません。")
+                        else:
+                            p_m_hist_disp = p_m_hist.copy()
+                            p_m_hist_disp["製造予定日"] = p_m_hist_disp["製造予定日"].apply(format_date_jp)
+                            p_m_hist_disp["種別"] = p_m_hist_disp["リパックフラグ"].map({True:"🔄 リパック", False:"🏭 通常製造"}).fillna("🏭 通常製造")
+                            def hl_hist_m(row):
+                                if "リパック" in str(row.get("種別","")): return ['background-color:#DBEAFE; color:#1E3A8A;']*len(row)
+                                return ['background-color:#F0FDF4; color:#065F46;']*len(row)
+                            total_mfg = p_m_hist["ケース数"].apply(to_int).sum()
+                            st.metric("過去1年 製造合計", f"{total_mfg:,} cs", delta=f"{len(p_m_hist)} 回")
+                            st.dataframe(
+                                p_m_hist_disp[["製造予定日","ケース数","種別","備考"]].sort_values("製造予定日", ascending=False).style.apply(hl_hist_m, axis=1),
+                                use_container_width=True, hide_index=True, height=400
+                            )
+
+                    with hist_tab3:
+                        # 月次集計グラフ（過去1年）
+                        hist_chart_data = []
+                        if not p_o_hist.empty:
+                            p_o_hist_c = p_o_hist.copy()
+                            p_o_hist_c["年月"] = pd.to_datetime(p_o_hist_c["納品予定日"], errors='coerce').dt.to_period("M").astype(str)
+                            monthly_ship = p_o_hist_c.groupby("年月")["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
+                            monthly_ship.columns = ["年月","出荷量(cs)"]
+                            hist_chart_data.append(monthly_ship)
+                        if not p_m_hist.empty:
+                            p_m_hist_c = p_m_hist.copy()
+                            p_m_hist_c["年月"] = pd.to_datetime(p_m_hist_c["製造予定日"], errors='coerce').dt.to_period("M").astype(str)
+                            monthly_mfg = p_m_hist_c.groupby("年月")["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
+                            monthly_mfg.columns = ["年月","製造量(cs)"]
+                            if hist_chart_data:
+                                hist_chart_df = pd.merge(hist_chart_data[0], monthly_mfg, on="年月", how="outer").fillna(0).sort_values("年月")
+                            else:
+                                hist_chart_df = monthly_mfg.copy(); hist_chart_df["出荷量(cs)"] = 0
+                        elif hist_chart_data:
+                            hist_chart_df = hist_chart_data[0].copy(); hist_chart_df["製造量(cs)"] = 0
+                        else:
+                            hist_chart_df = pd.DataFrame()
+
+                        if not hist_chart_df.empty:
+                            fig_hist = go.Figure()
+                            if "製造量(cs)" in hist_chart_df.columns:
+                                fig_hist.add_trace(go.Bar(x=hist_chart_df["年月"], y=hist_chart_df["製造量(cs)"], name="製造量", marker_color="#10B981", opacity=0.75))
+                            if "出荷量(cs)" in hist_chart_df.columns:
+                                fig_hist.add_trace(go.Bar(x=hist_chart_df["年月"], y=hist_chart_df["出荷量(cs)"], name="出荷量", marker_color="#F43F5E", opacity=0.75))
+                            fig_hist.update_layout(
+                                title=f"【{dp}】 月次 製造・出荷量（過去1年）",
+                                barmode="group", hovermode="x unified",
+                                margin=dict(l=10,r=10,t=50,b=10), height=350,
+                                legend=dict(orientation="h", y=1.1)
+                            )
+                            st.plotly_chart(fig_hist, use_container_width=True)
+                        else:
+                            st.info("過去1年のグラフデータがありません。")
+
+                # ── 今後60日間の詳細スケジュール
+                st.markdown('<div class="section-title">📅 今後60日間の予定スケジュール</div>', unsafe_allow_html=True)
 
                 p_o_ev2 = orders_df[(orders_df["製品名"]==dp) & (pd.to_datetime(orders_df["納品予定日"],errors='coerce') >= today)][["納品予定日","顧客名","ケース数","備考"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日","顧客名","ケース数","備考"])
                 p_m_ev2 = manus_df[(manus_df["製品名"]==dp) & (pd.to_datetime(manus_df["製造予定日"],errors='coerce') >= today)][["製造予定日","ケース数","備考"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日","ケース数","備考"])
@@ -1229,7 +1418,6 @@ elif page == "📊 在庫・スケジュール":
                 detail2 = []
                 tmp_s = current_stocks.get(dp, 0)
                 for d2 in pd.date_range(today, today + timedelta(days=59)):
-                    # 出荷
                     try:
                         day_o2 = p_o_ev2[safe_dt_date(p_o_ev2["納品予定日"]) == d2.date()]
                     except Exception: day_o2 = pd.DataFrame()
@@ -1238,14 +1426,12 @@ elif page == "📊 在庫・スケジュール":
                         f"{'⭐' if is_special_order(str(r['備考'])) else ''}{r['顧客名']}({to_int(r['ケース数'])}cs)"
                         for _, r in day_o2.iterrows()
                     ]) if not day_o2.empty else "―"
-                    # 製造
                     try:
                         day_m2 = p_m_ev2[safe_dt_date(p_m_ev2["製造予定日"]) == d2.date()]
                     except Exception: day_m2 = pd.DataFrame()
                     in_q = to_int(day_m2["ケース数"].sum()) if not day_m2.empty else 0
                     in_det = " / ".join([f"製造({to_int(r['ケース数'])}cs)" for _, r in day_m2.iterrows()]) if not day_m2.empty else "―"
                     tmp_s = tmp_s + in_q - out_q
-                    # 欠品フラグ
                     shortage_flag = "🔴" if tmp_s < 0 else ""
                     detail2.append({
                         "日付": format_date_jp(d2),
