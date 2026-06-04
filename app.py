@@ -1455,24 +1455,6 @@ elif page == "📊 在庫・スケジュール":
             if selected_rows:
                 st.session_state.drill_product = inv_df.iloc[selected_rows[0]]["製品名"]
 
-            # ── 製品名リンクボタン（カテゴリ別グループ表示）
-            st.markdown('<div style="font-size:12px;color:#64748B;margin:8px 0 4px;">または製品名をクリックして詳細表示：</div>', unsafe_allow_html=True)
-            cat_groups = {}
-            for _, r in inv_df.iterrows():
-                cat_groups.setdefault(r["カテゴリ"], []).append(r["製品名"])
-            for cat, prods in cat_groups.items():
-                with st.expander(f"📂 {cat}（{len(prods)}品）", expanded=False):
-                    btn_cols = st.columns(min(len(prods), 3))
-                    for i, pname in enumerate(prods):
-                        is_sel = (st.session_state.drill_product == pname)
-                        btn_label = f"{'✅ ' if is_sel else ''}{pname}"
-                        safe_key = f"drill_btn_{cat}_{i}"
-                        if btn_cols[i % 3].button(btn_label, key=safe_key,
-                                                   type="primary" if is_sel else "secondary",
-                                                   use_container_width=True):
-                            st.session_state.drill_product = None if is_sel else pname
-                            st.rerun()
-
             st.download_button("📥 在庫予測CSVを出力", data=make_csv_bytes(inv_df),
                 file_name=f"在庫予測_{date.today()}.csv", mime="text/csv",
                 use_container_width=True, key="dl_inv_forecast")
