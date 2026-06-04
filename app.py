@@ -1247,42 +1247,56 @@ elif page == "📊 在庫・スケジュール":
                     return 'color:#DC2626; font-weight:bold; background-color:#FEE2E2;'
                 return ''
 
-            # ── ドリルダウン選択UI（セレクトボックス ＋ ダブルクリック案内）
+            # ── 操作ガイド ＋ 閉じるボタン
             col_inv1, col_inv2 = st.columns([3, 1])
             with col_inv1:
                 st.markdown(
                     '<div style="font-size:13px; color:#64748B; margin-bottom:6px;">'
-                    '💡 下の製品名セレクトボックスで選択、またはテーブルの製品名セルを<b>ダブルクリック</b>して製品名をコピー→選択すると詳細が展開されます'
+                    '💡 <b>テーブルの行をクリックして選択</b>すると下に詳細が展開されます。'
+                    '右上の <b>⛶</b> ボタンで全画面表示（全列・全行が確認できます）。'
                     '</div>', unsafe_allow_html=True)
             with col_inv2:
                 if st.button("🔄 詳細を閉じる", key="close_drill"):
                     st.session_state.drill_product = None; st.rerun()
 
-            # 製品選択ボックス（ドリルダウントリガー）
             all_prods = inv_df["製品名"].tolist()
+
+            # ── テーブル（行選択モード） ── クリックで製品選択
+            tbl_row_count = len(inv_df)
+            tbl_height = min(max(tbl_row_count * 35 + 50, 200), 700)  # 全行表示、最大700px
+            sel_event = st.dataframe(
+                inv_df.style.map(style_stock_cell),
+                use_container_width=True,
+                hide_index=True,
+                height=tbl_height,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="inv_tbl_sel"
+            )
+            # 行クリックで製品名を取得
+            selected_rows = sel_event.selection.get("rows", []) if hasattr(sel_event, "selection") else []
+            if selected_rows:
+                clicked_prod = inv_df.iloc[selected_rows[0]]["製品名"]
+                if st.session_state.drill_product != clicked_prod:
+                    st.session_state.drill_product = clicked_prod
+                    st.rerun()
+
+            # セレクトボックス（補助・キーボード操作用）
             drill_default_idx = 0
             if st.session_state.drill_product and st.session_state.drill_product in all_prods:
                 drill_default_idx = all_prods.index(st.session_state.drill_product) + 1
             sel_drill = st.selectbox(
-                "📦 製品を選んで詳細表示（製品名ダブルクリック後ここで選択）",
+                "📦 または製品名を検索して詳細表示",
                 options=["（選択して詳細を表示）"] + all_prods,
                 index=drill_default_idx, key="drill_sel"
             )
             if sel_drill != "（選択して詳細を表示）":
-                st.session_state.drill_product = sel_drill
+                if st.session_state.drill_product != sel_drill:
+                    st.session_state.drill_product = sel_drill
+                    st.rerun()
             elif drill_default_idx == 0:
-                st.session_state.drill_product = None
+                pass  # 選択なし状態を維持
 
-            # ── テーブル表示（フルスクリーンボタン付き）
-            st.markdown(
-                '<div style="font-size:12px;color:#94A3B8;margin-bottom:4px;">'
-                '📌 テーブル右上の ⛶ ボタンで全画面表示できます</div>',
-                unsafe_allow_html=True
-            )
-            st.dataframe(
-                inv_df.style.map(style_stock_cell),
-                use_container_width=True, hide_index=True, height=480
-            )
             st.download_button("📥 在庫予測CSVを出力", data=make_csv_bytes(inv_df), file_name=f"在庫予測_{date.today()}.csv", mime="text/csv", use_container_width=True)
 
             # ── ドリルダウンパネル（製品別 過去1年＋今後60日間 詳細）
@@ -1306,7 +1320,7 @@ elif page == "📊 在庫・スケジュール":
                     (pd.to_datetime(manus_df["製造予定日"], errors='coerce') < today)
                 ][["製造予定日","ケース数","リパックフラグ","備考"]].copy() if not manus_df.empty else pd.DataFrame()
 
-                with st.expander("📜 過去1年の履歴を確認する", expanded=False):
+                with st.expander("📜 過去1年の履歴を確認する（クリックで開閉）", expanded=True):
                     hist_tab1, hist_tab2, hist_tab3 = st.tabs(["📊 出荷履歴", "🏭 製造履歴", "📈 月次推移グラフ"])
 
                     with hist_tab1:
@@ -1492,43 +1506,160 @@ elif page == "📊 在庫・スケジュール":
         st.download_button("🖨️ カレンダーCSVを出力", data=make_csv_bytes(pd.DataFrame(cal_data)), file_name=f"カレンダー_{today.strftime('%Y%m%d')}.csv", type="primary", use_container_width=True)
         st.markdown(html + '</table>', unsafe_allow_html=True)
 
-    # ── タブ3: 製品別詳細ビュー
+    # ── タブ3: 製品別詳細ビュー（過去1年履歴 ＋ 今後60日予測）
     with t3:
         section("🔍 製品別 在庫推移と詳細スケジュール")
         if master_df_unique.empty: st.info("製品が登録されていません。")
         else:
-            cat_full_d = st.pills("カテゴリ詳細", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed", key="pills_det")
-            cat_det = cat_full_d.split(" ",1)[1] if cat_full_d else CATEGORIES[0].split(" ",1)[1]
+            # タブ1のクリック選択から製品を引き継ぐ
             sc1d, sc2d = st.columns([1.5, 2.5])
             srch_d = sc1d.text_input("🔍 製品名検索", placeholder="検索...", key="search_det")
-            prods_d = ([p for p in master_df_unique["製品名"].tolist() if srch_d in p] if srch_d
-                       else master_df_unique[master_df_unique["大カテゴリ"]==cat_det]["製品名"].tolist() if not master_df_unique.empty else [])
-            sel_prod = sc2d.selectbox("確定製品", options=prods_d, index=None, format_func=format_name, key="sel_det", placeholder="選択してください")
+            all_prods_t3 = master_df_unique["製品名"].tolist()
+            prods_d = [p for p in all_prods_t3 if srch_d in p] if srch_d else all_prods_t3
+            # タブ1で選択された製品を初期値として引き継ぐ
+            det_default = None
+            if st.session_state.get("drill_product") and st.session_state.drill_product in prods_d:
+                det_default = prods_d.index(st.session_state.drill_product)
+            sel_prod = sc2d.selectbox("確定製品", options=prods_d, index=det_default,
+                                       format_func=format_name, key="sel_det", placeholder="選択してください")
+
             if sel_prod:
-                p_o3 = orders_df[(orders_df["製品名"]==sel_prod) & (pd.to_datetime(orders_df["納品予定日"],errors='coerce') >= today)][["納品予定日","顧客名","ケース数"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日","顧客名","ケース数"])
-                p_m3 = manus_df[(manus_df["製品名"]==sel_prod) & (pd.to_datetime(manus_df["製造予定日"],errors='coerce') >= today)][["製造予定日","ケース数"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日","ケース数"])
-                dl3 = []
-                ts3 = current_stocks.get(sel_prod, 0)
-                for d3 in pd.date_range(today, today+timedelta(days=30)):
-                    try: do3 = p_o3[safe_dt_date(p_o3["納品予定日"]) == d3.date()]
-                    except: do3 = pd.DataFrame()
-                    oq3 = to_int(do3["ケース数"].sum()) if not do3.empty else 0
-                    od3 = " / ".join([f"{r['顧客名']}({to_int(r['ケース数'])}cs)" for _,r in do3.iterrows()]) if not do3.empty else "―"
-                    try: dm3 = p_m3[safe_dt_date(p_m3["製造予定日"]) == d3.date()]
-                    except: dm3 = pd.DataFrame()
-                    iq3 = to_int(dm3["ケース数"].sum()) if not dm3.empty else 0
-                    id3 = " / ".join([f"製造({to_int(r['ケース数'])}cs)" for _,r in dm3.iterrows()]) if not dm3.empty else "―"
-                    ts3 = ts3 + iq3 - oq3
-                    dl3.append({"日付": format_date_jp(d3), "製造(入)": iq3, "製造詳細": id3, "出荷(出)": oq3, "出荷詳細": od3, "予定在庫": ts3})
-                df3 = pd.DataFrame(dl3)
-                fig3 = px.line(df3, x="日付", y="予定在庫", title=f"【{sel_prod}】 1ヶ月の予定在庫推移", markers=True)
-                fig3.add_bar(x=df3["日付"], y=df3["製造(入)"], name="製造", marker_color="#10B981", opacity=0.6)
-                fig3.add_bar(x=df3["日付"], y=-df3["出荷(出)"], name="出荷", marker_color="#F43F5E", opacity=0.6)
-                st.plotly_chart(fig3.update_layout(hovermode="x unified", margin=dict(l=10,r=10,t=40,b=10)), use_container_width=True)
-                def sd3(v):
-                    if isinstance(v,(int,float)) and v < 0: return 'color:#DC2626; font-weight:bold; background-color:#FEE2E2;'
-                    return ''
-                st.dataframe(df3.style.map(sd3, subset=["予定在庫"]), use_container_width=True, hide_index=True)
+                one_year_ago_t3 = today - timedelta(days=365)
+
+                # ── KPI行
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                curr_stk = current_stocks.get(sel_prod, 0)
+                past_o_all = orders_df[(orders_df["製品名"]==sel_prod) &
+                    (pd.to_datetime(orders_df["納品予定日"],errors='coerce') >= one_year_ago_t3) &
+                    (pd.to_datetime(orders_df["納品予定日"],errors='coerce') < today)] if not orders_df.empty else pd.DataFrame()
+                past_m_all = manus_df[(manus_df["製品名"]==sel_prod) &
+                    (pd.to_datetime(manus_df["製造予定日"],errors='coerce') >= one_year_ago_t3) &
+                    (pd.to_datetime(manus_df["製造予定日"],errors='coerce') < today)] if not manus_df.empty else pd.DataFrame()
+                kpi1.metric("現在庫", f"{curr_stk:,} cs", delta="現時点")
+                kpi2.metric("過去1年 出荷合計", f"{past_o_all['ケース数'].apply(to_int).sum():,} cs" if not past_o_all.empty else "0 cs", delta=f"{len(past_o_all)} 件")
+                kpi3.metric("過去1年 製造合計", f"{past_m_all['ケース数'].apply(to_int).sum():,} cs" if not past_m_all.empty else "0 cs", delta=f"{len(past_m_all)} 回")
+                shortage_7d = sum(1 for d2 in pd.date_range(today, today+timedelta(days=7))
+                                  if future_stocks.get(sel_prod,{}).get(d2,0) < 0)
+                kpi4.metric("7日以内 欠品日数", f"{shortage_7d} 日", delta_color="inverse")
+
+                st.write("")
+                dtab_hist, dtab_future, dtab_graph = st.tabs(["📜 過去1年の履歴", "📅 今後60日の予定", "📈 月次グラフ（1年+予測）"])
+
+                # ── 過去1年履歴タブ
+                with dtab_hist:
+                    htab_o, htab_m = st.tabs(["🚚 出荷履歴", "🏭 製造履歴"])
+
+                    with htab_o:
+                        if past_o_all.empty:
+                            st.info("過去1年の出荷履歴はありません。")
+                        else:
+                            po_disp = past_o_all.copy()
+                            po_disp["納品予定日"] = po_disp["納品予定日"].apply(format_date_jp)
+                            po_disp["荷姿"] = po_disp["荷姿チェック"].map({True:"✅ 済", False:"⏳ 未"}).fillna("") if "荷姿チェック" in po_disp.columns else ""
+                            po_disp["廃棄"] = po_disp["不良廃棄フラグ"].map({True:"⚠️", False:""}).fillna("") if "不良廃棄フラグ" in po_disp.columns else ""
+                            po_disp["種別"] = po_disp["備考"].apply(lambda x: "⭐特注" if "特注" in str(x) else ("🚌チャーター" if "チャーター" in str(x) else ""))
+                            def hl_po(row):
+                                if str(row.get("廃棄","")) == "⚠️": return ['background-color:#FEF3C7; color:#B45309;']*len(row)
+                                if str(row.get("荷姿","")) == "⏳ 未": return ['background-color:#FFF7F7;']*len(row)
+                                return ['background-color:#F0FDF4; color:#065F46;']*len(row)
+                            show_cols_po = [c for c in ["納品予定日","顧客名","ケース数","荷姿","廃棄","種別","備考"] if c in po_disp.columns]
+                            st.dataframe(
+                                po_disp[show_cols_po].sort_values("納品予定日", ascending=False).style.apply(hl_po, axis=1),
+                                use_container_width=True, hide_index=True,
+                                height=min(len(po_disp)*35+50, 500)
+                            )
+                            st.download_button("📥 出荷履歴CSV",
+                                data=make_csv_bytes(po_disp[show_cols_po]),
+                                file_name=f"出荷履歴_{sel_prod}_{date.today()}.csv", mime="text/csv")
+
+                    with htab_m:
+                        if past_m_all.empty:
+                            st.info("過去1年の製造履歴はありません。")
+                        else:
+                            pm_disp = past_m_all.copy()
+                            pm_disp["製造予定日"] = pm_disp["製造予定日"].apply(format_date_jp)
+                            pm_disp["種別"] = pm_disp["リパックフラグ"].map({True:"🔄 リパック", False:"🏭 通常製造"}).fillna("🏭 通常製造") if "リパックフラグ" in pm_disp.columns else "🏭 通常製造"
+                            def hl_pm(row):
+                                if "リパック" in str(row.get("種別","")): return ['background-color:#DBEAFE; color:#1E3A8A;']*len(row)
+                                return ['background-color:#F0FDF4; color:#065F46;']*len(row)
+                            st.dataframe(
+                                pm_disp[["製造予定日","ケース数","種別","備考"]].sort_values("製造予定日", ascending=False).style.apply(hl_pm, axis=1),
+                                use_container_width=True, hide_index=True,
+                                height=min(len(pm_disp)*35+50, 500)
+                            )
+
+                # ── 今後60日予定タブ
+                with dtab_future:
+                    p_o3 = orders_df[(orders_df["製品名"]==sel_prod) & (pd.to_datetime(orders_df["納品予定日"],errors='coerce') >= today)][["納品予定日","顧客名","ケース数","備考"]].copy() if not orders_df.empty else pd.DataFrame(columns=["納品予定日","顧客名","ケース数","備考"])
+                    p_m3 = manus_df[(manus_df["製品名"]==sel_prod) & (pd.to_datetime(manus_df["製造予定日"],errors='coerce') >= today)][["製造予定日","ケース数"]].copy() if not manus_df.empty else pd.DataFrame(columns=["製造予定日","ケース数"])
+                    dl3 = []
+                    ts3 = current_stocks.get(sel_prod, 0)
+                    for d3 in pd.date_range(today, today+timedelta(days=59)):
+                        try: do3 = p_o3[safe_dt_date(p_o3["納品予定日"]) == d3.date()]
+                        except: do3 = pd.DataFrame()
+                        oq3 = to_int(do3["ケース数"].sum()) if not do3.empty else 0
+                        od3 = " / ".join([f"{'⭐' if is_special_order(str(r.get('備考',''))) else ''}{r['顧客名']}({to_int(r['ケース数'])}cs)" for _,r in do3.iterrows()]) if not do3.empty else "―"
+                        try: dm3 = p_m3[safe_dt_date(p_m3["製造予定日"]) == d3.date()]
+                        except: dm3 = pd.DataFrame()
+                        iq3 = to_int(dm3["ケース数"].sum()) if not dm3.empty else 0
+                        id3 = " / ".join([f"製造({to_int(r['ケース数'])}cs)" for _,r in dm3.iterrows()]) if not dm3.empty else "―"
+                        ts3 = ts3 + iq3 - oq3
+                        dl3.append({"日付": format_date_jp(d3), "製造(入)": iq3 if iq3>0 else "", "製造詳細": id3 if iq3>0 else "", "出荷(出)": oq3 if oq3>0 else "", "出荷詳細": od3 if oq3>0 else "", "予定在庫": ts3, "": "🔴" if ts3<0 else ""})
+                    df3 = pd.DataFrame(dl3)
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Bar(x=df3["日付"], y=[r["製造(入)"] if r["製造(入)"]!="" else 0 for _,r in df3.iterrows()], name="製造", marker_color="#10B981", opacity=0.7))
+                    fig3.add_trace(go.Bar(x=df3["日付"], y=[-(r["出荷(出)"] if r["出荷(出)"]!="" else 0) for _,r in df3.iterrows()], name="出荷", marker_color="#F43F5E", opacity=0.7))
+                    fig3.add_trace(go.Scatter(x=df3["日付"], y=df3["予定在庫"], name="予定在庫", mode="lines+markers", line=dict(color="#2563EB",width=2.5)))
+                    fig3.update_layout(barmode="relative", hovermode="x unified", margin=dict(l=10,r=10,t=40,b=10), height=320, legend=dict(orientation="h",y=1.1))
+                    st.plotly_chart(fig3, use_container_width=True)
+                    def sd3(v):
+                        if isinstance(v,(int,float)) and v < 0: return 'color:#DC2626; font-weight:bold; background-color:#FEE2E2;'
+                        return ''
+                    active3 = df3[(df3["製造(入)"]!="") | (df3["出荷(出)"]!="") | (df3["予定在庫"]<0)]
+                    if not active3.empty:
+                        st.dataframe(active3.style.map(sd3, subset=["予定在庫"]), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("今後60日間に製造・出荷の予定はありません。")
+
+                # ── 月次グラフタブ（過去1年 ＋ 今後3ヶ月）
+                with dtab_graph:
+                    graph_rows = []
+                    # 過去1年の月次集計
+                    if not past_o_all.empty:
+                        po_m = past_o_all.copy()
+                        po_m["年月"] = pd.to_datetime(po_m["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
+                        for ym, grp in po_m.groupby("年月"):
+                            graph_rows.append({"年月": ym, "種別": "出荷(実績)", "ケース数": grp["ケース数"].apply(to_int).sum()})
+                    if not past_m_all.empty:
+                        pm_m = past_m_all.copy()
+                        pm_m["年月"] = pd.to_datetime(pm_m["製造予定日"],errors='coerce').dt.to_period("M").astype(str)
+                        for ym, grp in pm_m.groupby("年月"):
+                            graph_rows.append({"年月": ym, "種別": "製造(実績)", "ケース数": grp["ケース数"].apply(to_int).sum()})
+                    # 今後3ヶ月の予定
+                    fut_o = orders_df[(orders_df["製品名"]==sel_prod) & (pd.to_datetime(orders_df["納品予定日"],errors='coerce') >= today)] if not orders_df.empty else pd.DataFrame()
+                    fut_m = manus_df[(manus_df["製品名"]==sel_prod) & (pd.to_datetime(manus_df["製造予定日"],errors='coerce') >= today)] if not manus_df.empty else pd.DataFrame()
+                    if not fut_o.empty:
+                        fo_m = fut_o.copy(); fo_m["年月"] = pd.to_datetime(fo_m["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
+                        for ym, grp in fo_m.groupby("年月"):
+                            graph_rows.append({"年月": ym, "種別": "出荷(予定)", "ケース数": grp["ケース数"].apply(to_int).sum()})
+                    if not fut_m.empty:
+                        fm_m = fut_m.copy(); fm_m["年月"] = pd.to_datetime(fm_m["製造予定日"],errors='coerce').dt.to_period("M").astype(str)
+                        for ym, grp in fm_m.groupby("年月"):
+                            graph_rows.append({"年月": ym, "種別": "製造(予定)", "ケース数": grp["ケース数"].apply(to_int).sum()})
+                    if graph_rows:
+                        df_gr = pd.DataFrame(graph_rows).sort_values("年月")
+                        color_map = {"出荷(実績)":"#F43F5E","出荷(予定)":"#FCA5A5","製造(実績)":"#10B981","製造(予定)":"#6EE7B7"}
+                        fig_gr = px.bar(df_gr, x="年月", y="ケース数", color="種別", barmode="group",
+                            color_discrete_map=color_map,
+                            title=f"【{sel_prod}】 月次 製造・出荷量（過去1年 ＋ 今後予定）")
+                        fig_gr.add_vline(x=today.strftime("%Y-%m"), line_dash="dash", line_color="#64748B", annotation_text="今月")
+                        fig_gr.update_layout(margin=dict(l=10,r=10,t=50,b=10), height=400, legend=dict(orientation="h",y=1.1))
+                        st.plotly_chart(fig_gr, use_container_width=True)
+                        # 月次サマリテーブル
+                        pivot_gr = df_gr.pivot_table(index="年月", columns="種別", values="ケース数", aggfunc="sum").fillna(0).reset_index()
+                        st.dataframe(pivot_gr, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("グラフ表示に必要なデータがありません。")
 
     # ── タブ4: 顧客別スケジュール
     with t4:
