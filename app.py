@@ -323,8 +323,6 @@ HEADER_COLORS = {
 }
 def page_header(title): st.markdown(f'<div class="page-header" style="background:{HEADER_COLORS.get(title,"linear-gradient(135deg,#1E3A8A 0%,#3B82F6 100%)")};"><h1>{title}</h1></div>', unsafe_allow_html=True)
 def section(txt): st.markdown(f'<div class="section-title">{txt}</div>', unsafe_allow_html=True)
-```
-
 ---
 # ─────────────────────────────────────────────
 # 6. 受注登録
