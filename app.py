@@ -747,66 +747,410 @@ elif pg == "⚙️ マスタ・分析":
         if st.button("💾 運送会社保存", type="primary"): save_sync("shipping_master", es); st.rerun()
 
 # ─────────────────────────────────────────────
-# 🏗️ 製造スケジューラー
+# 🏗️ 製造スケジューラー（こんにゃく工場向け）
 # ─────────────────────────────────────────────
 elif pg == "🏗️ 製造スケジューラー":
     page_header("🏗️ 製造スケジューラー")
-    def gpp(pn):
-        df = {"時間あたり生産量":0, "歩留まり率":95, "リードタイム時間":0, "安全在庫数":0, "段取りグループ":""}
-        if mst_u.empty or not pn: return df
-        r = mst_u[mst_u["製品名"]==pn]
-        if r.empty: return df
-        return {"時間あたり生産量":max(1,to_int(r.iloc[0].get("時間あたり生産量",0))), "歩留まり率":max(1,min(100,to_int(r.iloc[0].get("歩留まり率",95)) or 95)), "リードタイム時間":to_int(r.iloc[0].get("リードタイム時間",0)), "安全在庫数":to_int(r.iloc[0].get("安全在庫数",0)), "段取りグループ":str(r.iloc[0].get("段取りグループ","") or "")}
-    def calc_t(odf, mdf, cs, fs, mst_u, hd=30):
-        tk=[]; n=pd.Timestamp.today().normalize()
-        if odf.empty: return tk
-        fo = odf[(odf["不良廃棄フラグ"]==False)&(pd.to_datetime(odf["納品予定日"],errors="coerce")>=n)].copy(); fo["納品予定日"] = pd.to_datetime(fo["納品予定日"],errors="coerce"); fo=fo.dropna(subset=["納品予定日"]).sort_values("納品予定日")
-        for pn, g in fo.groupby("製品名"):
-            pa = gpp(pn); c_s = cs.get(pn,0)
-            for _, r in g.iterrows():
-                sd = pd.Timestamp(r["納品予定日"]).normalize(); nq = to_int(r.get("ケース数",0))
-                sh = nq - max(0, fs.get(pn,{}).get(sd,c_s) - pa["安全在庫数"])
-                if sh<=0: tk.append({"製品名":pn,"顧客名":str(r.get("顧客名","")),"出荷日":sd,"受注数(cs)":nq,"製造必要量(cs)":0,"製造時間(h)":0,"製造開始期限":sd,"優先度":5,"ステータス":"✅ 在庫充足","段取りグループ":pa["段取りグループ"]}); continue
-                mq = int(np.ceil(sh/(pa["歩留まり率"]/100))); mh = mq/pa["時間あたり生産量"]
-                std = sd - timedelta(days=max(1, int(np.ceil((mh+pa["リードタイム時間"])/9)))); dl = (sd-n).days
-                pr = 1 if dl<=1 else (2 if dl<=3 else (3 if dl<=7 else (4 if dl<=14 else 5)))
-                stt = "🔴 緊急" if std<=n else ("🟠 要注意" if dl<=3 else ("🟡 注意" if dl<=7 else "🟢 計画内"))
-                tk.append({"製品名":pn,"顧客名":str(r.get("顧客名","")),"出荷日":sd,"受注数(cs)":nq,"製造必要量(cs)":mq,"製造時間(h)":round(mh,1),"製造開始期限":std,"優先度":pr,"ステータス":stt,"段取りグループ":pa["段取りグループ"]})
-        tn = [t for t in tk if t["製造必要量(cs)"]>0]; tn.sort(key=lambda t: (t["段取りグループ"] or "ZZZ", t["優先度"], t["出荷日"]))
-        return tn + [t for t in tk if t["製造必要量(cs)"]==0]
-    
-    hd = st.slider("📅 期間(日)",7,60,30,7); so = st.checkbox("✅ 充足品も表示")
-    tk = calc_t(odf, mdf, cs, fs, mst_u, hd); tn = [t for t in tk if t["製造必要量(cs)"]>0]; dt = tk if so else tn
-    k1,k2,k3,k4 = st.columns(4); k1.metric("🔴 緊急", f"{sum(1 for t in tn if t['優先度']<=2)} 件"); k2.metric("🟡 注意", f"{sum(1 for t in tn if t['優先度']==3)} 件"); k3.metric("📋 必要", f"{len(tn)} 件"); k4.metric("⏱ 時間", f"{sum(t['製造時間(h)'] for t in tn):.1f} h")
-    ts1, ts2, ts3, ts4 = st.tabs(["📋 一覧", "📊 ガント", "🔧 段取り", "⚙️ 設定"])
+
+    # ── ヘルパー：製品パラメータ取得（ZeroDivision安全）
+    def _gpp(pn):
+        defaults = {"時間あたり生産量": 1, "歩留まり率": 95, "リードタイム時間": 0, "安全在庫数": 0, "段取りグループ": ""}
+        if mst_u.empty or not pn:
+            return defaults
+        r = mst_u[mst_u["製品名"] == pn]
+        if r.empty:
+            return defaults
+        row = r.iloc[0]
+        return {
+            "時間あたり生産量": max(1, to_int(row.get("時間あたり生産量", 0)) or 1),
+            "歩留まり率":       max(1, min(100, to_int(row.get("歩留まり率", 95)) or 95)),
+            "リードタイム時間": max(0, to_int(row.get("リードタイム時間", 0))),
+            "安全在庫数":       max(0, to_int(row.get("安全在庫数", 0))),
+            "段取りグループ":   str(row.get("段取りグループ", "") or ""),
+        }
+
+    # ── メイン計算：受注→製造必要量・開始期限・優先度を算出
+    def _calc_tasks(hd=30):
+        tasks = []
+        n = pd.Timestamp.today().normalize()
+        if odf.empty:
+            return tasks
+        fo = odf[
+            (odf["不良廃棄フラグ"] == False) &
+            (pd.to_datetime(odf["納品予定日"], errors="coerce") >= n) &
+            (pd.to_datetime(odf["納品予定日"], errors="coerce") <= n + timedelta(days=hd))
+        ].copy()
+        fo["納品予定日"] = pd.to_datetime(fo["納品予定日"], errors="coerce")
+        fo = fo.dropna(subset=["納品予定日"]).sort_values("納品予定日")
+        if fo.empty:
+            return tasks
+
+        for pn, grp in fo.groupby("製品名"):
+            pa = _gpp(pn)
+            c_s = cs.get(pn, 0)
+            for _, row in grp.iterrows():
+                ship_d = pd.Timestamp(row["納品予定日"]).normalize()
+                order_q = to_int(row.get("ケース数", 0))
+                proj_stk = fs.get(pn, {}).get(ship_d, c_s)
+                shortage = order_q - max(0, proj_stk - pa["安全在庫数"])
+                dl = (ship_d - n).days
+
+                if shortage <= 0:
+                    tasks.append({
+                        "製品名": pn, "顧客名": str(row.get("顧客名", "")),
+                        "出荷日": ship_d, "受注数(cs)": order_q,
+                        "製造必要量(cs)": 0, "製造時間(h)": 0.0,
+                        "製造開始期限": ship_d, "優先度": 5,
+                        "ステータス": "✅ 在庫充足",
+                        "段取りG": pa["段取りグループ"],
+                        "歩留まり率": pa["歩留まり率"],
+                    })
+                    continue
+
+                # 歩留まり考慮・ZeroDivision安全
+                yield_rate = pa["歩留まり率"] / 100.0
+                mfg_q = int(np.ceil(shortage / yield_rate))
+                spd = max(1, pa["時間あたり生産量"])
+                mfg_h = round(mfg_q / spd, 1)
+
+                # 製造開始期限：1日9時間稼働換算
+                work_days = max(1, int(np.ceil((mfg_h + pa["リードタイム時間"]) / 9.0)))
+                start_dl = ship_d - timedelta(days=work_days)
+
+                pr = (1 if dl <= 1 else 2 if dl <= 3 else 3 if dl <= 7 else 4 if dl <= 14 else 5)
+                if start_dl <= n:
+                    stt = "🔴 緊急"
+                elif dl <= 3:
+                    stt = "🟠 要注意"
+                elif dl <= 7:
+                    stt = "🟡 注意"
+                else:
+                    stt = "🟢 計画内"
+
+                tasks.append({
+                    "製品名": pn, "顧客名": str(row.get("顧客名", "")),
+                    "出荷日": ship_d, "受注数(cs)": order_q,
+                    "製造必要量(cs)": mfg_q, "製造時間(h)": mfg_h,
+                    "製造開始期限": start_dl, "優先度": pr,
+                    "ステータス": stt, "段取りG": pa["段取りグループ"],
+                    "歩留まり率": pa["歩留まり率"],
+                })
+
+        needed = [t for t in tasks if t["製造必要量(cs)"] > 0]
+        needed.sort(key=lambda t: (t["段取りG"] or "ZZZ", t["優先度"], t["出荷日"]))
+        stocked = [t for t in tasks if t["製造必要量(cs)"] == 0]
+        return needed + stocked
+
+    # ── UI：コントロールバー
+    st.markdown("""
+    <style>
+    .sched-kpi{background:white;border-radius:12px;padding:14px 18px;box-shadow:0 2px 8px rgba(0,0,0,0.08);text-align:center;}
+    .sched-kpi .val{font-size:28px;font-weight:900;line-height:1.1;}
+    .sched-kpi .lbl{font-size:12px;color:#64748B;margin-top:2px;}
+    .warn-banner{background:#FEF3C7;border:1.5px solid #F59E0B;border-radius:10px;padding:10px 16px;margin-bottom:12px;font-weight:700;color:#92400E;}
+    .ok-banner{background:#D1FAE5;border:1.5px solid #059669;border-radius:10px;padding:10px 16px;margin-bottom:12px;font-weight:700;color:#065F46;}
+    </style>""", unsafe_allow_html=True)
+
+    c_ctrl1, c_ctrl2, c_ctrl3 = st.columns([2, 1.5, 1.5])
+    hd = c_ctrl1.slider("📅 対象期間（日）", 7, 60, 30, 7)
+    show_ok = c_ctrl2.checkbox("✅ 在庫充足品も表示", value=False)
+    work_h_day = c_ctrl3.number_input("⏰ 1日の稼働時間(h)", min_value=1, max_value=24, value=9)
+
+    # ── タスク計算
+    all_tasks = _calc_tasks(hd)
+    needed_tasks = [t for t in all_tasks if t["製造必要量(cs)"] > 0]
+    display_tasks = all_tasks if show_ok else needed_tasks
+
+    # ── KPIバナー
+    cnt_urgent  = sum(1 for t in needed_tasks if t["優先度"] <= 2)
+    cnt_caution = sum(1 for t in needed_tasks if t["優先度"] == 3)
+    cnt_plan    = sum(1 for t in needed_tasks if t["優先度"] >= 4)
+    total_h     = sum(t["製造時間(h)"] for t in needed_tasks)
+    total_cs    = sum(t["製造必要量(cs)"] for t in needed_tasks)
+
+    kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+    kc1.markdown(f'<div class="sched-kpi"><div class="val" style="color:#DC2626;">{cnt_urgent}</div><div class="lbl">🔴 緊急・要注意</div></div>', unsafe_allow_html=True)
+    kc2.markdown(f'<div class="sched-kpi"><div class="val" style="color:#D97706;">{cnt_caution}</div><div class="lbl">🟡 注意（7日以内）</div></div>', unsafe_allow_html=True)
+    kc3.markdown(f'<div class="sched-kpi"><div class="val" style="color:#2563EB;">{cnt_plan}</div><div class="lbl">🟢 計画内</div></div>', unsafe_allow_html=True)
+    kc4.markdown(f'<div class="sched-kpi"><div class="val" style="color:#7C3AED;">{total_cs:,}</div><div class="lbl">📦 製造必要量(cs)</div></div>', unsafe_allow_html=True)
+    kc5.markdown(f'<div class="sched-kpi"><div class="val" style="color:#0891B2;">{total_h:.1f}</div><div class="lbl">⏱ 必要製造時間(h)</div></div>', unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:4px;'></div>", unsafe_allow_html=True)
+
+    if cnt_urgent > 0:
+        st.markdown(f'<div class="warn-banner">🚨 緊急・要注意の製造指示が <b>{cnt_urgent} 件</b> あります。今すぐ製造計画を確認してください。</div>', unsafe_allow_html=True)
+    elif len(needed_tasks) == 0:
+        st.markdown('<div class="ok-banner">✅ 直近の製造必要品目はありません。全品目在庫充足です。</div>', unsafe_allow_html=True)
+
+    # ── タブ
+    ts1, ts2, ts3, ts4, ts5 = st.tabs(["📋 製造指示一覧", "📊 ガントチャート", "🔧 段取り最適化", "📈 日別負荷グラフ", "⚙️ パラメータ設定"])
+
+    # ── タブ1：製造指示一覧
     with ts1:
-        if not dt: st.success("✅ なし")
+        if not display_tasks:
+            st.success("✅ 対象期間内に製造が必要な品目はありません。")
         else:
-            dft = pd.DataFrame(dt); sc = [c for c in ["優先度","ステータス","製品名","顧客名","出荷日","受注数(cs)","製造必要量(cs)","製造時間(h)","製造開始期限","段取りグループ"] if c in dft.columns]
-            for c in ["出荷日","製造開始期限"]:
-                if c in dft.columns: dft[c] = pd.to_datetime(dft[c], errors='coerce').apply(lambda x: x.strftime("%Y/%m/%d") if pd.notnull(x) else "")
-            st.dataframe(dft[sc].style.apply(lambda r: ['background-color:#FEE2E2;']*len(r) if r.get("優先度",5)<=1 else (['background-color:#FFEDD5;']*len(r) if r.get("優先度",5)==2 else (['background-color:#FFFBEB;']*len(r) if r.get("優先度",5)==3 else ['']*len(r))), axis=1), hide_index=True)
+            dft = pd.DataFrame(display_tasks)
+            # 日付を表示用文字列に変換（クラッシュ防止）
+            for c in ["出荷日", "製造開始期限"]:
+                if c in dft.columns:
+                    dft[c] = dft[c].apply(
+                        lambda x: x.strftime("%Y/%m/%d") if isinstance(x, (pd.Timestamp, datetime)) and pd.notnull(x)
+                        else (str(x)[:10] if x else "")
+                    )
+            sc = [c for c in ["優先度","ステータス","製品名","段取りG","顧客名","出荷日","受注数(cs)","製造必要量(cs)","製造時間(h)","製造開始期限","歩留まり率"] if c in dft.columns]
+
+            def _row_color(r):
+                p = r.get("優先度", 5)
+                if p <= 1: return ['background-color:#FEE2E2;font-weight:bold;'] * len(r)
+                if p == 2: return ['background-color:#FFEDD5;font-weight:bold;'] * len(r)
+                if p == 3: return ['background-color:#FFFBEB;'] * len(r)
+                if r.get("ステータス","") == "✅ 在庫充足": return ['background-color:#F0FDF4;color:#6B7280;'] * len(r)
+                return [''] * len(r)
+
+            st.dataframe(
+                dft[sc].style.apply(_row_color, axis=1),
+                hide_index=True, use_container_width=True,
+                column_config={
+                    "優先度": st.column_config.NumberColumn("優先度", width="small"),
+                    "製造時間(h)": st.column_config.NumberColumn("製造時間(h)", format="%.1f"),
+                    "歩留まり率": st.column_config.NumberColumn("歩留まり(%)", format="%d"),
+                },
+                height=min(700, max(280, len(dft) * 38 + 60))
+            )
+            st.download_button(
+                "📥 製造指示CSVダウンロード",
+                data=make_csv_bytes(dft[sc]),
+                file_name=f"製造指示_{date.today()}.csv",
+                mime="text/csv", use_container_width=True
+            )
+
+    # ── タブ2：ガントチャート（日単位・クラッシュ対策済み）
     with ts2:
-        if tn:
-            gd = [dict(Task=f"{t['製品名'][:10]}", Start=t["製造開始期限"].strftime("%Y-%m-%d"), Finish=(t["製造開始期限"]+timedelta(hours=t["製造時間(h)"])).strftime("%Y-%m-%d") if (t["製造開始期限"]+timedelta(hours=t["製造時間(h)"]))>t["製造開始期限"] else (t["製造開始期限"]+timedelta(hours=1)).strftime("%Y-%m-%d"), Resource=t["ステータス"]) for t in tn if pd.notnull(t.get("製造開始期限"))]
-            if gd:
-                fig = px.timeline(pd.DataFrame(gd), x_start="Start", x_end="Finish", y="Task", color="Resource", color_discrete_map={"🔴 緊急":"#DC2626","🟠 要注意":"#EA580C","🟡 注意":"#D97706","🟢 計画内":"#059669"})
-                fig.update_yaxes(autorange="reversed"); st.plotly_chart(fig, use_container_width=True)
+        if not needed_tasks:
+            st.info("製造が必要な品目がありません。")
+        else:
+            gantt_rows = []
+            for t in needed_tasks:
+                try:
+                    s = t["製造開始期限"]
+                    if not isinstance(s, (pd.Timestamp, datetime)):
+                        s = pd.to_datetime(str(s), errors="coerce")
+                    if pd.isna(s):
+                        continue
+                    s = pd.Timestamp(s).normalize()
+                    mfg_h = float(t["製造時間(h)"] or 1)
+                    # 終了時刻：稼働時間/日で割り上げ
+                    finish_days = max(1, int(np.ceil(mfg_h / work_h_day)))
+                    e = s + timedelta(days=finish_days)
+                    gantt_rows.append({
+                        "製品名": t["製品名"][:16],
+                        "段取りG": t["段取りG"] or "未設定",
+                        "Start": s.strftime("%Y-%m-%d"),
+                        "Finish": e.strftime("%Y-%m-%d"),
+                        "ステータス": t["ステータス"],
+                        "製造量(cs)": t["製造必要量(cs)"],
+                        "出荷日": t["出荷日"].strftime("%Y/%m/%d") if isinstance(t["出荷日"], (pd.Timestamp, datetime)) and pd.notnull(t["出荷日"]) else str(t["出荷日"])[:10],
+                    })
+                except Exception:
+                    continue
+
+            if not gantt_rows:
+                st.warning("ガント表示に必要なデータが不足しています。パラメータ設定タブで製品パラメータを確認してください。")
+            else:
+                gdf = pd.DataFrame(gantt_rows)
+                color_map = {"🔴 緊急":"#DC2626","🟠 要注意":"#EA580C","🟡 注意":"#D97706","🟢 計画内":"#059669"}
+                fig_g = px.timeline(
+                    gdf, x_start="Start", x_end="Finish", y="製品名",
+                    color="ステータス", color_discrete_map=color_map,
+                    hover_data=["段取りG","製造量(cs)","出荷日"],
+                    title=f"製造スケジュール ガントチャート（今後{hd}日間）"
+                )
+                fig_g.update_yaxes(autorange="reversed", title="")
+                fig_g.update_xaxes(title="")
+                fig_g.update_layout(
+                    margin=dict(l=10, r=10, t=50, b=10), height=max(350, len(gantt_rows) * 36 + 80),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
+                    plot_bgcolor="white"
+                )
+                st.plotly_chart(fig_g, use_container_width=True)
+
+                # 段取りG別サマリ
+                st.markdown('<div class="section-title">📦 段取りグループ別サマリ</div>', unsafe_allow_html=True)
+                gdf_sum = gdf.groupby("段取りG").agg(品目数=("製品名","count"), 総製造量=("製造量(cs)","sum")).reset_index()
+                st.dataframe(gdf_sum, hide_index=True, use_container_width=True)
+
+    # ── タブ3：段取り最適化
     with ts3:
-        if tn:
-            gp = {}; pg = None; ro = []; tt = 0
-            for t in tn: gp.setdefault(t["段取りグループ"] or "未設定", []).append(t)
-            for gn, gts in gp.items():
-                co = 30 if pg and pg!=gn else 0
-                for t in sorted(gts, key=lambda t:(t["優先度"], t["出荷日"])):
-                    ro.append({"順":len(ro)+1,"G":gn,"品":t["製品名"],"量":t["製造必要量(cs)"],"h":t["製造時間(h)"],"替":co,"優":t["優先度"]}); tt+=t["製造時間(h)"]; co=0
-                pg = gn
-            st.dataframe(pd.DataFrame(ro).style.apply(lambda r: ['background-color:#FEE2E2;']*len(r) if to_int(r.get("優",5))<=2 else ['']*len(r), axis=1), hide_index=True)
+        if not needed_tasks:
+            st.info("製造が必要な品目がありません。")
+        else:
+            st.markdown('<div class="section-title">🔧 段取り替えを考慮した最適製造順序</div>', unsafe_allow_html=True)
+            CHANGEOVER_MIN = st.number_input("段取り替え時間（分）", min_value=0, max_value=180, value=30, step=5)
+
+            grp_map = {}
+            for t in needed_tasks:
+                grp_map.setdefault(t["段取りG"] or "未設定", []).append(t)
+
+            total_co = 0; seq_rows = []; prev_g = None; seq_no = 1
+            for gn in sorted(grp_map.keys()):
+                gts = sorted(grp_map[gn], key=lambda t: (t["優先度"], t["出荷日"]))
+                co_time = CHANGEOVER_MIN if (prev_g is not None and prev_g != gn) else 0
+                total_co += co_time
+                if co_time > 0:
+                    seq_rows.append({
+                        "順": "", "区分": "🔄 段取り替え",
+                        "製品名": f"  {prev_g} → {gn}",
+                        "製造量(cs)": "―", "製造時間(h)": "―",
+                        "段取り時間(分)": f"{co_time}分",
+                        "優先度": "―", "出荷日": "―",
+                    })
+                for t in gts:
+                    seq_rows.append({
+                        "順": seq_no,
+                        "区分": "🏭 製造",
+                        "製品名": t["製品名"],
+                        "製造量(cs)": t["製造必要量(cs)"],
+                        "製造時間(h)": t["製造時間(h)"],
+                        "段取り時間(分)": "―",
+                        "優先度": t["ステータス"],
+                        "出荷日": t["出荷日"].strftime("%Y/%m/%d") if isinstance(t["出荷日"], (pd.Timestamp, datetime)) and pd.notnull(t["出荷日"]) else str(t["出荷日"])[:10],
+                    })
+                    seq_no += 1
+                prev_g = gn
+
+            seq_df = pd.DataFrame(seq_rows)
+
+            def _seq_style(r):
+                if r.get("区分","") == "🔄 段取り替え":
+                    return ['background-color:#F3E8FF;color:#6D28D9;font-weight:bold;'] * len(r)
+                pr_str = str(r.get("優先度",""))
+                if "緊急" in pr_str: return ['background-color:#FEE2E2;font-weight:bold;'] * len(r)
+                if "要注意" in pr_str: return ['background-color:#FFEDD5;'] * len(r)
+                if "注意" in pr_str: return ['background-color:#FFFBEB;'] * len(r)
+                return [''] * len(r)
+
+            st.dataframe(seq_df.style.apply(_seq_style, axis=1), hide_index=True, use_container_width=True, height=min(700, len(seq_df)*38+60))
+
+            mfg_h_total = sum(t["製造時間(h)"] for t in needed_tasks)
+            co_h = total_co / 60.0
+            total_op_h = mfg_h_total + co_h
+            total_days = max(1, int(np.ceil(total_op_h / work_h_day)))
+
+            c_s1, c_s2, c_s3, c_s4 = st.columns(4)
+            c_s1.metric("製造時間 合計", f"{mfg_h_total:.1f} h")
+            c_s2.metric("段取り替え 合計", f"{total_co} 分 ({co_h:.1f} h)")
+            c_s3.metric("実働時間 合計", f"{total_op_h:.1f} h")
+            c_s4.metric(f"必要稼働日数（{work_h_day}h/日）", f"{total_days} 日")
+
+    # ── タブ4：日別負荷グラフ
     with ts4:
-        if not mst.empty:
-            ep = st.data_editor(mst[[c for c in ["製品名","大カテゴリ","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"] if c in mst.columns]].copy(), hide_index=True)
-            if st.button("💾 保存"):
+        if not needed_tasks:
+            st.info("製造が必要な品目がありません。")
+        else:
+            st.markdown('<div class="section-title">📈 日別 製造負荷（推定稼働時間）</div>', unsafe_allow_html=True)
+            load_map = {}
+            for t in needed_tasks:
+                try:
+                    s = t["製造開始期限"]
+                    if not isinstance(s, (pd.Timestamp, datetime)):
+                        s = pd.to_datetime(str(s), errors="coerce")
+                    if pd.isna(s):
+                        continue
+                    s = pd.Timestamp(s).normalize()
+                    mfg_h = float(t["製造時間(h)"] or 1)
+                    days_needed = max(1, int(np.ceil(mfg_h / work_h_day)))
+                    h_per_day = mfg_h / days_needed
+                    for i in range(days_needed):
+                        d = s + timedelta(days=i)
+                        load_map.setdefault(d, {}).setdefault(t["段取りG"] or "未設定", 0)
+                        load_map[d][t["段取りG"] or "未設定"] += h_per_day
+                except Exception:
+                    continue
+
+            if load_map:
+                load_rows = []
+                for d in sorted(load_map.keys()):
+                    for g, h in load_map[d].items():
+                        load_rows.append({"日付": d.strftime("%m/%d"), "段取りG": g, "稼働時間(h)": round(h, 1)})
+                ldf = pd.DataFrame(load_rows)
+                fig_l = px.bar(
+                    ldf, x="日付", y="稼働時間(h)", color="段取りG", barmode="stack",
+                    title="日別 推定稼働時間（段取りグループ別）",
+                    color_discrete_sequence=px.colors.qualitative.Set2
+                )
+                fig_l.add_hline(y=work_h_day, line_dash="dash", line_color="#DC2626",
+                                annotation_text=f"上限 {work_h_day}h/日", annotation_position="top right")
+                fig_l.update_layout(margin=dict(l=10,r=10,t=50,b=10), height=380, plot_bgcolor="white")
+                st.plotly_chart(fig_l, use_container_width=True)
+
+                # 過負荷警告
+                overload = [(d, sum(v for v in load_map[d].values())) for d in sorted(load_map.keys()) if sum(v for v in load_map[d].values()) > work_h_day]
+                if overload:
+                    st.markdown(f'<div class="warn-banner">⚠️ 稼働上限（{work_h_day}h）を超える日程が <b>{len(overload)} 日</b> あります：{", ".join(d.strftime("%m/%d") for d,_ in overload[:8])}{"…" if len(overload)>8 else ""}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="ok-banner">✅ 全日程で稼働時間が上限（{work_h_day}h/日）以内です。</div>', unsafe_allow_html=True)
+
+            # 在庫推移プレビュー（製品別）
+            st.markdown('<div class="section-title">📦 対象製品 在庫推移プレビュー</div>', unsafe_allow_html=True)
+            prods_needed = list(dict.fromkeys(t["製品名"] for t in needed_tasks))
+            sel_prod = st.selectbox("製品を選択", options=prods_needed, index=0 if prods_needed else None)
+            if sel_prod:
+                inv_rows = []
+                cur = cs.get(sel_prod, 0)
+                for d in pd.date_range(today, today + timedelta(days=hd)):
+                    delta = fs.get(sel_prod, {}).get(d, cur) - (fs.get(sel_prod, {}).get(d - timedelta(days=1), cur) if d > today else 0)
+                    cur_stk = fs.get(sel_prod, {}).get(d, cur)
+                    inv_rows.append({"日付": d.strftime("%m/%d"), "予測在庫(cs)": cur_stk})
+                inv_df = pd.DataFrame(inv_rows)
+                safe_stk = _gpp(sel_prod)["安全在庫数"]
+                fig_i = go.Figure()
+                fig_i.add_trace(go.Scatter(x=inv_df["日付"], y=inv_df["予測在庫(cs)"],
+                    mode="lines+markers", name="予測在庫",
+                    line=dict(color="#2563EB", width=2.5),
+                    fill="tozeroy", fillcolor="rgba(37,99,235,0.08)"))
+                fig_i.add_hline(y=safe_stk, line_dash="dash", line_color="#F59E0B",
+                                annotation_text=f"安全在庫 {safe_stk}cs")
+                fig_i.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
+                fig_i.update_layout(title=f"【{sel_prod}】 在庫推移（{hd}日間）",
+                    margin=dict(l=10,r=10,t=50,b=10), height=300, plot_bgcolor="white",
+                    hovermode="x unified")
+                st.plotly_chart(fig_i, use_container_width=True)
+
+    # ── タブ5：パラメータ設定
+    with ts5:
+        st.markdown('<div class="section-title">⚙️ 製品別 製造パラメータ設定</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="background:#EFF6FF;border-radius:8px;padding:10px 14px;font-size:13px;color:#1E40AF;margin-bottom:12px;">
+        💡 <b>入力ガイド</b>：
+        「時間あたり生産量」はcs/h単位。「歩留まり率」は通常90〜98%程度。
+        「リードタイム時間」は製造前準備（仕込み・前処理）の時間。
+        「安全在庫数」は最低限確保したいcs数。「段取りグループ」は同一ラインの品目をまとめる識別名。
+        </div>""", unsafe_allow_html=True)
+
+        if mst.empty:
+            st.warning("製品マスタが登録されていません。先に「⚙️ マスタ・分析」から製品を登録してください。")
+        else:
+            param_cols = [c for c in ["製品名","大カテゴリ","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"] if c in mst.columns]
+            ep = st.data_editor(
+                mst[param_cols].copy(),
+                hide_index=True,
+                use_container_width=True,
+                height=min(600, len(mst)*38+60),
+                column_config={
+                    "製品名":           st.column_config.TextColumn("製品名", disabled=True),
+                    "大カテゴリ":       st.column_config.TextColumn("カテゴリ", disabled=True),
+                    "時間あたり生産量": st.column_config.NumberColumn("生産量(cs/h)", min_value=1, step=1, format="%d"),
+                    "歩留まり率":       st.column_config.NumberColumn("歩留まり(%)", min_value=1, max_value=100, step=1, format="%d"),
+                    "リードタイム時間": st.column_config.NumberColumn("LT(h)", min_value=0, step=1, format="%d"),
+                    "安全在庫数":       st.column_config.NumberColumn("安全在庫(cs)", min_value=0, step=1, format="%d"),
+                    "段取りグループ":   st.column_config.TextColumn("段取りG", help="同一ライン・工程の製品に同じ名前を付けてください"),
+                }
+            )
+            if st.button("💾 パラメータを保存", type="primary", use_container_width=True):
                 um = mst.copy()
                 for c in ["時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]:
-                    if c in ep.columns and c in um.columns: um[c] = ep[c].values
-                save_sync("master", um); st.rerun()
+                    if c in ep.columns and c in um.columns:
+                        um[c] = ep.set_index("製品名").reindex(um["製品名"])[c].values if "製品名" in ep.columns else ep[c].values
+                save_sync("master", um)
+                st.success("✅ パラメータを保存しました。")
+                st.rerun()
