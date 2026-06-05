@@ -443,6 +443,7 @@ elif pg == "📦 資材・入出庫":
             
             st.dataframe(df_a[["資材名","現在庫","発注点","LT","90日消費","発注推奨日","到達日","予測在庫","枯渇予測","緊急度"]].style.apply(lambda r: ['background-color:#FEE2E2;font-weight:bold;']*len(r) if "今すぐ" in str(r.get("緊急度","")) else (['background-color:#FFF7ED;']*len(r) if "🟠" in str(r.get("緊急度","")) else (['background-color:#FFFBEB;']*len(r) if "🟡" in str(r.get("緊急度","")) else (['background-color:#EFF6FF;']*len(r) if "🔵" in str(r.get("緊急度","")) else ['background-color:#F0FDF4;']*len(r)))), axis=1), use_container_width=True, hide_index=True, height=500)
 
+            pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
             spg = st.selectbox("グラフ表示", options=[r["資材名"] for _, r in pack_mst_unique.iterrows()])
             if spg:
                 ri = p_sum.get(spg,{}).get("現在庫",0); gd, gs, gu = [], [], []
@@ -456,10 +457,16 @@ elif pg == "📦 資材・入出庫":
                 fig.update_layout(title=f"【{spg}】 在庫推移予測", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380); st.plotly_chart(fig, use_container_width=True)
 
     with tp2:
-        st.dataframe(pd.DataFrame([{"資材名":k,**v} for k,v in p_sum.items()])[["資材名","品番","規格","仕入先","保管場所","現在庫","発注点","状態","単位"]].style.apply(lambda r: ['background-color:#FFEDD5;color:#C2410C;font-weight:bold;']*len(r) if to_int(r.get("現在庫",0))<to_int(r.get("発注点",0)) else ['']*len(r),axis=1), use_container_width=True, hide_index=True)
+        if not p_sum:
+            st.info("資材マスタが登録されていません。")
+        else:
+            _sum_df = pd.DataFrame([{"資材名":k,**v} for k,v in p_sum.items()])
+            _sum_cols = [c for c in ["資材名","品番","規格","仕入先","保管場所","現在庫","発注点","状態","単位"] if c in _sum_df.columns]
+            st.dataframe(_sum_df[_sum_cols].style.apply(lambda r: ['background-color:#FFEDD5;color:#C2410C;font-weight:bold;']*len(r) if to_int(r.get("現在庫",0))<to_int(r.get("発注点",0)) else ['']*len(r),axis=1), use_container_width=True, hide_index=True)
 
     with tp3:
         pd_t = st.date_input("📅 処理日", value=date.today())
+        pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
         c1,c2 = st.columns([1.5,2.5]); s_pk = c1.text_input("🔍 検索"); f_pk = [p for p in pack_mst_unique["資材名"].tolist() if s_pk in p] if s_pk else pack_mst_unique["資材名"].tolist()
         sl_pk = c2.selectbox("📦 資材", options=f_pk, index=None)
         pt = st.radio("区分", ["📥 入庫","📤 出庫","📋 棚卸"], horizontal=True)
@@ -474,10 +481,11 @@ elif pg == "📦 資材・入出庫":
                 if lq>0: app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}])); st.rerun()
 
     with tp4:
-        dpk = pk_l.sort_values("登録日時",ascending=False).copy() if not pk_l.empty else pd.DataFrame()
+        dpk = pk_l.sort_values("登録日時",ascending=False).copy() if (not pk_l.empty and "登録日時" in pk_l.columns) else (pk_l.copy() if not pk_l.empty else pd.DataFrame())
         if not dpk.empty:
-            dpk["登録日(表示)"] = dpk["登録日"].apply(format_date_jp)
-            edp = st.data_editor(dpk.head(5)[["ID","登録日(表示)","資材名","処理区分","数量","理由","関連製品名","備考"]], hide_index=True, column_config={"ID":None,"処理区分":st.column_config.SelectboxColumn(options=["入庫","出庫","製造連動"]),"数量":st.column_config.NumberColumn(min_value=1,step=1,format="%d")})
+            dpk["登録日(表示)"] = dpk["登録日"].apply(format_date_jp) if "登録日" in dpk.columns else ""
+            _tp4_cols = [c for c in ["ID","登録日(表示)","資材名","処理区分","数量","理由","関連製品名","備考"] if c in dpk.columns]
+            edp = st.data_editor(dpk.head(5)[_tp4_cols], hide_index=True, column_config={"ID":None,"処理区分":st.column_config.SelectboxColumn(options=["入庫","出庫","製造連動"]),"数量":st.column_config.NumberColumn(min_value=1,step=1,format="%d")})
             if st.button("💾 保存", key="btn_spk"): save_sync("packaging_logs", pd.concat([pk_l[~pk_l["ID"].isin(dpk.head(5)["ID"])], pd.merge(edp.assign(登録日=pd.to_datetime(edp["登録日(表示)"].str.split(" ").str[0],errors="coerce")), pk_l[["ID","理論在庫","登録日時"]], on="ID", how="left")], ignore_index=True)); st.rerun()
 
 # ─────────────────────────────────────────────
@@ -532,7 +540,7 @@ elif pg == "📊 在庫・スケジュール":
 
             dp = st.session_state.drill_product
             if dp:
-                st.markdown(f'<div class="drill-panel">### 📦 {format_name(dp)} 詳細', unsafe_allow_html=True)
+                st.markdown(f'<div class="drill-panel">### 📦 {fn(dp)} 詳細', unsafe_allow_html=True)
                 oy = today - timedelta(days=365)
                 ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)].copy() if not odf.empty else pd.DataFrame()
                 mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)].copy() if not mdf.empty else pd.DataFrame()
@@ -578,14 +586,14 @@ elif pg == "📊 在庫・スケジュール":
             if not mdf.empty:
                 for _,r in mdf[pd.to_datetime(mdf["製造予定日"],errors='coerce').dt.normalize()==d2].iterrows():
                     bg,bc = ("#DBEAFE","#1E3A8A") if r.get("リパックフラグ") in [True,"TRUE"] else ("#F0FFF4","#10B981")
-                    mh+=f'<div style="background:{bg};border-left:4px solid {bc};padding:6px;margin-bottom:4px;"><b>{format_name(r["製品名"])}</b><span style="float:right;">{to_int(r.get("ケース数",0))}cs</span></div>'
+                    mh+=f'<div style="background:{bg};border-left:4px solid {bc};padding:6px;margin-bottom:4px;"><b>{fn(r["製品名"])}</b><span style="float:right;">{to_int(r.get("ケース数",0))}cs</span></div>'
             if not odf.empty:
                 for _,r in odf[pd.to_datetime(odf["納品予定日"],errors='coerce').dt.normalize()==d2].iterrows():
                     sod=fs.get(r["製品名"],{}).get(d2,0)
                     if r.get("荷姿チェック") in [True,"TRUE"]: qh,bg,bc = f'<span style="text-decoration:line-through;">{to_int(r.get("ケース数",0))}cs</span>',"#D1FAE5","#059669"
                     elif sod<0: qh,bg,bc = f'<span class="shortage-red">{to_int(r.get("ケース数",0))}cs(不足)</span>',"#FEE2E2","#DC2626"
                     else: qh,bg,bc = f'<span style="color:#1D4ED8;font-weight:900;">{to_int(r.get("ケース数",0))}cs</span>',"#F0F7FF","#2563EB"
-                    oh+=f'<div style="background:{bg};border-left:4px solid {bc};padding:6px;margin-bottom:4px;"><b>{r["顧客名"]}: {format_name(r["製品名"])}</b><span style="float:right;">{qh}</span></div>'
+                    oh+=f'<div style="background:{bg};border-left:4px solid {bc};padding:6px;margin-bottom:4px;"><b>{r["顧客名"]}: {fn(r["製品名"])}</b><span style="float:right;">{qh}</span></div>'
             html+=f'<tr><td><b>{format_date_jp(d2)}</b></td><td>{mh or "なし"}</td><td>{oh or "なし"}</td></tr>'
         st.markdown(html+'</table>', unsafe_allow_html=True)
 
