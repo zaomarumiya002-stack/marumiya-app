@@ -1097,38 +1097,37 @@ elif page == "📦 資材・入出庫":
 
                 order_alerts = []
                 for pn_lt, daily_use in pack_forecast.items():
-                    # マスタからリードタイムを直接取得
                     lt_days  = pack_summary.get(pn_lt, {}).get("発注リードタイム", 7)
                     if lt_days == 0:
                         lt_days = 7  # 未設定時デフォルト
                     curr_inv = pack_summary.get(pn_lt, {}).get("現在庫", 0)
                     ord_pt   = pack_summary.get(pn_lt, {}).get("発注点", 0)
 
-                    # 在庫推移シミュレーション（90日間）
                     running_inv    = curr_inv
-                    shortage_date  = None
+                    reorder_date   = None
+                    zero_date      = None
+                    inv_at_order   = None
                     cumulative_use = 0
-                    inv_at_order   = None  # 発注推奨日時点の在庫
 
                     for d_lt in pd.date_range(today, today + timedelta(days=forecast_days)):
                         use = daily_use.get(d_lt, 0)
                         running_inv  -= use
                         cumulative_use += use
-                        # 発注点を下回ったら在庫切れ予測日
-                        if running_inv <= ord_pt and shortage_date is None:
-                            shortage_date = d_lt
+                        
+                        # 発注点到達日（発注推奨日）
+                        if running_inv <= ord_pt and reorder_date is None:
+                            reorder_date = d_lt
+                            inv_at_order = running_inv
+                            
+                        # 在庫切れ予測日（ゼロ以下）
+                        if running_inv <= 0 and zero_date is None:
+                            zero_date = d_lt
 
-                    # 発注推奨日 = 在庫切れ予測日 - リードタイム
-                    if shortage_date is not None:
-                        order_date = shortage_date - timedelta(days=lt_days)
-                        # 発注推奨日時点の在庫を逆算
-                        sim_inv = curr_inv
-                        for d_lt2 in pd.date_range(today, order_date):
-                            sim_inv -= daily_use.get(d_lt2, 0)
-                        inv_at_order = max(sim_inv, 0)
-
+                    # 発注推奨日 = 発注点に達する日
+                    if reorder_date is not None:
+                        order_date = reorder_date
                         days_until_order = (order_date.date() - date.today()).days
-                        if days_until_order < 0:
+                        if days_until_order <= 0:
                             urgency = "🔴 今すぐ発注！"
                             urgency_color = "#FEE2E2"
                             border_color  = "#DC2626"
@@ -1148,7 +1147,7 @@ elif page == "📦 資材・入出庫":
                         order_date     = None
                         inv_at_order   = None
                         days_until_order = 999
-                        urgency        = "✅ 当面問題なし（90日以内に発注点未満にならない）"
+                        urgency        = "✅ 当面問題なし（90日以内に発注点到達なし）"
                         urgency_color  = "#F0FDF4"
                         border_color   = "#059669"
 
@@ -1159,8 +1158,9 @@ elif page == "📦 資材・入出庫":
                         "リードタイム(日)": lt_days,
                         "90日消費予測":    int(cumulative_use),
                         "発注推奨日":      order_date.strftime("%Y/%m/%d (%a)") if order_date else "―",
+                        "発注点到達日":    order_date.strftime("%Y/%m/%d") if order_date else "なし",
+                        "在庫切れ予測日":  zero_date.strftime("%Y/%m/%d (%a)") if zero_date else "―",
                         "発注時の在庫":    f"{inv_at_order:,}" if inv_at_order is not None else "―",
-                        "在庫切れ予測日":  shortage_date.strftime("%Y/%m/%d") if shortage_date else "90日以内はなし",
                         "緊急度":          urgency,
                         "_sort":           days_until_order,
                         "_color":          urgency_color,
@@ -1185,8 +1185,8 @@ elif page == "📦 資材・入出庫":
                                 現在庫: <b>{al['現在庫']:,}</b> &nbsp;|&nbsp;
                                 発注点: <b>{al['発注点']:,}</b> &nbsp;|&nbsp;
                                 リードタイム: <b>{al['リードタイム(日)']}日</b><br>
-                                ⏰ <b>発注推奨日: {al['発注推奨日']}</b>（発注日時点の在庫: {al['発注時の在庫']}）&nbsp;|&nbsp;
-                                📉 在庫切れ予測: <b>{al['在庫切れ予測日']}</b>
+                                ⏰ <b>発注点到達日（発注推奨）: {al['発注推奨日']}</b>（予測在庫: {al['発注時の在庫']}）<br>
+                                📉 <b>在庫切れ予測（ゼロ到達）: {al['在庫切れ予測日']}</b>
                             </div>
                         </div>""", unsafe_allow_html=True)
                 else:
@@ -1203,7 +1203,7 @@ elif page == "📦 資材・入出庫":
                     if "✅" in c:    return ['background-color:#F0FDF4;']*len(row)
                     return ['']*len(row)
 
-                show_alert_cols = ["資材名","現在庫","発注点","リードタイム(日)","90日消費予測","発注推奨日","発注時の在庫","在庫切れ予測日","緊急度"]
+                show_alert_cols = ["資材名","現在庫","発注点","リードタイム(日)","90日消費予測","発注点到達日","在庫切れ予測日","緊急度"]
                 st.dataframe(
                     df_alerts[show_alert_cols].style.apply(hl_alerts, axis=1),
                     use_container_width=True, hide_index=True,
@@ -1245,9 +1245,10 @@ elif page == "📦 資材・入出庫":
                     fig_pack.add_hline(y=0, line_dash="dot", line_color="#DC2626",
                         annotation_text="ゼロ", annotation_position="bottom right")
 
-                    # 発注推奨日の縦線
+                    # 発注推奨日（発注点到達）と在庫切れ予測の縦線
                     alert_row = df_alerts[df_alerts["資材名"] == sel_pack_graph]
                     if not alert_row.empty:
+                        # 発注点到達日
                         ord_day_str = alert_row.iloc[0]["発注推奨日"]
                         if ord_day_str not in ("―", ""):
                             try:
@@ -1255,6 +1256,16 @@ elif page == "📦 資材・入出庫":
                                 if od_mmdd in graph_dates:
                                     fig_pack.add_vline(x=od_mmdd, line_dash="dash", line_color="#DC2626",
                                         annotation_text="📅 発注推奨日", annotation_position="top right")
+                            except: pass
+                        
+                        # 在庫切れ予測日
+                        zero_day_str = alert_row.iloc[0]["在庫切れ予測日"]
+                        if zero_day_str not in ("―", ""):
+                            try:
+                                zd_mmdd = pd.to_datetime(zero_day_str.split(" ")[0]).strftime("%m/%d")
+                                if zd_mmdd in graph_dates:
+                                    fig_pack.add_vline(x=zd_mmdd, line_dash="solid", line_color="#000000",
+                                        annotation_text="📉 在庫切れ予測", annotation_position="bottom right")
                             except: pass
 
                     fig_pack.update_layout(
@@ -1726,19 +1737,27 @@ elif page == "📊 在庫・スケジュール":
         section("🔍 製品別 在庫推移と詳細スケジュール")
         if master_df_unique.empty: st.info("製品が登録されていません。")
         else:
-            # タブ1のクリック選択から製品を引き継ぐ
+            cat_full_det = st.pills("カテゴリ詳細", CATEGORIES, default=CATEGORIES[0], label_visibility="collapsed", key="pills_det")
+            cat_det = cat_full_det.split(" ",1)[1] if cat_full_det else CATEGORIES[0].split(" ",1)[1]
+            
             sc1d, sc2d = st.columns([1.5, 2.5])
-            srch_d = sc1d.text_input("🔍 製品名検索", placeholder="検索...", key="search_det")
-            all_prods_t3 = master_df_unique["製品名"].tolist()
-            prods_d = [p for p in all_prods_t3 if srch_d in p] if srch_d else all_prods_t3
-            # タブ1で選択された製品を初期値として引き継ぐ
+            srch_d = sc1d.text_input("🔍 製品名検索", placeholder="名称の一部を入力...", key="search_det")
+            prods_d = ([p for p in master_df_unique["製品名"].tolist() if srch_d in p] if srch_d
+                       else master_df_unique[master_df_unique["大カテゴリ"] == cat_det]["製品名"].tolist() if not master_df_unique.empty else [])
+
+            # タブ1で選択された製品を引き継ぐ処理
             det_default = None
-            if st.session_state.get("drill_product") and st.session_state.drill_product in prods_d:
-                det_default = prods_d.index(st.session_state.drill_product)
+            dp = st.session_state.get("drill_product")
+            if dp:
+                if dp not in prods_d:
+                    prods_d.insert(0, dp)
+                det_default = prods_d.index(dp)
+
             sel_prod = sc2d.selectbox("確定製品", options=prods_d, index=det_default,
                                        format_func=format_name, key="sel_det", placeholder="選択してください")
 
             if sel_prod:
+                st.session_state.drill_product = sel_prod
                 one_year_ago_t3 = today - timedelta(days=365)
 
                 # ── KPI行
