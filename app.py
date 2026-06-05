@@ -15,6 +15,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import numpy as np
 
+# ─────────────────────────────────────────────
+# 共通関数
+# ─────────────────────────────────────────────
 def to_int(v):
     try:
         if isinstance(v, pd.Series): v = v.sum()
@@ -35,11 +38,13 @@ def format_date_jp(d):
 def safe_dt_date(s): return pd.to_datetime(s, errors='coerce').dt.date
 def is_special_order(r): return "特注" in str(r) or "チャーター便" in str(r)
 def make_csv_bytes(df): return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-def md(html): st.markdown(html, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────
+# ページ設定 & CSS
+# ─────────────────────────────────────────────
 st.set_page_config(page_title="丸実屋 統合管理", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
 
-md("""
+st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap');
 html, body, [data-testid="stAppViewContainer"] { font-family: 'Noto Sans JP', sans-serif !important; font-size: 15px !important; background: #F8FAFC !important; }
@@ -65,20 +70,30 @@ p, span, label, div { color: #0F172A !important; }
 .task-card.critical { border-left-color:#DC2626; background:#FFF5F5; } .task-card.warning { border-left-color:#D97706; background:#FFFBEB; } .task-card.ok { border-left-color:#059669; background:#F0FDF4; }
 .section-title { font-size:15px; font-weight:800; color:#1E293B; border-left:4px solid #2563EB; padding-left:10px; margin:18px 0 10px; }
 </style>
-""")
+""", unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────
+# ログイン処理
+# ─────────────────────────────────────────────
 if "password_correct" not in st.session_state: st.session_state.password_correct = False
 if not st.session_state.password_correct:
-    md("<div style='text-align:center;margin-top:60px;'><span style='font-size:72px;'>🏭</span><h2 style='color:#1E3A8A;'>丸実屋 受発注管理 ログイン</h2></div>")
+    st.markdown("<div style='text-align:center;margin-top:60px;'><span style='font-size:72px;'>🏭</span><h2 style='color:#1E3A8A;'>丸実屋 受発注管理 ログイン</h2></div>", unsafe_allow_html=True)
     _, c, _ = st.columns([1, 2, 1])
     with c:
-        if st.button("ログイン", use_container_width=True, type="primary") and st.text_input("パスワードを入力", type="password") == st.secrets["app_password"]:
-            st.session_state.password_correct = True; st.rerun()
-        elif st.button("ログイン"): st.error("❌ パスワードが違います")
+        pwd = st.text_input("パスワードを入力", type="password")
+        if st.button("ログイン", use_container_width=True, type="primary"):
+            if pwd == st.secrets["app_password"]: st.session_state.password_correct = True; st.rerun()
+            else: st.error("❌ パスワードが違います")
     st.stop()
 
+# ─────────────────────────────────────────────
+# Google SpreadSheet連携
+# ─────────────────────────────────────────────
 @st.cache_resource
-def get_client(): return gspread.authorize(Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]))
+def get_client(): 
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"])
+    return gspread.authorize(creds)
+
 client = get_client(); sheet = client.open_by_url(st.secrets["spreadsheet_url"])
 
 def load_data(name):
@@ -129,6 +144,7 @@ def app_sync(name, nr):
     ws.append_row(rc.fillna("").astype(str).replace(["nan","None","NaT","NaN"],"").values[0].tolist())
     st.cache_data.clear(); st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
 
+# セッション初期化
 for _s in ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule"]:
     if f"{_s}_df" not in st.session_state: st.session_state[f"{_s}_df"] = load_data(_s)
 if "current_page" not in st.session_state: st.session_state.current_page = "📋 受注登録"
@@ -147,9 +163,15 @@ def pui(pn):
     if r.empty: return 1, "ケース"
     return max(1, to_int(r.iloc[0].get("入数", 1))), str(r.iloc[0].get("単位区分", "ケース")).strip() or "ケース"
 
+def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
+def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
+
 today = pd.Timestamp.today().normalize(); dates = pd.date_range(today, today + timedelta(days=60))
 cs = {}; fs = {}; mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
 
+# ─────────────────────────────────────────────
+# 在庫計算・資材計算エンジン
+# ─────────────────────────────────────────────
 if not mst_u.empty:
     ev_o = odf[["納品予定日","製品名","ケース数"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
@@ -184,28 +206,37 @@ if not mdf.empty and not mst_u.empty:
             if pn and pu>0 and pn in p_sum: p_sum[pn]["出庫"] += (q*pu)
 for d in p_sum.values(): d["現在庫"] = d["期首在庫"] + d["入庫"] - d["出庫"]; d["状態"] = "⚠️ 注意" if d["現在庫"] < d["発注点"] else "✅ 正常"
 
+# ─────────────────────────────────────────────
+# サイドバー
+# ─────────────────────────────────────────────
 with st.sidebar:
-    md("<div style='padding:16px 8px 8px;'><span style='font-size:22px;'>🏭</span><span style='font-size:16px; font-weight:900; color:#F1F5F9; margin-left:8px;'>丸実屋システム</span></div>")
+    st.markdown("<div style='padding:16px 8px 8px;'><span style='font-size:22px;'>🏭</span><span style='font-size:16px; font-weight:900; color:#F1F5F9; margin-left:8px;'>丸実屋システム</span></div>", unsafe_allow_html=True)
     toc = int((pd.to_datetime(odf["納品予定日"], errors='coerce').dt.date == date.today()).sum()) if not odf.empty and "納品予定日" in odf.columns else 0
     scnt = sum(1 for f in fs.values() if any(v < 0 for v in list(f.values())[:7]))
-    md(f'<div style="margin:8px 0 12px; background:rgba(255,255,255,0.07); border-radius:8px; padding:10px 14px;"><div style="font-size:12px; color:#94A3B8; margin-bottom:4px;">本日状況</div><div style="display:flex; gap:12px;"><div><span style="font-size:20px; font-weight:900; color:#60A5FA;">{toc}</span><span style="font-size:11px; color:#94A3B8;"> 出荷</span></div><div><span style="font-size:20px; font-weight:900; color:#F87171;">{scnt}</span><span style="font-size:11px; color:#94A3B8;"> 欠品予測</span></div></div></div><div style="height:1px; background:rgba(255,255,255,0.1); margin:0 0 10px;"></div>')
-    for m in ["📋 受注登録","🏭 製造登録","🚚 出荷・発送管理","📦 資材・入出庫","📑 登録一覧","📊 在庫・スケジュール","🏗️ 製造スケジューラー","⭐ 特注・チャータースケジュール","📈 経営・分析ダッシュボード","⚙️ マスタ・分析"]:
-        if st.button(m, use_container_width=True, type="primary" if st.session_state.current_page == m else "secondary"): st.session_state.current_page = m; st.session_state.drill_product = None; st.rerun()
+    st.markdown(f'<div style="margin:8px 0 12px; background:rgba(255,255,255,0.07); border-radius:8px; padding:10px 14px;"><div style="font-size:12px; color:#94A3B8; margin-bottom:4px;">本日状況</div><div style="display:flex; gap:12px;"><div><span style="font-size:20px; font-weight:900; color:#60A5FA;">{toc}</span><span style="font-size:11px; color:#94A3B8;"> 出荷</span></div><div><span style="font-size:20px; font-weight:900; color:#F87171;">{scnt}</span><span style="font-size:11px; color:#94A3B8;"> 欠品予測</span></div></div></div><div style="height:1px; background:rgba(255,255,255,0.1); margin:0 0 10px;"></div>', unsafe_allow_html=True)
+    
+    menus = ["📋 受注登録","🏭 製造登録","🚚 出荷・発送管理","📦 資材・入出庫","📑 登録一覧","📊 在庫・スケジュール","🏗️ 製造スケジューラー","⭐ 特注・チャータースケジュール","📈 経営・分析ダッシュボード","⚙️ マスタ・分析"]
+    for m in menus:
+        if st.button(m, use_container_width=True, type="primary" if st.session_state.current_page == m else "secondary"):
+            st.session_state.current_page = m; st.session_state.drill_product = None; st.rerun()
 
 pg = st.session_state.current_page
 hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
-def page_header(t): md(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>')
-def sec(t): md(f'<div class="section-title">{t}</div>')
+def page_header(t): st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
+def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────
+# 📋 受注登録
+# ─────────────────────────────────────────────
 if pg == "📋 受注登録":
     page_header("📋 受注 登録")
     idu = st.checkbox("📅 納品日を後で決める（日付未定で登録）", value=False)
     od = None if idu else st.date_input("📅 納品日", value=date.today() + timedelta(days=1))
-    if idu: md('<div class="info-card yellow" style="background:#FFFBEB;padding:10px 16px;">🟡 <b>日付未定</b> として登録されます。</div>')
-    sl = sh_m["運送会社名"].tolist() if not sh_m.empty else []; tl = sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
+    if idu: st.markdown('<div class="info-card yellow" style="background:#FFFBEB;padding:10px 16px;">🟡 <b>日付未定</b> として登録されます。</div>', unsafe_allow_html=True)
+    sl = sh_m["運送会社名"].tolist() if not sh_m.empty else []; tl = get_toriatsuki_list()
     t1,t2,t3 = st.columns([2, 2, 1])
     stor = t1.selectbox("🏢 帳合先", options=tl, index=None, placeholder="選択…")
-    scands = sorted(cdf[cdf["帳合先"]==stor]["支店名"].dropna().replace("","").unique().tolist()) if stor and not cdf.empty and "支店名" in cdf.columns else []
+    scands = get_shiten_list(stor)
     sv = t2.selectbox("🏬 支店・店舗名", options=["（なし）"]+scands, index=0) if scands else t2.text_input("🏬 支店・店舗名（直接入力）")
     sv = "" if sv=="（なし）" else sv
     sc = t3.selectbox("🚚 運送会社", options=sl, index=None, placeholder="未定")
@@ -231,7 +262,7 @@ if pg == "📋 受注登録":
     r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2 = r2.columns(2); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄")
     
     if prod and qty and to_int(qty)>0 and cs.get(prod,0) < to_int(qty):
-        md(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cs.get(prod,0)} cs</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cs.get(prod,0)} cs</span></div>')
+        st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cs.get(prod,0)} cs</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cs.get(prod,0)} cs</span></div>', unsafe_allow_html=True)
     
     m_add = st.empty()
     if st.button("✅ 受注を登録", type="primary", use_container_width=True):
@@ -275,6 +306,9 @@ if pg == "📋 受注登録":
                 sva = ea_o.copy(); sva["納品予定日"] = pd.to_datetime(sva["納品予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
                 save_sync("orders", pd.merge(sva, odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]], on="ID", how="left")); st.rerun()
 
+# ─────────────────────────────────────────────
+# 🚚 出荷・発送管理
+# ─────────────────────────────────────────────
 elif pg == "🚚 出荷・発送管理":
     page_header("🚚 出荷・発送 消込管理")
     ts1, ts2, ts3 = st.tabs(["📋 日次消込", "📅 週間出荷一覧", "📥 出荷CSV出力"])
@@ -285,6 +319,7 @@ elif pg == "🚚 出荷・発送管理":
         else:
             dn = d_ord[d_ord["荷姿チェック"]==True]; udn = d_ord[d_ord["荷姿チェック"]==False]
             c1,c2,c3 = st.columns(3); c1.metric("出荷件数", f"{len(d_ord)} 件"); c2.metric("✅ 消込済", f"{len(dn)} 件"); c3.metric("⏳ 未消込", f"{len(udn)} 件", delta_color="inverse")
+            if not udn.empty and td <= date.today(): st.error(f"🚨 出荷漏れ（荷姿未チェック）が **{len(udn)} 件** あります！")
             ddf = d_ord[["ID","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考"]].copy()
             for c in ["賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5"]: ddf[c] = pd.to_datetime(ddf[c], errors="coerce").dt.date
             ed_s = st.data_editor(ddf.style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;text-decoration:line-through;']*len(r) if str(r.get("荷姿チェック",False)).upper()=="TRUE" else ['']*len(r), axis=1), use_container_width=True, hide_index=True, column_config={"ID":None,"顧客名":st.column_config.TextColumn(disabled=True),"製品名":st.column_config.TextColumn(disabled=True),"ケース数":st.column_config.NumberColumn(disabled=True),"運送会社":st.column_config.SelectboxColumn(options=sh_m["運送会社名"].tolist() if not sh_m.empty else []),"賞味期限1":st.column_config.DateColumn("賞味1",format="YYYY-MM-DD")})
@@ -325,6 +360,9 @@ elif pg == "🚚 出荷・発送管理":
             st.metric("対象件数", f"{len(edf)} 件")
             st.download_button("📥 CSV出力", data=make_csv_bytes(edf[[c for c in ["納品予定日","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","備考"] if c in edf.columns]]), file_name=f"出荷データ_{es}_{ee}.csv", mime="text/csv", type="primary", use_container_width=True)
 
+# ─────────────────────────────────────────────
+# 🏭 製造登録
+# ─────────────────────────────────────────────
 elif pg == "🏭 製造登録":
     page_header("🏭 製造・リパック 登録")
     c1, c2 = st.columns([1,1])
@@ -334,7 +372,7 @@ elif pg == "🏭 製造登録":
     pl = [p for p in mst_u["製品名"].tolist() if sp in p] if sp else (mst_u[mst_u["大カテゴリ"]==c_m]["製品名"].tolist() if not mst_u.empty else [])
     pm = s2.selectbox("確定製品", options=pl, index=None, format_func=fn); mr = s2.text_input("📝 備考（製造）")
     irp = st.checkbox("🔄 リパック製造（在庫加算）"); ipl = st.checkbox("📦 紐づく資材の在庫も同時に減らす", value=True) if irp else True
-    if pm and mq and cs.get(pm,0)<=0: md(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)} cs</span> → 製造後: <b>{cs.get(pm,0)+to_int(mq)} cs</b></div>")
+    if pm and mq and cs.get(pm,0)<=0: st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)} cs</span> → 製造後: <b>{cs.get(pm,0)+to_int(mq)} cs</b></div>", unsafe_allow_html=True)
     st.write("---")
     if st.button("➕ 製造データを記録", type="primary", use_container_width=True):
         if not pm or not mq: st.error("⚠️ 製品・数量は必須")
@@ -353,7 +391,15 @@ elif pg == "🏭 製造登録":
         if st.button("💾 直近データ保存"):
             sm = edm.copy(); sm["製造予定日"] = pd.to_datetime(sm["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
             save_sync("manufactures", pd.concat([mdf[~mdf["ID"].isin(dm.head(5)["ID"])], pd.merge(sm, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left")], ignore_index=True)); st.rerun()
+        with st.expander("📂 全データ一括編集・削除"):
+            ea_m = st.data_editor(dm[["ID","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400)
+            if st.button("💾 全データ保存", key="btn_ea_m"):
+                sma = ea_m.copy(); sma["製造予定日"] = pd.to_datetime(sma["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
+                save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left")); st.rerun()
 
+# ─────────────────────────────────────────────
+# 📦 資材・入出庫
+# ─────────────────────────────────────────────
 elif pg == "📦 資材・入出庫":
     page_header("📦 資材・段ボール入出庫")
     s_pks = [pn for pn,d in p_sum.items() if d["現在庫"] < d["発注点"]]
@@ -393,8 +439,7 @@ elif pg == "📦 資材・入出庫":
             u_df = df_a[df_a["_s"]<=7]
             if not u_df.empty:
                 st.markdown("### 🚨 直近7日以内に発注手配が必要")
-                for _, r in u_df.iterrows(): md(f'<div style="background:{r["_c"]};border-left:6px solid {r["_b"]};border-radius:10px;padding:14px;margin-bottom:10px;"><b>📦 {r["資材名"]}</b> <span style="float:right;font-weight:900;">{r["緊急度"]}</span><br><span style="font-size:13px;">現在庫: {r["現在庫"]:,} | 発注点: {r["発注点"]:,} | LT: {r["LT"]}日<br>⏰ <b>発注点到達: {r["到達日"]}</b><br>📉 <b>枯渇予測: {r["枯渇予測"]}</b></span></div>')
-            else: st.success("✅ 7日以内の発注手配なし")
+                for _, r in u_df.iterrows(): st.markdown(f'<div style="background:{r["_c"]};border-left:6px solid {r["_b"]};border-radius:10px;padding:14px;margin-bottom:10px;"><b>📦 {r["資材名"]}</b> <span style="float:right;font-weight:900;">{r["緊急度"]}</span><br><span style="font-size:13px;">現在庫: {r["現在庫"]:,} | 発注点: {r["発注点"]:,} | LT: {r["LT"]}日<br>⏰ <b>発注点到達: {r["到達日"]}</b><br>📉 <b>枯渇予測: {r["枯渇予測"]}</b></span></div>', unsafe_allow_html=True)
             
             st.dataframe(df_a[["資材名","現在庫","発注点","LT","90日消費","発注推奨日","到達日","予測在庫","枯渇予測","緊急度"]].style.apply(lambda r: ['background-color:#FEE2E2;font-weight:bold;']*len(r) if "今すぐ" in str(r.get("緊急度","")) else (['background-color:#FFF7ED;']*len(r) if "🟠" in str(r.get("緊急度","")) else (['background-color:#FFFBEB;']*len(r) if "🟡" in str(r.get("緊急度","")) else (['background-color:#EFF6FF;']*len(r) if "🔵" in str(r.get("緊急度","")) else ['background-color:#F0FDF4;']*len(r)))), axis=1), use_container_width=True, hide_index=True, height=500)
 
@@ -408,14 +453,6 @@ elif pg == "📦 資材・入出庫":
                 fig.add_trace(go.Scatter(x=gd, y=gs, name="予測在庫", mode="lines+markers", line=dict(color="#2563EB", width=2.5)))
                 fig.add_hline(y=p_sum.get(spg,{}).get("発注点",0), line_dash="dash", line_color="#F59E0B", annotation_text="発注点")
                 fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
-                ar = df_a[df_a["資材名"]==spg]
-                if not ar.empty:
-                    if ar.iloc[0]["発注推奨日"]!="―":
-                        try: fig.add_vline(x=pd.to_datetime(ar.iloc[0]["発注推奨日"]).strftime("%m/%d"), line_dash="dash", line_color="#2563EB", annotation_text="推奨日")
-                        except: pass
-                    if ar.iloc[0]["枯渇予測"]!="―":
-                        try: fig.add_vline(x=pd.to_datetime(ar.iloc[0]["枯渇予測"]).strftime("%m/%d"), line_dash="solid", line_color="#000000", annotation_text="枯渇予測")
-                        except: pass
                 fig.update_layout(title=f"【{spg}】 在庫推移予測", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380); st.plotly_chart(fig, use_container_width=True)
 
     with tp2:
@@ -433,9 +470,7 @@ elif pg == "📦 資材・入出庫":
             if not sl_pk or pq is None: st.error("⚠️ 必須")
             else:
                 lq = to_int(pq); fpt = "入庫" if "入庫" in pt else "出庫"
-                if "棚卸" in pt:
-                    df = lq - p_sum.get(sl_pk,{}).get("現在庫",0)
-                    fpt, lq = ("入庫", df) if df>=0 else ("出庫", abs(df))
+                if "棚卸" in pt: df = lq - p_sum.get(sl_pk,{}).get("現在庫",0); fpt, lq = ("入庫", df) if df>=0 else ("出庫", abs(df))
                 if lq>0: app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}])); st.rerun()
 
     with tp4:
@@ -443,8 +478,11 @@ elif pg == "📦 資材・入出庫":
         if not dpk.empty:
             dpk["登録日(表示)"] = dpk["登録日"].apply(format_date_jp)
             edp = st.data_editor(dpk.head(5)[["ID","登録日(表示)","資材名","処理区分","数量","理由","関連製品名","備考"]], hide_index=True, column_config={"ID":None,"処理区分":st.column_config.SelectboxColumn(options=["入庫","出庫","製造連動"]),"数量":st.column_config.NumberColumn(min_value=1,step=1,format="%d")})
-            if st.button("💾 保存"): save_sync("packaging_logs", pd.concat([pk_l[~pk_l["ID"].isin(dpk.head(5)["ID"])], pd.merge(edp.assign(登録日=pd.to_datetime(edp["登録日(表示)"].str.split(" ").str[0],errors="coerce")), pk_l[["ID","理論在庫","登録日時"]], on="ID", how="left")], ignore_index=True)); st.rerun()
+            if st.button("💾 保存", key="btn_spk"): save_sync("packaging_logs", pd.concat([pk_l[~pk_l["ID"].isin(dpk.head(5)["ID"])], pd.merge(edp.assign(登録日=pd.to_datetime(edp["登録日(表示)"].str.split(" ").str[0],errors="coerce")), pk_l[["ID","理論在庫","登録日時"]], on="ID", how="left")], ignore_index=True)); st.rerun()
 
+# ─────────────────────────────────────────────
+# 📑 登録一覧
+# ─────────────────────────────────────────────
 elif pg == "📑 登録一覧":
     page_header("📑 登録データ一覧・出力")
     tl1, tl2, tl3 = st.tabs(["📋 受注・出荷","🏭 製造","📦 資材"])
@@ -461,10 +499,10 @@ elif pg == "📑 登録一覧":
         if not pk_l.empty:
             el = pk_l.sort_values("登録日時",ascending=False).copy(); el["日"] = el["登録日"].apply(format_date_jp)
             st.dataframe(el[["ID","日","資材名","処理区分","数量","理由","関連製品名","備考"]], hide_index=True, height=600)
-【Part 3/3】 在庫予測 ＆ スケジュール 〜 ファイル末尾まで
-上のコードの続きとして、以下の内容を最後に繋げて貼り付けてください。
-code
-Python
+
+# ─────────────────────────────────────────────
+# 📊 在庫・スケジュール
+# ─────────────────────────────────────────────
 elif pg == "📊 在庫・スケジュール":
     page_header("📊 在庫予測 ＆ スケジュール")
     t0, t1, t2, t3, t4 = st.tabs(["⚠️ 7日以内欠品予測", "📉 1ヶ月在庫予測", "📅 週間カレンダー", "🔍 製品別詳細ビュー", "👤 顧客別スケジュール"])
@@ -494,26 +532,24 @@ elif pg == "📊 在庫・スケジュール":
 
             dp = st.session_state.drill_product
             if dp:
-                md(f'<div class="drill-panel">### 📦 {format_name(dp)} 詳細')
+                st.markdown(f'<div class="drill-panel">### 📦 {format_name(dp)} 詳細', unsafe_allow_html=True)
                 oy = today - timedelta(days=365)
                 ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)].copy() if not odf.empty else pd.DataFrame()
                 mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)].copy() if not mdf.empty else pd.DataFrame()
                 
                 with st.expander("📜 過去1年履歴", expanded=True):
-                    tho = ph["ケース数"].apply(to_int).sum() if not ph.empty else 0
-                    thm = mh["ケース数"].apply(to_int).sum() if not mh.empty else 0
+                    tho = ph["ケース数"].apply(to_int).sum() if not ph.empty else 0; thm = mh["ケース数"].apply(to_int).sum() if not mh.empty else 0
                     k1,k2,k3,k4 = st.columns(4)
                     k1.metric("出荷合計",f"{tho:,} cs"); k2.metric("製造合計",f"{thm:,} cs"); k3.metric("差引",f"{thm-tho:+,} cs"); k4.metric("現在庫",f"{cs.get(dp,0):,} cs")
-                    
                     ch1, ch2 = st.columns(2)
                     with ch1:
-                        md('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;margin-bottom:6px;">🚚 出荷履歴</div>')
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>', unsafe_allow_html=True)
                         if not ph.empty: st.dataframe(ph.assign(日付=ph["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True)
                     with ch2:
-                        md('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;margin-bottom:6px;">🏭 製造履歴</div>')
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
                         if not mh.empty: st.dataframe(mh.assign(日付=mh["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
 
-                md('<div class="section-title">📅 今後60日間スケジュール</div>')
+                st.markdown('<div class="section-title">📅 今後60日間スケジュール</div>', unsafe_allow_html=True)
                 pof = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)] if not odf.empty else pd.DataFrame()
                 pmf = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=today)&(~mdf["備考"].fillna("").str.contains("【在庫非反映】"))] if not mdf.empty else pd.DataFrame()
                 dtl = []; ts = cs.get(dp,0)
@@ -523,8 +559,7 @@ elif pg == "📊 在庫・スケジュール":
                     dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                     iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
                     ts += (iq-oq)
-                    if iq>0 or oq>0 or ts<0:
-                        dtl.append({"日付":format_date_jp(d2),"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
+                    if iq>0 or oq>0 or ts<0: dtl.append({"日付":format_date_jp(d2),"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
                 if dtl:
                     dfd = pd.DataFrame(dtl)
                     fig = go.Figure()
@@ -534,10 +569,10 @@ elif pg == "📊 在庫・スケジュール":
                     fig.update_layout(barmode="relative",hovermode="x unified",margin=dict(l=10,r=10,t=30,b=10),height=320); st.plotly_chart(fig, use_container_width=True)
                     st.dataframe(dfd.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '',subset=["予定在庫"]), hide_index=True)
                 else: st.info("予定なし")
-                md('</div>')
+                st.markdown('</div>', unsafe_allow_html=True)
 
     with t2:
-        cd = []; html = '<table class="sched-table"><tr><th style="width:130px;">日付</th><th style="width:38%;">🏭 製造 / リパック</th><th style="width:44%;">🚚 出荷 / 不良廃棄</th></tr>'
+        html = '<table class="sched-table"><tr><th style="width:130px;">日付</th><th style="width:38%;">🏭 製造 / リパック</th><th style="width:44%;">🚚 出荷 / 不良廃棄</th></tr>'
         for i in range(7):
             d2 = today+timedelta(days=i); mh=""; oh=""
             if not mdf.empty:
@@ -572,10 +607,10 @@ elif pg == "📊 在庫・スケジュール":
                     if st.button("💾 登録（非反映）"): app_sync("manufactures", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"製造予定日":pd.to_datetime(hd),"大カテゴリ":c_det,"製品名":sp,"ケース数":to_int(hq),"リパックフラグ":False,"備考":f"【在庫非反映】 {hr}".strip(),"登録日時":datetime.now()}])); st.rerun()
                 tc1, tc2 = st.columns(2)
                 with tc1:
-                    md('<div style="font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>')
+                    st.markdown('<div style="font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>', unsafe_allow_html=True)
                     if not poa.empty: st.dataframe(poa.assign(日付=poa["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True)
                 with tc2:
-                    md('<div style="font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>')
+                    st.markdown('<div style="font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
                     if not pma.empty: st.dataframe(pma.assign(日付=pma["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
             with dtg:
                 gr = []
@@ -598,7 +633,6 @@ elif pg == "📊 在庫・スケジュール":
                     dg = pd.DataFrame(gr).sort_values("年月")
                     fig = px.bar(dg, x="年月", y="ケース数", color="種別", barmode="group", color_discrete_map={"出荷(実績)":"#F43F5E","出荷(予定)":"#FCA5A5","製造(実績)":"#10B981","製造(予定)":"#6EE7B7"}, title=f"【{sp}】 月次 製造・出荷量 / 今月: {today.strftime('%Y-%m')}")
                     st.plotly_chart(fig, use_container_width=True)
-                else: st.info("グラフデータなし")
 
     with t4:
         sec("👤 顧客別 今後の予定")
@@ -612,6 +646,9 @@ elif pg == "📊 在庫・スケジュール":
                 co["納品予定日"]=co["納品予定日"].apply(format_date_jp)
                 st.dataframe(co[["納品予定日","製品名","ケース数","在庫状況","備考"]].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
 
+# ─────────────────────────────────────────────
+# ⭐ 特注・チャータースケジュール
+# ─────────────────────────────────────────────
 elif pg == "⭐ 特注・チャータースケジュール":
     page_header("⭐ 特注・チャータースケジュール")
     spo = odf[odf["備考"].apply(is_special_order)].copy() if not odf.empty else pd.DataFrame()
@@ -647,6 +684,9 @@ elif pg == "⭐ 特注・チャータースケジュール":
                     sw.loc[m,"備考"] = str(r.get("備考","")); sw.loc[m,"更新日時"] = datetime.now()
                 save_sync("special_schedule", sw); st.rerun()
 
+# ─────────────────────────────────────────────
+# 📈 経営・分析ダッシュボード
+# ─────────────────────────────────────────────
 elif pg == "📈 経営・分析ダッシュボード":
     page_header("📈 経営・製造管理 ダッシュボード")
     td1,td2,td3,td4 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド"])
@@ -679,6 +719,9 @@ elif pg == "📈 経営・分析ダッシュボード":
             mn = tdf.groupby(["年月","大カテゴリ"])["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
             if not mn.empty: st.plotly_chart(px.bar(mn,x="年月",y="ケース数",color="大カテゴリ",barmode="stack",title="月次カテ別"), use_container_width=True)
 
+# ─────────────────────────────────────────────
+# ⚙️ マスタ・分析
+# ─────────────────────────────────────────────
 elif pg == "⚙️ マスタ・分析":
     page_header("⚙️ マスタ")
     tm1,tm2,tm3,tm4 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社"])
@@ -695,6 +738,9 @@ elif pg == "⚙️ マスタ・分析":
         es = st.data_editor(sh_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
         if st.button("💾 運送会社保存", type="primary"): save_sync("shipping_master", es); st.rerun()
 
+# ─────────────────────────────────────────────
+# 🏗️ 製造スケジューラー
+# ─────────────────────────────────────────────
 elif pg == "🏗️ 製造スケジューラー":
     page_header("🏗️ 製造スケジューラー")
     def gpp(pn):
