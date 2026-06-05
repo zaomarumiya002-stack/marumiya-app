@@ -149,6 +149,25 @@ for _s in ["orders","manufactures","master","customers","packaging_master","pack
     if f"{_s}_df" not in st.session_state: st.session_state[f"{_s}_df"] = load_data(_s)
 if "current_page" not in st.session_state: st.session_state.current_page = "📋 受注登録"
 if "drill_product" not in st.session_state: st.session_state.drill_product = None
+if "_flash" not in st.session_state: st.session_state._flash = None  # {"type":"success"|"error"|"info", "msg":"..."}
+
+# フラッシュメッセージ表示（rerun後に1回だけ表示）
+def flash(type_, msg):
+    """rerun直前にセット → rerun後のページ先頭で表示して消去"""
+    st.session_state._flash = {"type": type_, "msg": msg}
+
+def show_flash():
+    f = st.session_state.get("_flash")
+    if f:
+        st.session_state._flash = None
+        if f["type"] == "success":
+            st.success(f["msg"])
+        elif f["type"] == "error":
+            st.error(f["msg"])
+        elif f["type"] == "warning":
+            st.warning(f["msg"])
+        else:
+            st.info(f["msg"])
 
 odf = st.session_state.orders_df; mdf = st.session_state.manufactures_df; mst = st.session_state.master_df; cdf = st.session_state.customers_df
 pk_m = st.session_state.packaging_master_df; pk_l = st.session_state.packaging_logs_df; sh_m = st.session_state.shipping_master_df; sp_s = st.session_state.special_schedule_df
@@ -222,7 +241,9 @@ with st.sidebar:
 
 pg = st.session_state.current_page
 hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
-def page_header(t): st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
+def page_header(t):
+    st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
+    show_flash()
 def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
@@ -266,14 +287,31 @@ if pg == "📋 受注登録":
     
     m_add = st.empty()
     if st.button("✅ 受注を登録", type="primary", use_container_width=True):
-        if not prod or not qty or to_int(qty)<1: m_add.error("⚠️ 製品・ケース数は必須です。")
+        if not prod or not qty or to_int(qty)<1:
+            m_add.error("⚠️ 製品・ケース数は必須です。")
         else:
             frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
             cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
             nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
             app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時":datetime.now()}]))
-            if ("特注" in stype or "チャーター" in stype) and od: app_sync("special_schedule", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
-            m_add.success(f"✨ 登録完了: {prod} ({to_int(qty)}cs) {format_date_jp(od) if od else '日付未定'}"); st.rerun()
+            if ("特注" in stype or "チャーター" in stype) and od:
+                app_sync("special_schedule", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
+            # 在庫状況を判定してフラッシュメッセージ
+            _cur = cs.get(prod, 0)
+            _d_key = pd.Timestamp(od).normalize() if od else None
+            _proj = fs.get(prod, {}).get(_d_key, _cur) if _d_key else _cur
+            _after = _proj - to_int(qty)
+            if idu:
+                _stk_msg = f"📦 現在庫: {_cur:,} cs（日付未定のため在庫影響は確定後に反映）"
+                _ftype = "info"
+            elif _after < 0:
+                _stk_msg = f"📦 現在庫: {_cur:,} cs ／ 納品日予測在庫: {_proj:,} cs → 登録後: **{_after:,} cs** 🚨 在庫不足！"
+                _ftype = "error"
+            else:
+                _stk_msg = f"📦 現在庫: {_cur:,} cs ／ 納品日予測在庫: {_proj:,} cs → 登録後: {_after:,} cs ✅ 充足"
+                _ftype = "success"
+            flash(_ftype, f"✨ 登録完了！【{fn(prod)}】 {to_int(qty):,}cs  納品日: {format_date_jp(od) if od else '日付未定'}  顧客: {cn}\n{_stk_msg}")
+            st.rerun()
 
     u_df = odf[odf["日付未定フラグ"]==True].copy().reset_index(drop=True) if not odf.empty and "日付未定フラグ" in odf.columns else pd.DataFrame()
     if not u_df.empty:
@@ -290,7 +328,12 @@ if pg == "📋 受注登録":
                     if r.get("帳合先(確定)"): upd.loc[m,"顧客名"] = f"{r.get('帳合先(確定)')} {r.get('支店名(確定)','')}".strip()
                     if r.get("運送会社"): upd.loc[m,"運送会社"] = str(r.get("運送会社")).strip()
                     cnt+=1
-                if cnt>0: save_sync("orders",upd); st.rerun()
+                if cnt>0:
+                    save_sync("orders", upd)
+                    flash("success", f"✅ {cnt}件の納品日を確定しました。")
+                    st.rerun()
+                else:
+                    st.warning("⚠️ 確定する日付が入力されていません。")
 
     sec("✏️ 直近データの修正・削除")
     if not odf.empty:
@@ -302,13 +345,13 @@ if pg == "📋 受注登録":
             sv = ed_o.copy(); sv["納品予定日"] = pd.to_datetime(sv["納品予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
             _o_ids = do.head(_odf_limit)["ID"].tolist()
             save_sync("orders", pd.concat([odf[~odf["ID"].isin(_o_ids)], pd.merge(sv, odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]], on="ID", how="left")], ignore_index=True))
-            st.success("✅ 保存しました。"); st.rerun()
+            flash("success", "✅ 受注データを保存しました。"); st.rerun()
         with st.expander("📂 全データ一括編集"):
             ea_o = st.data_editor(do[["ID","納品予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400)
             if st.button("💾 全データ保存"):
                 sva = ea_o.copy(); sva["納品予定日"] = pd.to_datetime(sva["納品予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
                 save_sync("orders", pd.merge(sva, odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]], on="ID", how="left"))
-                st.success("✅ 全データを保存しました。"); st.rerun()
+                flash("success", "✅ 全データを保存しました。"); st.rerun()
 
 # ─────────────────────────────────────────────
 # 🚚 出荷・発送管理
@@ -335,7 +378,7 @@ elif pg == "🚚 出荷・発送管理":
                         u.loc[m,"運送会社"] = str(r.get("運送会社","")); u.loc[m,"荷姿チェック"] = str(r.get("荷姿チェック",False)).upper(); u.loc[m,"発送備考"] = str(r.get("発送備考",""))
                         for c in ["賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5"]: v=r.get(c); u.loc[m,c] = v.strftime("%Y-%m-%d") if pd.notnull(v) and v else ""
                 save_sync("orders", u)
-                st.success("✅ 出荷情報を保存しました。"); st.rerun()
+                flash("success", "✅ 出荷情報を保存しました。"); st.rerun()
 
     with ts2:
         c1, c2 = st.columns([2, 2]); sw = c1.date_input("開始日", value=date.today()); wd = c2.number_input("表示日数", min_value=1, max_value=30, value=7)
@@ -391,7 +434,7 @@ elif pg == "🏭 製造登録":
                 if _pnn and _puu>0:
                     app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(mdt),"資材名":_pnn,"処理区分":"製造連動","数量":abs(to_int(mq)*_puu),"理由":f"製造ID:{nid}","関連製品名":pm,"理論在庫":p_sum.get(_pnn,{}).get("現在庫",0)-(to_int(mq)*_puu),"備考":"自動記録","登録日時":datetime.now()}]))
                     _mfg_mat_msg = f"  ＋【{_pnn}】 {abs(to_int(mq)*_puu):,}枚 自動減算"
-            st.success(f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}cs  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
+            flash("success", f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}cs  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
             st.rerun()
 
     sec("✏️ 直近データの修正・削除")
@@ -403,13 +446,13 @@ elif pg == "🏭 製造登録":
             sm = edm.copy(); sm["製造予定日"] = pd.to_datetime(sm["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
             sm_ids = dm.head(_mdf_limit)["ID"].tolist()
             save_sync("manufactures", pd.concat([mdf[~mdf["ID"].isin(sm_ids)], pd.merge(sm, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left")], ignore_index=True))
-            st.success("✅ 保存しました。"); st.rerun()
+            flash("success", "✅ 製造データを保存しました。"); st.rerun()
         with st.expander("📂 全データ一括編集・削除"):
             ea_m = st.data_editor(dm[["ID","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400)
             if st.button("💾 全データ保存", key="btn_ea_m"):
                 sma = ea_m.copy(); sma["製造予定日"] = pd.to_datetime(sma["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
                 save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left"))
-                st.success("✅ 全データを保存しました。"); st.rerun()
+                flash("success", "✅ 製造全データを保存しました。"); st.rerun()
 
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
@@ -549,7 +592,7 @@ elif pg == "📦 資材・入出庫":
                 merged = pd.merge(edp_with_id.drop(columns=["登録日(表示)"], errors="ignore"),
                                   pk_l[keep_cols], on="ID", how="left")
                 save_sync("packaging_logs", pd.concat([rest, merged], ignore_index=True))
-                st.success("✅ 履歴を保存しました。")
+                flash("success", "✅ 資材履歴を保存しました。")
                 st.rerun()
 
 # ─────────────────────────────────────────────
@@ -762,7 +805,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
                     if r.get("出荷予定日_edit"): sw.loc[m,"出荷予定日"] = pd.to_datetime(r.get("出荷予定日_edit"))
                     sw.loc[m,"備考"] = str(r.get("備考","")); sw.loc[m,"更新日時"] = datetime.now()
                 save_sync("special_schedule", sw)
-                st.success("✅ 特注スケジュールを保存しました。"); st.rerun()
+                flash("success", "✅ 特注スケジュールを保存しました。"); st.rerun()
 
 # ─────────────────────────────────────────────
 # 📈 経営・分析ダッシュボード
@@ -807,16 +850,16 @@ elif pg == "⚙️ マスタ・分析":
     tm1,tm2,tm3,tm4 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社"])
     with tm1:
         em = st.data_editor(mst.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"大カテゴリ":st.column_config.SelectboxColumn(options=[c.split(" ",1)[1] for c in CATS]),"使用資材名":st.column_config.SelectboxColumn(options=pk_m["資材名"].tolist() if not pk_m.empty else [])}, height=500)
-        if st.button("💾 製品マスタ保存", type="primary"): save_sync("master", em); st.rerun()
+        if st.button("💾 製品マスタ保存", type="primary"): save_sync("master", em); flash("success", "✅ 製品マスタを保存しました。"); st.rerun()
     with tm2:
         ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
-        if st.button("💾 顧客マスタ保存", type="primary"): save_sync("customers", ec); st.rerun()
+        if st.button("💾 顧客マスタ保存", type="primary"): save_sync("customers", ec); flash("success", "✅ 顧客マスタを保存しました。"); st.rerun()
     with tm3:
         ep = st.data_editor(pk_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
-        if st.button("💾 資材マスタ保存", type="primary"): save_sync("packaging_master", ep); st.rerun()
+        if st.button("💾 資材マスタ保存", type="primary"): save_sync("packaging_master", ep); flash("success", "✅ 資材マスタを保存しました。"); st.rerun()
     with tm4:
         es = st.data_editor(sh_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
-        if st.button("💾 運送会社保存", type="primary"): save_sync("shipping_master", es); st.rerun()
+        if st.button("💾 運送会社保存", type="primary"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
 
 # ─────────────────────────────────────────────
 # 🏗️ 製造スケジューラー（こんにゃく工場向け）
@@ -1224,5 +1267,5 @@ elif pg == "🏗️ 製造スケジューラー":
                     if c in ep.columns and c in um.columns:
                         um[c] = ep.set_index("製品名").reindex(um["製品名"])[c].values if "製品名" in ep.columns else ep[c].values
                 save_sync("master", um)
-                st.success("✅ パラメータを保存しました。")
+                flash("success", "✅ 製造パラメータを保存しました。")
                 st.rerun()
