@@ -1055,13 +1055,15 @@ elif pg == "🏗️ 製造スケジューラー":
         except Exception as e:
             st.error(f"保存エラー ({name}): {e}")
 
-    # セッションキャッシュ
-    if "v3_shift"  not in st.session_state: st.session_state.v3_shift  = _load_sched_master("shift_master",   _SHIFT_COLS, _SHIFT_INIT)
-    if "v3_break"  not in st.session_state: st.session_state.v3_break  = _load_sched_master("break_master",   _BREAK_COLS, _BREAK_INIT)
-    if "v3_facil"  not in st.session_state: st.session_state.v3_facil  = _load_sched_master("facility_master",_FACIL_COLS, _FACIL_INIT)
-    if "v3_co"     not in st.session_state: st.session_state.v3_co     = _load_sched_master("changeover_matrix", _CO_COLS, _CO_INIT)
-    if "v3_conf"   not in st.session_state: st.session_state.v3_conf   = _load_sched_master("schedule_confirmed", _CONF_COLS, [])
-    if "v3_manual_order" not in st.session_state: st.session_state.v3_manual_order = []
+    # ── セッションキャッシュ（初回のみGSSアクセス）
+    if "v3_initialized" not in st.session_state:
+        st.session_state.v3_shift  = _load_sched_master("shift_master",    _SHIFT_COLS, _SHIFT_INIT)
+        st.session_state.v3_break  = _load_sched_master("break_master",    _BREAK_COLS, _BREAK_INIT)
+        st.session_state.v3_facil  = _load_sched_master("facility_master", _FACIL_COLS, _FACIL_INIT)
+        st.session_state.v3_co     = _load_sched_master("changeover_matrix", _CO_COLS,  _CO_INIT)
+        st.session_state.v3_conf   = _load_sched_master("schedule_confirmed", _CONF_COLS, [])
+        st.session_state.v3_manual_order = []
+        st.session_state.v3_initialized  = True
 
     _sdf  = st.session_state.v3_shift
     _bdf  = st.session_state.v3_break
@@ -1211,45 +1213,67 @@ elif pg == "🏗️ 製造スケジューラー":
         return result
 
     def _snap(cur, ws_h, we_h, sdf, bdf, min_staff=1):
-        """cur を次の稼働可能時刻に進める（最大60日探索）"""
-        for _ in range(60*24):
+        """cur を次の稼働可能時刻に進める（最大30日探索・無限ループ防止）"""
+        _min_staff_eff = min(min_staff, 1)  # シフト未設定時は1人で動作
+        for _ in range(30 * 24):  # 最大30日 × 24回/日
             day = cur.normalize()
-            ds = day + timedelta(hours=ws_h)
-            de = day + timedelta(hours=we_h)
-            if cur < ds: cur = ds; continue
+            ds  = day + timedelta(hours=ws_h)
+            de  = day + timedelta(hours=we_h)
+            if cur < ds:
+                cur = ds; continue
             if cur >= de:
-                cur = (day+timedelta(days=1)).normalize()+timedelta(hours=ws_h); continue
+                cur = (day + timedelta(days=1)).normalize() + timedelta(hours=ws_h); continue
             # 休憩中スキップ
             ib, be = _break_end(cur, bdf)
-            if ib and be: cur = be; continue
-            # 人員不足スキップ
-            st_, _ = _staff_at(cur, sdf)
-            if st_ < min_staff:
-                cur += timedelta(minutes=30); continue
+            if ib and be:
+                cur = be; continue
+            # シフト人員チェック（シフト未設定=0人なら制約なし）
+            sv, _ = _staff_at(cur, sdf)
+            if sv > 0 and sv < _min_staff_eff:
+                cur += timedelta(hours=1); continue  # 30分→1時間で高速スキップ
             return cur
-        return cur
+        return cur  # タイムアウト時はそのまま返す
 
     def _advance(cur, hours, ws_h, we_h, sdf, bdf, min_staff=1):
-        """cur から hours 時間を確保。休憩・日跨ぎを自動分割。(終了時刻,セグメント[])を返す"""
+        """cur から hours 時間を確保。休憩・日跨ぎを自動分割。(終了時刻, セグメント[])を返す"""
         remaining = float(max(0, hours))
-        c = _snap(cur, ws_h, we_h, sdf, bdf, min_staff)
+        if remaining < 1e-6:
+            return cur, []
+        _min_staff_eff = min(min_staff, 1)
+        c = _snap(cur, ws_h, we_h, sdf, bdf, _min_staff_eff)
         segments = []
-        for _ in range(500):
-            if remaining < 1e-6: break
+        for _ in range(200):  # 500→200 に削減
+            if remaining < 1e-6:
+                break
             day = c.normalize()
             de  = day + timedelta(hours=we_h)
             nbs = _next_break_start(c, bdf, de)
-            avail = max(0.0, (min(nbs, de) - c).total_seconds()/3600.0)
+            avail = max(0.0, (min(nbs, de) - c).total_seconds() / 3600.0)
             if avail < 1e-6:
-                c = _snap(min(nbs,de), ws_h, we_h, sdf, bdf, min_staff); continue
-            st_, _ = _staff_at(c, sdf)
-            if st_ < min_staff:
-                c = _snap(c+timedelta(minutes=30), ws_h, we_h, sdf, bdf, min_staff); continue
+                # 次の稼働開始へジャンプ
+                next_c = _snap(min(nbs, de), ws_h, we_h, sdf, bdf, _min_staff_eff)
+                if next_c <= c:  # 進まない場合は強制翌日
+                    next_c = (c.normalize() + timedelta(days=1)).normalize() + timedelta(hours=ws_h)
+                c = next_c
+                continue
+            # シフト人員チェック
+            sv, _ = _staff_at(c, sdf)
+            if sv > 0 and sv < _min_staff_eff:
+                next_c = _snap(c + timedelta(hours=1), ws_h, we_h, sdf, bdf, _min_staff_eff)
+                if next_c <= c:
+                    next_c = c + timedelta(hours=1)
+                c = next_c
+                continue
             take = min(remaining, avail)
             seg_end = c + timedelta(hours=take)
             segments.append((c, seg_end))
             remaining -= take
-            c = _snap(seg_end, ws_h, we_h, sdf, bdf, min_staff)
+            if remaining < 1e-6:
+                break
+            next_c = _snap(seg_end, ws_h, we_h, sdf, bdf, _min_staff_eff)
+            if next_c <= seg_end:  # 進まない場合は強制翌日
+                next_c = (seg_end.normalize() + timedelta(days=1)).normalize() + timedelta(hours=ws_h)
+            c = next_c
         final = segments[-1][1] if segments else cur
         return final, segments
 
@@ -1257,36 +1281,40 @@ elif pg == "🏗️ 製造スケジューラー":
     # ④ TSP + 2-opt 段取り順序最適化
     # ─────────────────────────────────────────────────────────────────────
     def _tsp_2opt(tasks, co_matrix):
-        """貪欲法で初期解 → 2-opt改善。段取りコスト + 優先度 + 納期を最小化"""
+        """貪欲法で初期解 → 2-opt改善（品目数≤15かつ最大10回に制限）"""
         if len(tasks) <= 1: return tasks
 
         def _cost(a, b):
             co = _co_time(a["製品名"], b["製品名"], co_matrix)
-            pr = b.get("優先度",5)
-            dl = (b["出荷日"]-pd.Timestamp.today().normalize()).days if isinstance(b["出荷日"],pd.Timestamp) else 30
-            return co*0.4 + pr*8 + max(0,dl)*0.3
+            pr = b.get("優先度", 5)
+            dl = (b["出荷日"] - pd.Timestamp.today().normalize()).days \
+                 if isinstance(b["出荷日"], pd.Timestamp) else 30
+            return co * 0.4 + pr * 8 + max(0, dl) * 0.3
 
         def _total_cost(order):
-            return sum(_cost(order[i],order[i+1]) for i in range(len(order)-1))
+            return sum(_cost(order[i], order[i+1]) for i in range(len(order)-1))
 
-        # 貪欲初期解（優先度・納期でソート後）
-        rem = sorted(tasks, key=lambda t:(t.get("優先度",5),
-                     t["出荷日"] if isinstance(t["出荷日"],pd.Timestamp) else pd.Timestamp.today()))
+        # 貪欲初期解
+        rem = sorted(tasks, key=lambda t: (
+            t.get("優先度", 5),
+            t["出荷日"] if isinstance(t["出荷日"], pd.Timestamp) else pd.Timestamp.today()
+        ))
         ordered = [rem.pop(0)]
         while rem:
             best = min(rem, key=lambda t: _cost(ordered[-1], t))
             rem.remove(best); ordered.append(best)
 
-        # 2-opt改善（最大50回反復）
-        improved = True
-        for _ in range(50):
-            if not improved: break
-            improved = False
-            for i in range(1, len(ordered)-1):
-                for j in range(i+1, len(ordered)):
-                    new_order = ordered[:i] + ordered[i:j+1][::-1] + ordered[j+1:]
-                    if _total_cost(new_order) < _total_cost(ordered) - 0.1:
-                        ordered = new_order; improved = True
+        # 2-opt改善（品目数15以下・最大10回のみ実施）
+        if len(ordered) <= 15:
+            for _ in range(10):
+                improved = False
+                for i in range(1, len(ordered) - 1):
+                    for j in range(i + 1, len(ordered)):
+                        new_order = ordered[:i] + ordered[i:j+1][::-1] + ordered[j+1:]
+                        if _total_cost(new_order) < _total_cost(ordered) - 0.1:
+                            ordered = new_order; improved = True
+                if not improved:
+                    break
         return ordered
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1340,10 +1368,12 @@ elif pg == "🏗️ 製造スケジューラー":
     # ─────────────────────────────────────────────────────────────────────
     # ⑥ メインスケジューリングエンジン
     # ─────────────────────────────────────────────────────────────────────
-    def _engine(tasks_in, mode, start_dt, ws_h, we_h, co_matrix, sdf, bdf, co_df):
+    def _engine(tasks_in, mode, start_dt, ws_h, we_h, co_matrix, sdf, bdf, co_df, do_2opt=True):
         res=[]
         if not tasks_in: return res
-        ordered = _tsp_2opt(tasks_in, co_matrix)
+        ordered = _tsp_2opt(tasks_in, co_matrix) if do_2opt else sorted(
+            tasks_in, key=lambda t:(t.get("優先度",5),
+                t["出荷日"] if isinstance(t["出荷日"],pd.Timestamp) else pd.Timestamp.today()))
 
         if mode=="forward":
             cursor = pd.Timestamp(start_dt).normalize()+timedelta(hours=ws_h)
@@ -1377,8 +1407,7 @@ elif pg == "🏗️ 製造スケジューラー":
             com=_co_time(prev_pn,pn,co_matrix) if prev_pn else 0
             coh=com/60.; con=_is_contam(prev_pn,pn,co_df)
             if coh>0:
-                cs_,ce_,_=cursor,*_advance(cursor,coh,ws_h,we_h,sdf,bdf,1)[0:1],None
-                ce_,_=_advance(cursor,coh,ws_h,we_h,sdf,bdf,1)
+                ce_, _segs_co = _advance(cursor, coh, ws_h, we_h, sdf, bdf, 1)
                 res.append({"区分":"🔴 段取り・洗浄" if con else "🟠 段取り",
                     "製品名":f"【{com}分洗浄】{_ktype(prev_pn)}→{_ktype(pn)}" if con
                              else f"【段取り{com}分】→{pn}",
@@ -1509,9 +1538,7 @@ elif pg == "🏗️ 製造スケジューラー":
             flash("success","✅ 段取りマトリクスを保存しました。"); st.rerun()
         show_flash_inline(_co_msg)
 
-    # ─────────────────────────────────────────────────────────────────────
-    # ⑨ スケジュール計算実行
-    # ─────────────────────────────────────────────────────────────────────
+    # ── スケジュール計算実行（スピナー付き）
     _co_matrix = _build_co(st.session_state.v3_co)
     all_tasks    = _calc_tasks(hd, ws_h, we_h)
     needed_tasks = [t for t in all_tasks if t["製造必要量(cs)"]>0]
@@ -1526,16 +1553,21 @@ elif pg == "🏗️ 製造スケジューラー":
     else:
         _tasks_for_engine = needed_tasks
 
-    _sched = _engine(
-        _tasks_for_engine,
-        mode="forward" if "フォワード" in sched_mode else "backward",
-        start_dt=datetime.combine(start_date, datetime.min.time()),
-        ws_h=float(ws_h), we_h=float(we_h),
-        co_matrix=_co_matrix,
-        sdf=st.session_state.v3_shift,
-        bdf=st.session_state.v3_break,
-        co_df=st.session_state.v3_co,
-    )
+    if _tasks_for_engine:
+        with st.spinner(f"⚙️ スケジュールを計算中… ({len(_tasks_for_engine)}品目{'・2-opt最適化あり' if do_2opt else ''})"):
+            _sched = _engine(
+                _tasks_for_engine,
+                mode="forward" if "フォワード" in sched_mode else "backward",
+                start_dt=datetime.combine(start_date, datetime.min.time()),
+                ws_h=float(ws_h), we_h=float(we_h),
+                co_matrix=_co_matrix,
+                sdf=st.session_state.v3_shift,
+                bdf=st.session_state.v3_break,
+                co_df=st.session_state.v3_co,
+                do_2opt=do_2opt,
+            )
+    else:
+        _sched = []
 
     # ─────────────────────────────────────────────────────────────────────
     # ⑩ KPI バナー（アスプローバ型）
