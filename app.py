@@ -130,7 +130,23 @@ def get_client():
 client = get_client(); sheet = client.open_by_url(st.secrets["spreadsheet_url"])
 
 def load_data(name):
-    c_def = {"orders":["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"], "manufactures":["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"], "master":["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分","特注フラグ","チャーターフラグ","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"], "customers":["顧客名","ふりがな","帳合先","支店名"], "packaging_master":["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム"], "packaging_logs":["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"], "shipping_master":["運送会社名"], "special_schedule":["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"]}
+    c_def = {
+        "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
+        "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
+        "master":       ["大カテゴリ","製品名","初期在庫数",
+                         "使用資材名","資材使用数","入数(袋/cs)","資材消費単位","甲入数",
+                         "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ",
+                         "段取りタイプ","ラインID","最小製造ロット",
+                         "調合比率","成形比率","包装比率","レトルト比率",
+                         "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
+        "customers":        ["顧客名","ふりがな","帳合先","支店名"],
+        "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム"],
+        "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
+        "shipping_master":  ["運送会社名"],
+        "special_schedule": ["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"],
+        "order_purchases":  ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先",
+                             "納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"],
+    }
     tc = c_def.get(name, [])
     if not tc: return pd.DataFrame()
     try: ws = sheet.worksheet(name)
@@ -139,25 +155,28 @@ def load_data(name):
         ws.update(values=[tc,["ヤマト運輸"],["佐川急便"],["自社配送"]] if name=="shipping_master" else [tc], range_name="A1")
     try:
         data = ws.get_all_values()
-        if len(data)<=1: return pd.DataFrame(columns=tc)
+        if len(data) <= 1: return pd.DataFrame(columns=tc)
         df = pd.DataFrame(data[1:], columns=data[0])
         df.columns = df.columns.str.strip().str.replace(' ','').str.replace('　','')
-        df = df.loc[:, ~df.columns.duplicated()].reindex(columns=tc, fill_value="")
-        for c in ["ケース数","初期在庫数","資材使用数","初期在庫","発注点","数量","理論在庫"]:
-            if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).apply(to_int)
+        # スプレッドシートに追加列があれば保持したまま tc にない列も維持
+        extra_cols = [c for c in df.columns if c not in tc]
+        ordered_cols = tc + extra_cols
+        df = df.loc[:, ~df.columns.duplicated()].reindex(columns=ordered_cols, fill_value="")
+        for c in ["ケース数","初期在庫数","資材使用数","初期在庫","発注点","数量","理論在庫",
+                  "入数(袋/cs)","甲入数","最小製造ロット","最少人員_調合","最少人員_成形",
+                  "最少人員_包装","最少人員_レトルト","調合比率","成形比率","包装比率","レトルト比率",
+                  "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム"]:
+            if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         for c in ["納品予定日","製造予定日","登録日","登録日時","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","出荷予定日","更新日時"]:
             if c in df.columns:
                 _parsed = pd.to_datetime(df[c], errors='coerce', utc=False)
-                # タイムゾーン付きで読まれた場合は除去
                 try:
-                    if _parsed.dt.tz is not None:
-                        _parsed = _parsed.dt.tz_localize(None)
-                except Exception:
-                    pass
+                    if _parsed.dt.tz is not None: _parsed = _parsed.dt.tz_localize(None)
+                except Exception: pass
                 df[c] = _parsed
         for c in ["荷姿チェック","不良廃棄フラグ","リパックフラグ","日付未定フラグ","特注フラグ","チャーターフラグ"]:
             if c in df.columns: df[c] = df[c].astype(str).str.upper() == "TRUE"
-        return df[tc]
+        return df[ordered_cols]
     except: return pd.DataFrame(columns=tc)
 
 def save_sync(name, df):
@@ -227,15 +246,28 @@ def pui(pn):
     if mst.empty or not pn: return 1, "ケース"
     r = mst[mst["製品名"] == pn]
     if r.empty: return 1, "ケース"
-    return max(1, to_int(r.iloc[0].get("入数", 1))), str(r.iloc[0].get("単位区分", "ケース")).strip() or "ケース"
+    # 旧列名(入数/単位区分)と新列名(入数(袋/cs)/資材消費単位)の両方に対応
+    nyusuu = to_int(r.iloc[0].get("入数(袋/cs)", r.iloc[0].get("入数", 1))) or 1
+    tani   = str(r.iloc[0].get("資材消費単位", r.iloc[0].get("単位区分", "ケース"))).strip() or "ケース"
+    return max(1, nyusuu), tani
 
 def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
 today = pd.Timestamp.today().normalize(); dates = pd.date_range(today, today + timedelta(days=60))
-cs = {}; fs = {}; mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数","入数","単位区分","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
-# 製品マスタ拡張列が存在しない場合は追加（既存データへの影響なし）
-for _ext_col, _ext_def in [("入数(袋/cs)", "1"), ("資材消費単位", "ケース"), ("甲入数", "48")]:
+cs = {}; fs = {}
+mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(
+    columns=["大カテゴリ","製品名","初期在庫数","使用資材名","資材使用数",
+             "入数(袋/cs)","資材消費単位","甲入数",
+             "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
+# 拡張列が存在しない場合は追加（既存データへの影響なし）
+for _ext_col, _ext_def in [
+    ("入数(袋/cs)", 1), ("資材消費単位", "ケース"), ("甲入数", 48),
+    ("段取りタイプ", ""), ("ラインID", ""), ("最小製造ロット", 1),
+    ("調合比率", 15), ("成形比率", 35), ("包装比率", 35), ("レトルト比率", 15),
+    ("最少人員_調合", 1), ("最少人員_成形", 2), ("最少人員_包装", 2), ("最少人員_レトルト", 1),
+    ("キーマン必要", "TRUE"),
+]:
     if not mst.empty and _ext_col not in mst.columns:
         mst[_ext_col] = _ext_def
         mst_u = mst.drop_duplicates(subset=["製品名"])
@@ -1349,10 +1381,16 @@ elif pg == "⚙️ マスタ・分析":
     page_header("⚙️ マスタ")
     tm1,tm2,tm3,tm4 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社"])
     with tm1:
+        st.markdown('<div class="info-tip">💡 <b>製品マスタ</b>：資材消費単位・入数(袋/cs)・甲入数 を設定すると製造時の資材自動減算に反映されます。スプレッドシートへ保存後、アプリに反映されます。</div>', unsafe_allow_html=True)
         em_base = mst.copy()
-        for _col, _def in [("入数(袋/cs)","1"),("資材消費単位","ケース"),("甲入数","48")]:
+        # 表示する列（不要な旧列を非表示、新列を確保）
+        _mst_active = ["大カテゴリ","製品名","初期在庫数",
+                       "使用資材名","資材使用数","入数(袋/cs)","資材消費単位","甲入数",
+                       "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]
+        for _col, _def in [("入数(袋/cs)",1),("資材消費単位","ケース"),("甲入数",48)]:
             if _col not in em_base.columns: em_base[_col] = _def
-        em = st.data_editor(em_base, num_rows="dynamic", use_container_width=True, hide_index=True,
+        em_show = em_base[[c for c in _mst_active if c in em_base.columns]]
+        em = st.data_editor(em_show, num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={
                 "大カテゴリ": st.column_config.SelectboxColumn(options=[c.split(" ",1)[1] for c in CATS]),
                 "使用資材名": st.column_config.SelectboxColumn(options=pk_m["資材名"].tolist() if not pk_m.empty else []),
@@ -1361,11 +1399,24 @@ elif pg == "⚙️ マスタ・分析":
                 "入数(袋/cs)": st.column_config.NumberColumn("入数(袋/cs)", min_value=1, step=1, format="%d",
                     help="1ケースに何袋入るか（例：2袋入→2、4袋入→4）"),
                 "甲入数": st.column_config.NumberColumn("甲入数(袋/甲)", min_value=1, step=1, format="%d",
-                    help="1甲に何袋入るか（例：12個×4段=48袋→48）資材消費単位が「甲」の時に使用"),
+                    help="1甲に何袋入るか（例：12個×4段=48袋→48）"),
+                "初期在庫数": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                "資材使用数": st.column_config.NumberColumn("資材使用数", min_value=0, step=1, format="%d"),
+                "時間あたり生産量": st.column_config.NumberColumn("生産量(cs/h)", min_value=1, step=1, format="%d"),
+                "歩留まり率": st.column_config.NumberColumn("歩留まり(%)", min_value=1, max_value=100, step=1, format="%d"),
+                "リードタイム時間": st.column_config.NumberColumn("LT(h)", min_value=0, step=1, format="%d"),
+                "安全在庫数": st.column_config.NumberColumn("安全在庫(cs)", min_value=0, step=1, format="%d"),
+                "段取りグループ": st.column_config.TextColumn("段取りG"),
             }, height=500)
         _m1_msg = st.empty()
         if st.button("💾 製品マスタ保存", type="primary"):
-            save_sync("master", em); flash("success", "✅ 製品マスタを保存しました。"); st.rerun()
+            # 編集した列をベースDFに反映して保存（旧列・拡張列もすべて保持）
+            save_target = em_base.copy()
+            for c in em.columns:
+                if c in save_target.columns:
+                    save_target[c] = em[c].values
+            save_sync("master", save_target)
+            flash("success", "✅ 製品マスタを保存しました。"); st.rerun()
         show_flash_inline(_m1_msg)
     with tm2:
         ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
