@@ -364,12 +364,17 @@ if pg == "📋 受注登録":
     chf = str(pr.iloc[0].get("チャーターフラグ","")).upper() in ["TRUE","1","YES"] if not pr.empty else False
     stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))    
 kbn, nyu, kou = pui(prod)
+stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))
+    
+    kbn, nyu, kou = pui(prod)
     if kbn == "袋":
         qty = st.number_input("📦 数量（袋）", min_value=1, step=1, value=None)
     elif kbn == "甲":
         qty = st.number_input("📦 数量（甲）", min_value=1, step=1, value=None)
     else:
         qty = st.number_input("📦 数量（ケース）", min_value=1, step=1, value=None)
+
+    r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3)
 
     r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄"); iadj = c3.checkbox("📊 在庫調整", help="在庫ずれ修正用。チェック時は出荷ではなく在庫への加算として扱われます（マイナスを戻す場合など）")
     if iadj:
