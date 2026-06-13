@@ -66,6 +66,7 @@ def _nd_to_date(series):
         return s.dt.normalize().dt.date
     except Exception:
         return pd.Series([None] * len(series))
+
 def is_special_order(r): return "特注" in str(r) or "チャーター便" in str(r)
 def make_csv_bytes(df): return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
@@ -173,7 +174,6 @@ def load_data(name):
         for c in ["荷姿チェック","不良廃棄フラグ","リパックフラグ","日付未定フラグ","特注フラグ","チャーターフラグ"]:
             if c in df.columns: df[c] = df[c].astype(str).str.upper() == "TRUE"
             
-        # 古い列名があった場合の移行・補完処理
         if "製造登録区分" not in df.columns: df["製造登録区分"] = df.get("資材消費単位", "ケース")
         if "入数" not in df.columns: df["入数"] = df.get("入数(袋/cs)", 10)
         if "甲消費数" not in df.columns: df["甲消費数"] = df.get("甲入数", 4)
@@ -293,7 +293,6 @@ if not pk_l.empty:
             if "入庫" in pt: p_sum[pn]["入庫"] += q
             elif "出庫" in pt: p_sum[pn]["出庫"] += q
 
-# 資材の出庫計算（新区分ロジック）
 if not mdf.empty and not mst_u.empty:
     mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
     for _, r in mdf.iterrows():
@@ -362,9 +361,7 @@ if pg == "📋 受注登録":
     pr = mst_u[mst_u["製品名"]==prod] if not mst_u.empty and prod else pd.DataFrame()
     spf = str(pr.iloc[0].get("特注フラグ","")).upper() in ["TRUE","1","YES"] if not pr.empty else False
     chf = str(pr.iloc[0].get("チャーターフラグ","")).upper() in ["TRUE","1","YES"] if not pr.empty else False
-    stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))    
-kbn, nyu, kou = pui(prod)
-stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))
+    stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))
     
     kbn, nyu, kou = pui(prod)
     if kbn == "袋":
@@ -373,8 +370,6 @@ stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" i
         qty = st.number_input("📦 数量（甲）", min_value=1, step=1, value=None)
     else:
         qty = st.number_input("📦 数量（ケース）", min_value=1, step=1, value=None)
-
-    r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3)
 
     r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄"); iadj = c3.checkbox("📊 在庫調整", help="在庫ずれ修正用。チェック時は出荷ではなく在庫への加算として扱われます（マイナスを戻す場合など）")
     if iadj:
@@ -453,6 +448,14 @@ stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" i
             save_sync("orders", pd.concat([odf[~odf["ID"].isin(_o_ids)], pd.merge(sv, odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]], on="ID", how="left")], ignore_index=True))
             flash("success", "✅ 受注データを保存しました。"); st.rerun()
         show_flash_inline(_o_save_msg)
+        with st.expander("📂 全データ一括編集"):
+            ea_o = st.data_editor(do[["ID","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400)
+            _o_all_msg = st.empty()
+            if st.button("💾 全データ保存"):
+                sva = ea_o.copy(); sva["納品予定日"] = pd.to_datetime(sva["出荷予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
+                save_sync("orders", pd.merge(sva, odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]], on="ID", how="left"))
+                flash("success", "✅ 受注全データを保存しました。"); st.rerun()
+            show_flash_inline(_o_all_msg)
 
 # ─────────────────────────────────────────────
 # 🚚 出荷・発送管理
@@ -470,7 +473,8 @@ elif pg == "🚚 出荷・発送管理":
                 (odf.get("日付未定フラグ", pd.Series(False, index=odf.index)) == False)
             )
             d_ord = odf[_mask].copy()
-        else: d_ord = pd.DataFrame()
+        else:
+            d_ord = pd.DataFrame()
         if d_ord.empty: st.info(f"📭 {format_date_jp(td)} の予定なし")
         else:
             dn = d_ord[d_ord["荷姿チェック"]==True]; udn = d_ord[d_ord["荷姿チェック"]==False]
@@ -546,7 +550,9 @@ elif pg == "🏭 製造登録":
 
     mr = s2.text_input("📝 備考（製造）")
     irp = st.checkbox("🔄 リパック製造（在庫加算）")
-    iadj_m = st.checkbox("📊 在庫調整（－）", help="在庫ずれ修正用。チェック時は在庫を減らす（マイナス）処理として登録されます。")
+    iadj_m = st.checkbox("📊 在庫調整（－）", help="在庫ずれ修正用。チェック時は在庫を減らす（マイナス）処理として受注登録されます。製造ミス・廃棄・棚卸減など。")
+    if iadj_m:
+        st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b>：この登録は在庫を <b>減らす（－）</b> 処理として出荷登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     ipl = st.checkbox("📦 紐づく資材の在庫も同時に減らす", value=True) if (irp and not iadj_m) else (True if not iadj_m else False)
 
     if pm and mq and ipl and not mst_u.empty and pm in mst_u["製品名"].values:
@@ -578,7 +584,7 @@ elif pg == "🏭 製造登録":
             </div>""", unsafe_allow_html=True)
 
     if pm and mq and cs.get(pm,0)<=0 and not iadj_m:
-        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)}</span> → 製造後: <b>{cs.get(pm,0)+to_int(mq)}</b></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)} cs</span> → 製造後: <b>{cs.get(pm,0)+to_int(mq)} cs</b></div>", unsafe_allow_html=True)
     st.write("---")
     _mfg_reg_msg = st.empty()
     if st.button("➕ 製造データを記録", type="primary", use_container_width=True):
@@ -588,11 +594,14 @@ elif pg == "🏭 製造登録":
             if iadj_m:
                 rt_adj = f"【在庫調整-】 {mr}".strip()
                 app_sync("orders", pd.DataFrame([{
-                    "ID": nid, "納品予定日": pd.to_datetime(mdt), "顧客名": "在庫調整", "大カテゴリ": c_m, "製品名": pm,
-                    "ケース数": to_int(mq), "運送会社": "", "備考": rt_adj, "荷姿チェック": False, "発送備考": "",
-                    "不良廃棄フラグ": False, "日付未定フラグ": False, "登録日時": datetime.now()
+                    "ID": nid, "納品予定日": pd.to_datetime(mdt),
+                    "顧客名": "在庫調整", "大カテゴリ": c_m, "製品名": pm,
+                    "ケース数": to_int(mq), "運送会社": "",
+                    "備考": rt_adj, "荷姿チェック": False, "発送備考": "",
+                    "不良廃棄フラグ": False, "日付未定フラグ": False,
+                    "登録日時": datetime.now()
                 }]))
-                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(pm)}】 -{to_int(mq):,}  現在庫: {cs.get(pm,0):,} → {cs.get(pm,0)-to_int(mq):,}")
+                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(pm)}】 -{to_int(mq):,} cs  現在庫: {cs.get(pm,0):,} → {cs.get(pm,0)-to_int(mq):,} cs")
                 st.rerun()
             else:
                 rt = f"{'【リパック】' if irp else ''} {'【資材非連動】' if irp and not ipl else ''} {mr}".strip()
@@ -621,7 +630,7 @@ elif pg == "🏭 製造登録":
                             "備考": f"自動記録 [{_calc_memo}]", "登録日時": datetime.now()
                         }]))
                         _mfg_mat_msg = f"  ＋【{_pnn}】 {_deduct_qty:,}枚 自動減算（{_calc_memo}）"
-                flash("success", f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
+                flash("success", f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}cs  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
                 st.rerun()
     show_flash_inline(_mfg_reg_msg)
 
@@ -637,6 +646,14 @@ elif pg == "🏭 製造登録":
             save_sync("manufactures", pd.concat([mdf[~mdf["ID"].isin(sm_ids)], pd.merge(sm, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left")], ignore_index=True))
             flash("success", "✅ 製造データを保存しました。"); st.rerun()
         show_flash_inline(_mfg_save_msg)
+        with st.expander("📂 全データ一括編集・削除"):
+            ea_m = st.data_editor(dm[["ID","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400)
+            _mfg_all_msg = st.empty()
+            if st.button("💾 全データ保存", key="btn_ea_m"):
+                sma = ea_m.copy(); sma["製造予定日"] = pd.to_datetime(sma["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
+                save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left"))
+                flash("success", "✅ 製造全データを保存しました。"); st.rerun()
+            show_flash_inline(_mfg_all_msg)
 
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
@@ -1285,11 +1302,8 @@ elif pg == "⚙️ マスタ・分析":
             save_target = em_base.copy()
             for c in em.columns:
                 save_target[c] = em[c].values
-            
             for drop_c in ["資材使用数", "入数(袋/cs)", "資材消費単位", "甲入数", "単位区分"]:
-                if drop_c in save_target.columns:
-                    save_target = save_target.drop(columns=[drop_c])
-                    
+                if drop_c in save_target.columns: save_target = save_target.drop(columns=[drop_c])
             save_sync("master", save_target)
             flash("success", "✅ 製品マスタを保存しました。不要な旧列も整理されました。"); st.rerun()
         show_flash_inline(_m1_msg)
@@ -1392,9 +1406,7 @@ elif pg == "🏗️ 製造スケジューラー":
         try:
             ws = sheet.worksheet(name)
             data = ws.get_all_values()
-            if len(data) <= 1:
-                df = pd.DataFrame(init_rows, columns=cols) if init_rows else pd.DataFrame(columns=cols)
-                return df
+            if len(data) <= 1: return pd.DataFrame(init_rows, columns=cols) if init_rows else pd.DataFrame(columns=cols)
             df = pd.DataFrame(data[1:], columns=data[0])
             df.columns = df.columns.str.strip()
             return df.reindex(columns=cols, fill_value="")
@@ -1458,33 +1470,25 @@ elif pg == "🏗️ 製造スケジューラー":
         def _ff(k, dv): 
             try: return max(0.01, float(str(row.get(k, dv*100) or dv*100)) / 100.0)
             except: return dv
-        ratios = {
-            "調合比率":  _ff("調合比率",  0.15),
-            "成形比率":  _ff("成形比率",  0.35),
-            "包装比率":  _ff("包装比率",  0.35),
-            "レトルト比率": _ff("レトルト比率", 0.15),
-        }
+        ratios = {"調合比率":_ff("調合比率",0.15), "成形比率":_ff("成形比率",0.35), "包装比率":_ff("包装比率",0.35), "レトルト比率":_ff("レトルト比率",0.15)}
         rs = sum(ratios.values())
         if rs < 0.01: ratios = {k: 0.25 for k in ratios}
         else: ratios = {k: v/rs for k, v in ratios.items()}
         return {
             "時間あたり生産量": max(1, _fi("時間あたり生産量", 10)),
-            "歩留まり率":       max(1, min(100, _fi("歩留まり率", 95))),
+            "歩留まり率": max(1, min(100, _fi("歩留まり率", 95))),
             "リードタイム時間": max(0, _fi("リードタイム時間", 0)),
-            "安全在庫数":       max(0, _fi("安全在庫数", 0)),
-            "段取りグループ":   str(row.get("段取りグループ","") or ""),
-            "段取りタイプ":     _ktype(pn),
-            "調合比率":  ratios["調合比率"],
-            "成形比率":  ratios["成形比率"],
-            "包装比率":  ratios["包装比率"],
-            "レトルト比率": ratios["レトルト比率"],
-            "最少人員_調合":    max(1, _fi("最少人員_調合",   1)),
-            "最少人員_成形":    max(1, _fi("最少人員_成形",   2)),
-            "最少人員_包装":    max(1, _fi("最少人員_包装",   2)),
-            "最少人員_レトルト":max(1, _fi("最少人員_レトルト",1)),
-            "キーマン必要":     str(row.get("キーマン必要","TRUE")).upper() != "FALSE",
-            "ラインID":         str(row.get("ラインID","") or ""),
-            "最小製造ロット":   max(1, _fi("最小製造ロット", 1)),
+            "安全在庫数": max(0, _fi("安全在庫数", 0)),
+            "段取りグループ": str(row.get("段取りグループ","") or ""),
+            "段取りタイプ": _ktype(pn),
+            "調合比率": ratios["調合比率"], "成形比率": ratios["成形比率"], "包装比率": ratios["包装比率"], "レトルト比率": ratios["レトルト比率"],
+            "最少人員_調合": max(1, _fi("最少人員_調合", 1)),
+            "最少人員_成形": max(1, _fi("最少人員_成形", 2)),
+            "最少人員_包装": max(1, _fi("最少人員_包装", 2)),
+            "最少人員_レトルト": max(1, _fi("最少人員_レトルト",1)),
+            "キーマン必要": str(row.get("キーマン必要","TRUE")).upper() != "FALSE",
+            "ラインID": str(row.get("ラインID","") or ""),
+            "最小製造ロット": max(1, _fi("最小製造ロット", 1)),
         }
 
     def _build_co(df):
@@ -1590,8 +1594,7 @@ elif pg == "🏗️ 製造スケジューラー":
         c = cur
         while c < day_end:
             t_str = f"{c.hour:02d}:{(c.minute//30)*30:02d}"
-            if (wd_str, t_str) in break_slots:
-                return c
+            if (wd_str, t_str) in break_slots: return c
             c += timedelta(minutes=30)
         return day_end
 
@@ -2291,7 +2294,6 @@ elif pg == "🏗️ 製造スケジューラー":
                     st.markdown(f"- `{v}` — {conf_dt} ({user}) / {len(v_rows)}件")
             else: st.info("確定済みスケジュールはありません。")
 
-    # 版比較（差分表示）
         st.markdown('<div class="section-title">🔄 スケジュール差分比較</div>',unsafe_allow_html=True)
         if not _cfdf.empty and "版ID" in _cfdf.columns:
             ver_opts=_cfdf["版ID"].unique().tolist()
@@ -2303,7 +2305,6 @@ elif pg == "🏗️ 製造スケジューラー":
                     "開始日時":r["開始"].strftime("%Y-%m-%d %H:%M") if isinstance(r["開始"],pd.Timestamp) and pd.notnull(r["開始"]) else "",
                     "終了日時":r["終了"].strftime("%Y-%m-%d %H:%M") if isinstance(r["終了"],pd.Timestamp) and pd.notnull(r["終了"]) else "",
                     "製造量(cs)":r.get("製造量(cs)",0)} for r in _sched])
-                # 差分検出（製品+工程キーで比較）
                 prev_df["_key"]=prev_df["製品名"]+"_"+prev_df["工程"]
                 curr_df["_key"]=curr_df["製品名"]+"_"+curr_df["工程"]
                 prev_keys=set(prev_df["_key"]); curr_keys=set(curr_df["_key"])
@@ -2314,10 +2315,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 for k in sorted(common):
                     p2=prev_df[prev_df["_key"]==k].iloc[0]; c2=curr_df[curr_df["_key"]==k].iloc[0]
                     if p2["開始日時"]!=c2["開始日時"] or p2["製造量(cs)"]!=c2["製造量(cs)"]:
-                        diff_rows.append({"変更区分":"🟡 変更","製品名":c2["製品名"],"工程":c2["工程"],
-                            "開始":f'{p2["開始日時"]} → {c2["開始日時"]}',
-                            "終了":f'{p2["終了日時"]} → {c2["終了日時"]}',
-                            "製造量(cs)":f'{p2["製造量(cs)"]} → {c2["製造量(cs)"]}'})
+                        diff_rows.append({"変更区分":"🟡 変更","製品名":c2["製品名"],"工程":c2["工程"], "開始":f'{p2["開始日時"]} → {c2["開始日時"]}', "終了":f'{p2["終了日時"]} → {c2["終了日時"]}', "製造量(cs)":f'{p2["製造量(cs)"]} → {c2["製造量(cs)"]}'})
                 if diff_rows:
                     diff_df=pd.DataFrame(diff_rows)
                     def _dfs(r):
@@ -2328,43 +2326,28 @@ elif pg == "🏗️ 製造スケジューラー":
                         return ['']*len(r)
                     st.dataframe(diff_df.style.apply(_dfs,axis=1),hide_index=True,use_container_width=True)
                     st.caption(f"追加:{len(added)}件  削除:{len(removed)}件  変更:{len([r for r in diff_rows if '変更' in r['変更区分']])}件")
-                else:
-                    st.markdown('<div class="ok-banner">✅ 選択した確定版と現在のスケジュールに差分はありません。</div>',unsafe_allow_html=True)
-        else:
-            st.info("確定済みスケジュールがないため比較できません。まずスケジュールを確定保存してください。")
+                else: st.markdown('<div class="ok-banner">✅ 選択した確定版と現在のスケジュールに差分はありません。</div>',unsafe_allow_html=True)
+        else: st.info("確定済みスケジュールがないため比較できません。まずスケジュールを確定保存してください。")
 
-    # ══════════════════════════════════════════════════════════════════════
-    # タブ10：パラメータ設定（マスタ拡張列）
-    # ══════════════════════════════════════════════════════════════════════
     with T10:
         st.markdown('<div class="section-title">⚙️ 製品別 製造パラメータ設定</div>',unsafe_allow_html=True)
-        st.markdown("""<div class="info-tip">
-        💡 <b>入力ガイド：</b>生産量=cs/h。歩留まり=90〜98%程度。LT=調合・仕込み前処理時間(h)。
-        段取りタイプ=段取りマトリクスとの照合キー（空欄=製品名から自動判定）。
-        工程比率は合計が100%になるよう設定（空欄=自動按分）。最小製造ロット=ロット単位cs数。
-        </div>""",unsafe_allow_html=True)
-        if mst.empty:
-            st.warning("製品マスタが未登録です。「⚙️ マスタ・分析」から登録してください。")
+        st.markdown("""<div class="info-tip">💡 <b>入力ガイド：</b>生産量=cs/h。歩留まり=90〜98%程度。LT=調合・仕込み前処理時間(h)。段取りタイプ=段取りマトリクスとの照合キー（空欄=製品名から自動判定）。工程比率は合計が100%になるよう設定（空欄=自動按分）。最小製造ロット=ロット単位cs数。</div>""",unsafe_allow_html=True)
+        if mst.empty: st.warning("製品マスタが未登録です。「⚙️ マスタ・分析」から登録してください。")
         else:
             base_c=["製品名","大カテゴリ","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]
-            ext_c=["段取りタイプ","ラインID","最小製造ロット",
-                   "調合比率","成形比率","包装比率","レトルト比率",
-                   "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"]
+            ext_c=["段取りタイプ","ラインID","最小製造ロット", "調合比率","成形比率","包装比率","レトルト比率", "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"]
             for ec in ext_c:
                 if ec not in mst.columns: mst[ec]=""
             pc=[c for c in base_c+ext_c if c in mst.columns]
-            ep=st.data_editor(mst[pc].copy(),hide_index=True,use_container_width=True,
-                height=min(600,len(mst)*38+60),
+            ep=st.data_editor(mst[pc].copy(),hide_index=True,use_container_width=True, height=min(600,len(mst)*38+60),
                 column_config={
-                    "製品名":st.column_config.TextColumn(disabled=True),
-                    "大カテゴリ":st.column_config.TextColumn("カテゴリ",disabled=True),
+                    "製品名":st.column_config.TextColumn(disabled=True), "大カテゴリ":st.column_config.TextColumn("カテゴリ",disabled=True),
                     "時間あたり生産量":st.column_config.NumberColumn("生産量(cs/h)",min_value=1,step=1,format="%d"),
                     "歩留まり率":st.column_config.NumberColumn("歩留まり(%)",min_value=1,max_value=100,step=1,format="%d"),
                     "リードタイム時間":st.column_config.NumberColumn("LT準備(h)",min_value=0,step=1,format="%d"),
                     "安全在庫数":st.column_config.NumberColumn("安全在庫(cs)",min_value=0,step=1,format="%d"),
                     "段取りグループ":st.column_config.TextColumn("段取りG"),
-                    "段取りタイプ":st.column_config.SelectboxColumn("段取りタイプ",
-                        options=["","黒","白","糸","板","玉","三角","ダイス","冷凍","その他"]),
+                    "段取りタイプ":st.column_config.SelectboxColumn("段取りタイプ", options=["","黒","白","糸","板","玉","三角","ダイス","冷凍","その他"]),
                     "ラインID":st.column_config.TextColumn("ラインID"),
                     "最小製造ロット":st.column_config.NumberColumn("最小ロット(cs)",min_value=1,step=1,format="%d"),
                     "調合比率":st.column_config.NumberColumn("調合比率(%)",min_value=0,max_value=100,step=5,format="%d"),
@@ -2389,13 +2372,10 @@ elif pg == "🏗️ 製造スケジューラー":
                 flash("success","✅ 製造パラメータを保存しました。"); st.rerun()
             show_flash_inline(_pm_msg)
 
-            # 段取りマトリクス参照
             st.markdown('<div class="section-title">🧩 現在の段取りマトリクス（参照）</div>',unsafe_allow_html=True)
             if not _cdf.empty:
                 def _co_sty(r):
-                    if str(r.get("コンタミリスク","")).upper()=="TRUE":
-                        return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
+                    if str(r.get("コンタミリスク","")).upper()=="TRUE": return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
                     return ['']*len(r)
                 st.dataframe(_cdf.style.apply(_co_sty,axis=1),hide_index=True,use_container_width=True)
-            else:
-                st.info("段取りマトリクスは上部「🧩 段取りマトリクス設定」エクスパンダーから登録してください。")
+            else: st.info("段取りマトリクスは上部「🧩 段取りマトリクス設定」エクスパンダーから登録してください。")
