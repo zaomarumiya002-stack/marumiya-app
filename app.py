@@ -2287,6 +2287,7 @@ elif pg == "🏗️ 製造スケジューラー":
                     st.markdown(f"- `{v}` — {conf_dt} ({user}) / {len(v_rows)}件")
             else: st.info("確定済みスケジュールはありません。")
 
+    # 版比較（差分表示）
         st.markdown('<div class="section-title">🔄 スケジュール差分比較</div>',unsafe_allow_html=True)
         if not _cfdf.empty and "版ID" in _cfdf.columns:
             ver_opts=_cfdf["版ID"].unique().tolist()
@@ -2298,6 +2299,7 @@ elif pg == "🏗️ 製造スケジューラー":
                     "開始日時":r["開始"].strftime("%Y-%m-%d %H:%M") if isinstance(r["開始"],pd.Timestamp) and pd.notnull(r["開始"]) else "",
                     "終了日時":r["終了"].strftime("%Y-%m-%d %H:%M") if isinstance(r["終了"],pd.Timestamp) and pd.notnull(r["終了"]) else "",
                     "製造量(cs)":r.get("製造量(cs)",0)} for r in _sched])
+                # 差分検出（製品+工程キーで比較）
                 prev_df["_key"]=prev_df["製品名"]+"_"+prev_df["工程"]
                 curr_df["_key"]=curr_df["製品名"]+"_"+curr_df["工程"]
                 prev_keys=set(prev_df["_key"]); curr_keys=set(curr_df["_key"])
@@ -2308,7 +2310,10 @@ elif pg == "🏗️ 製造スケジューラー":
                 for k in sorted(common):
                     p2=prev_df[prev_df["_key"]==k].iloc[0]; c2=curr_df[curr_df["_key"]==k].iloc[0]
                     if p2["開始日時"]!=c2["開始日時"] or p2["製造量(cs)"]!=c2["製造量(cs)"]:
-                        diff_rows.append({"変更区分":"🟡 変更","製品名":c2["製品名"],"工程":c2["工程"], "開始":f'{p2["開始日時"]} → {c2["開始日時"]}', "終了":f'{p2["終了日時"]} → {c2["終了日時"]}', "製造量(cs)":f'{p2["製造量(cs)"]} → {c2["製造量(cs)"]}'})
+                        diff_rows.append({"変更区分":"🟡 変更","製品名":c2["製品名"],"工程":c2["工程"],
+                            "開始":f'{p2["開始日時"]} → {c2["開始日時"]}',
+                            "終了":f'{p2["終了日時"]} → {c2["終了日時"]}',
+                            "製造量(cs)":f'{p2["製造量(cs)"]} → {c2["製造量(cs)"]}'})
                 if diff_rows:
                     diff_df=pd.DataFrame(diff_rows)
                     def _dfs(r):
@@ -2317,4 +2322,76 @@ elif pg == "🏗️ 製造スケジューラー":
                         if "削除" in d: return ['background-color:#FEE2E2;text-decoration:line-through;']*len(r)
                         if "変更" in d: return ['background-color:#FEF3C7;']*len(r)
                         return ['']*len(r)
-                    st.dataframe(diff_df.style.apply(_dfs,axis=1),hide_index=True,
+                    st.dataframe(diff_df.style.apply(_dfs,axis=1),hide_index=True,use_container_width=True)
+                    st.caption(f"追加:{len(added)}件  削除:{len(removed)}件  変更:{len([r for r in diff_rows if '変更' in r['変更区分']])}件")
+                else:
+                    st.markdown('<div class="ok-banner">✅ 選択した確定版と現在のスケジュールに差分はありません。</div>',unsafe_allow_html=True)
+        else:
+            st.info("確定済みスケジュールがないため比較できません。まずスケジュールを確定保存してください。")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # タブ10：パラメータ設定（マスタ拡張列）
+    # ══════════════════════════════════════════════════════════════════════
+    with T10:
+        st.markdown('<div class="section-title">⚙️ 製品別 製造パラメータ設定</div>',unsafe_allow_html=True)
+        st.markdown("""<div class="info-tip">
+        💡 <b>入力ガイド：</b>生産量=cs/h。歩留まり=90〜98%程度。LT=調合・仕込み前処理時間(h)。
+        段取りタイプ=段取りマトリクスとの照合キー（空欄=製品名から自動判定）。
+        工程比率は合計が100%になるよう設定（空欄=自動按分）。最小製造ロット=ロット単位cs数。
+        </div>""",unsafe_allow_html=True)
+        if mst.empty:
+            st.warning("製品マスタが未登録です。「⚙️ マスタ・分析」から登録してください。")
+        else:
+            base_c=["製品名","大カテゴリ","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]
+            ext_c=["段取りタイプ","ラインID","最小製造ロット",
+                   "調合比率","成形比率","包装比率","レトルト比率",
+                   "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"]
+            for ec in ext_c:
+                if ec not in mst.columns: mst[ec]=""
+            pc=[c for c in base_c+ext_c if c in mst.columns]
+            ep=st.data_editor(mst[pc].copy(),hide_index=True,use_container_width=True,
+                height=min(600,len(mst)*38+60),
+                column_config={
+                    "製品名":st.column_config.TextColumn(disabled=True),
+                    "大カテゴリ":st.column_config.TextColumn("カテゴリ",disabled=True),
+                    "時間あたり生産量":st.column_config.NumberColumn("生産量(cs/h)",min_value=1,step=1,format="%d"),
+                    "歩留まり率":st.column_config.NumberColumn("歩留まり(%)",min_value=1,max_value=100,step=1,format="%d"),
+                    "リードタイム時間":st.column_config.NumberColumn("LT準備(h)",min_value=0,step=1,format="%d"),
+                    "安全在庫数":st.column_config.NumberColumn("安全在庫(cs)",min_value=0,step=1,format="%d"),
+                    "段取りグループ":st.column_config.TextColumn("段取りG"),
+                    "段取りタイプ":st.column_config.SelectboxColumn("段取りタイプ",
+                        options=["","黒","白","糸","板","玉","三角","ダイス","冷凍","その他"]),
+                    "ラインID":st.column_config.TextColumn("ラインID"),
+                    "最小製造ロット":st.column_config.NumberColumn("最小ロット(cs)",min_value=1,step=1,format="%d"),
+                    "調合比率":st.column_config.NumberColumn("調合比率(%)",min_value=0,max_value=100,step=5,format="%d"),
+                    "成形比率":st.column_config.NumberColumn("成形比率(%)",min_value=0,max_value=100,step=5,format="%d"),
+                    "包装比率":st.column_config.NumberColumn("包装比率(%)",min_value=0,max_value=100,step=5,format="%d"),
+                    "レトルト比率":st.column_config.NumberColumn("レトルト比率(%)",min_value=0,max_value=100,step=5,format="%d"),
+                    "最少人員_調合":st.column_config.NumberColumn("最少人員/調合",min_value=1,step=1,format="%d"),
+                    "最少人員_成形":st.column_config.NumberColumn("最少人員/成形",min_value=1,step=1,format="%d"),
+                    "最少人員_包装":st.column_config.NumberColumn("最少人員/包装",min_value=1,step=1,format="%d"),
+                    "最少人員_レトルト":st.column_config.NumberColumn("最少人員/冷却",min_value=1,step=1,format="%d"),
+                    "キーマン必要":st.column_config.SelectboxColumn("キーマン必要",options=["TRUE","FALSE"]),
+                })
+            _pm_msg=st.empty()
+            if st.button("💾 パラメータを保存",type="primary",use_container_width=True,key="v3_save_param"):
+                um=mst.copy()
+                for ec in ext_c:
+                    if ec not in um.columns: um[ec]=""
+                for c in [col for col in base_c[2:]+ext_c if col in ep.columns and col in um.columns]:
+                    try: um[c]=ep.set_index("製品名").reindex(um["製品名"])[c].values
+                    except: pass
+                save_sync("master",um)
+                flash("success","✅ 製造パラメータを保存しました。"); st.rerun()
+            show_flash_inline(_pm_msg)
+
+            # 段取りマトリクス参照
+            st.markdown('<div class="section-title">🧩 現在の段取りマトリクス（参照）</div>',unsafe_allow_html=True)
+            if not _cdf.empty:
+                def _co_sty(r):
+                    if str(r.get("コンタミリスク","")).upper()=="TRUE":
+                        return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
+                    return ['']*len(r)
+                st.dataframe(_cdf.style.apply(_co_sty,axis=1),hide_index=True,use_container_width=True)
+            else:
+                st.info("段取りマトリクスは上部「🧩 段取りマトリクス設定」エクスパンダーから登録してください。")
