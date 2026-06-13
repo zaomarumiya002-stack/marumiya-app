@@ -362,9 +362,8 @@ if pg == "📋 受注登録":
     pr = mst_u[mst_u["製品名"]==prod] if not mst_u.empty and prod else pd.DataFrame()
     spf = str(pr.iloc[0].get("特注フラグ","")).upper() in ["TRUE","1","YES"] if not pr.empty else False
     chf = str(pr.iloc[0].get("チャーターフラグ","")).upper() in ["TRUE","1","YES"] if not pr.empty else False
-    stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))
-    
- kbn, nyu, kou = pui(prod)
+    stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))    
+kbn, nyu, kou = pui(prod)
     if kbn == "袋":
         qty = st.number_input("📦 数量（袋）", min_value=1, step=1, value=None)
     elif kbn == "甲":
