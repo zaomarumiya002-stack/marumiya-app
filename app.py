@@ -324,7 +324,7 @@ if not pk_m.empty:
             "入庫":0, "出庫":0, "現在庫":0
         }
 
-for d in p_sum.values(): pf.setdefault(d, {}) # pfの初期化(空回避用)
+for pn in p_sum.keys(): pf.setdefault(pn, {}) # pfの初期化(空回避用)
 
 # 3. 入出庫および過去30日の日別消費計算
 past_30_days = today - timedelta(days=30)
