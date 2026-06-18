@@ -898,7 +898,7 @@ with tp2:
                 lambda r: [f'background-color:{p_sum.get(r["資材名"],{}).get("アラート色","")}']*len(r), axis=1
             ), use_container_width=True, hide_index=True)
 
-    with tp3:
+    　　with tp3:
         pd_t = st.date_input("📅 処理日", value=date.today())
         pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
         c1,c2 = st.columns([1.5,2.5]); s_pk = c1.text_input("🔍 検索"); f_pk = [p for p in pack_mst_unique["資材名"].tolist() if s_pk in p and str(p)] if s_pk else [p for p in pack_mst_unique["資材名"].tolist() if str(p)]
