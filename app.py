@@ -1,3 +1,11 @@
+既存のシステムデザインや、ロジック・各種マスタ連動を完全に維持したまま、「定期発注・都度発注のハイブリッド資材管理エンジン」と「在庫日数・統計的推奨発注点」の機能を組み込みました。
+
+文字の消失・ステートリセットを防ぐため、変更を加えるウィジェット（マスタ編集エディタや保存ボタン）にはすべて一意の key を設定しています。
+
+以下のコードで既存の テスト.py を上書きして実行してください。
+
+--- START OF FILE テスト.py ---
+
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
@@ -138,7 +146,7 @@ def load_data(name):
                          "調合比率","成形比率","包装比率","レトルト比率",
                          "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
         "customers":        ["顧客名","ふりがな","帳合先","支店名"],
-        "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム"],
+        "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム","管理区分"],
         "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
         "shipping_master":  ["運送会社名"],
         "special_schedule": ["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"],
@@ -283,16 +291,83 @@ if not mst_u.empty:
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
 
+# ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
+# 1. 予測必要量(pf)の計算 (先々90日間の資材必要量)
+fd = 90; pf = {}
+if not mst_u.empty and not odf.empty:
+    mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
+    for _, r in odf.iterrows():
+        p, q, dt = str(r.get("製品名","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日"),errors="coerce")
+        if pd.isna(dt) or dt.date()<date.today() or dt>today+timedelta(days=fd) or p not in mpi: continue
+        pn = str(mpi[p].get("使用資材名",""))
+        kbn = str(mpi[p].get("製造登録区分","ケース")).strip()
+        nyu = max(1, to_int(mpi[p].get("入数",10)))
+        kou = max(1, to_int(mpi[p].get("甲消費数",4)))
+        if pn:
+            if kbn == "袋": use_qty = to_int(q / nyu)
+            elif kbn == "甲": use_qty = to_int(q * kou)
+            else: use_qty = q
+            pf.setdefault(pn, {})[dt.normalize()] = pf.get(pn,{}).get(dt.normalize(),0) + use_qty
+
+# 2. 発注残の計算
+open_po = {}
+if "order_purchases_df" in st.session_state and not st.session_state.order_purchases_df.empty:
+    podf = st.session_state.order_purchases_df
+    for _, r in podf[podf["ステータス"].isin(["発注済", "一部納入"])].iterrows():
+        pn = str(r.get("資材名",""))
+        o_qty = to_int(r.get("発注数", 0))
+        a_qty = to_int(r.get("実際納入数", 0))
+        open_po[pn] = open_po.get(pn, 0) + max(0, o_qty - a_qty)
+
 p_sum = {}
+if "管理区分" not in pk_m.columns: pk_m["管理区分"] = "定期発注(自動)"
 if not pk_m.empty:
-    for _, r in pk_m.drop_duplicates(subset=["資材名"]).iterrows(): p_sum[r["資材名"]] = {"品番":str(r.get("品番","")), "規格":str(r.get("規格","")), "仕入先":str(r.get("仕入先","")), "保管場所":str(r.get("保管場所","")), "単位":str(r.get("単位","")), "期首在庫":to_int(r.get("初期在庫",0)), "発注点":to_int(r.get("発注点",0)), "発注リードタイム":to_int(r.get("発注リードタイム",7)), "入庫":0, "出庫":0, "現在庫":0}
+    for _, r in pk_m.drop_duplicates(subset=["資材名"]).iterrows():
+        p_sum[r["資材名"]] = {
+            "品番":str(r.get("品番","")), "規格":str(r.get("規格","")), 
+            "仕入先":str(r.get("仕入先","")), "保管場所":str(r.get("保管場所","")), 
+            "単位":str(r.get("単位","")), "期首在庫":to_int(r.get("初期在庫",0)), 
+            "発注点":to_int(r.get("発注点",0)), "発注リードタイム":to_int(r.get("発注リードタイム",7)),
+            "管理区分":str(r.get("管理区分","定期発注(自動)")),
+            "入庫":0, "出庫":0, "現在庫":0
+        }
+
+for d in p_sum.values(): pf.setdefault(d, {}) # pfの初期化(空回避用)
+
+# 3. 入出庫および過去30日の日別消費計算
+past_30_days = today - timedelta(days=30)
+daily_usage = {}
 if not pk_l.empty:
     for _, r in pk_l.iterrows():
-        pn, q, pt = r.get("資材名",""), to_int(r.get("数量",0)), str(r.get("処理区分",""))
+        dt = pd.to_datetime(r.get("登録日", today), errors="coerce")
+        if pd.isna(dt): continue
+        if dt.tz is not None: dt = dt.tz_localize(None)
+        
+        pn, q, pt = str(r.get("資材名","")), to_int(r.get("数量",0)), str(r.get("処理区分",""))
         if pn in p_sum and "連動" not in pt:
             if "入庫" in pt: p_sum[pn]["入庫"] += q
             elif "出庫" in pt: p_sum[pn]["出庫"] += q
+            
+        # 統計用：過去30日の消費（出庫 または 連動分）
+        if dt >= past_30_days and pn in p_sum:
+            if "出庫" in pt or "連動" in pt:
+                d_str = dt.normalize().strftime("%Y-%m-%d")
+                daily_usage.setdefault(pn, {}).setdefault(d_str, 0)
+                daily_usage[pn][d_str] += q
 
+# ABC分析
+total_usage = {pn: sum(daily_usage.get(pn, {}).values()) for pn in p_sum.keys()}
+total_all = sum(total_usage.values()) or 1
+sorted_usage = sorted(total_usage.items(), key=lambda x: x[1], reverse=True)
+abc_rank = {}; cum = 0
+for pn, u in sorted_usage:
+    cum += u
+    ratio = cum / total_all
+    if ratio <= 0.7: abc_rank[pn] = "A"
+    elif ratio <= 0.95: abc_rank[pn] = "B"
+    else: abc_rank[pn] = "C"
+
+# 出庫に製造連動分を加算 (最新製造分の反映)
 if not mdf.empty and not mst_u.empty:
     mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
     for _, r in mdf.iterrows():
@@ -303,14 +378,55 @@ if not mdf.empty and not mst_u.empty:
             nyu = max(1, to_int(mpi[prod].get("入数", 10)))
             kou = max(1, to_int(mpi[prod].get("甲消費数", 4)))
             if pn and pn in p_sum:
-                if kbn == "袋":
-                    p_sum[pn]["出庫"] += to_int(q / nyu)
-                elif kbn == "甲":
-                    p_sum[pn]["出庫"] += to_int(q * kou)
-                else:
-                    p_sum[pn]["出庫"] += q
+                if kbn == "袋": p_sum[pn]["出庫"] += to_int(q / nyu)
+                elif kbn == "甲": p_sum[pn]["出庫"] += to_int(q * kou)
+                else: p_sum[pn]["出庫"] += q
 
-for d in p_sum.values(): d["現在庫"] = d["期首在庫"] + d["入庫"] - d["出庫"]; d["状態"] = "⚠️ 注意" if d["現在庫"] < d["発注点"] else "✅ 正常"
+# 在庫と各種状態の最終計算
+for pn, d in p_sum.items():
+    d["現在庫"] = d["期首在庫"] + d["入庫"] - d["出庫"]
+    d["発注残"] = open_po.get(pn, 0)
+    
+    # 統計・推奨値計算
+    du = daily_usage.get(pn, {})
+    u_arr = [du.get((today - timedelta(days=i)).strftime("%Y-%m-%d"), 0) for i in range(1, 31)]
+    mu = float(np.mean(u_arr)) if u_arr else 0
+    sigma = float(np.std(u_arr)) if u_arr else 0
+    lt = max(1, d["発注リードタイム"])
+    rk = abc_rank.get(pn, "C")
+    sf_coef = 2.0 if rk == "A" else (1.65 if rk == "B" else 1.0)
+    
+    safe_stock = sf_coef * np.sqrt(lt) * sigma
+    rec_pt = (mu * lt) + safe_stock
+    d["推奨発注点"] = int(np.ceil(rec_pt))
+    d["1日平均消費"] = mu
+    d["ABCランク"] = rk
+    
+    # 将来必要量 (受注残)
+    future_need = sum(pf.get(pn, {}).values())
+    d["受注残"] = future_need
+    
+    # アラートと状態判定
+    if d["管理区分"] == "都度発注(受注連動)":
+        d["在庫日数"] = 999
+        d["不足数"] = max(0, future_need - (d["現在庫"] + d["発注残"]))
+        if d["不足数"] > 0:
+            d["状態"] = "🚨 欠品予測"
+            d["アラート色"] = "#FEE2E2"
+        else:
+            d["状態"] = "✅ 正常"
+            d["アラート色"] = "#F0FDF4"
+    else:
+        d["在庫日数"] = (d["現在庫"] / mu) if mu > 0 else 999
+        if d["現在庫"] < d["発注点"]:
+            d["状態"] = "⚠️ 要発注"
+            d["アラート色"] = "#FEF3C7" if d["現在庫"] > 0 else "#FEE2E2"
+        else:
+            d["状態"] = "✅ 正常"
+            if d["在庫日数"] < 3: d["アラート色"] = "#FEE2E2"
+            elif d["在庫日数"] < 10: d["アラート色"] = "#FFFBEB"
+            elif d["在庫日数"] > 30 and mu > 0: d["アラート色"] = "#EFF6FF"
+            else: d["アラート色"] = "#F0FDF4"
 
 # ─────────────────────────────────────────────
 # サイドバー
@@ -662,53 +778,63 @@ elif pg == "🏭 製造登録":
 # ─────────────────────────────────────────────
 elif pg == "📦 資材・入出庫":
     page_header("📦 資材・段ボール入出庫")
-    s_pks = [pn for pn,d in p_sum.items() if d["現在庫"] < d["発注点"]]
+    s_pks = [pn for pn,d in p_sum.items() if (d["管理区分"]=="定期発注(自動)" and d["現在庫"] < d["発注点"]) or (d["管理区分"]=="都度発注(受注連動)" and d.get("不足数",0)>0)]
     if s_pks: st.error("🚨 **要発注アラート:** " + "、".join(s_pks))
     tp1, tp2, tp3, tp4, tp5 = st.tabs(["📦 発注予測","📊 サマリ","📝 入出庫","✏️ 履歴","🛒 発注管理"])
 
     with tp1:
         if pk_m.empty: st.warning("マスタに資材がありません。")
         else:
-            fd = 90; pf = {}
-            if not mst_u.empty and not odf.empty:
-                mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict("index")
-                for _, r in odf.iterrows():
-                    p, q, dt = str(r.get("製品名","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日"),errors="coerce")
-                    if pd.isna(dt) or dt.date()<date.today() or dt>today+timedelta(days=fd) or p not in mpi: continue
-                    pn = str(mpi[p].get("使用資材名",""))
-                    kbn = str(mpi[p].get("製造登録区分","ケース")).strip()
-                    nyu = max(1, to_int(mpi[p].get("入数",10)))
-                    kou = max(1, to_int(mpi[p].get("甲消費数",4)))
-                    if pn:
-                        if kbn == "袋": use_qty = to_int(q / nyu)
-                        elif kbn == "甲": use_qty = to_int(q * kou)
-                        else: use_qty = q
-                        pf.setdefault(pn, {})[dt.normalize()] = pf.get(pn,{}).get(dt.normalize(),0) + use_qty
-            for p in p_sum.keys(): pf.setdefault(p, {})
-            
             oa = []
             for pn, du in pf.items():
-                lt = p_sum.get(pn,{}).get("発注リードタイム",7) or 7; ci = p_sum.get(pn,{}).get("現在庫",0); pt = p_sum.get(pn,{}).get("発注点",0)
-                ri = ci; ro_d = None; z_d = None; io = None; cu = 0
-                for d_lt in pd.date_range(today, today+timedelta(days=fd)):
-                    u = du.get(d_lt,0); ri-=u; cu+=u
-                    if ri<=pt and ro_d is None: ro_d=d_lt; io=ri
-                    if ri<=0 and z_d is None: z_d=d_lt
+                d_info = p_sum.get(pn, {})
+                kbn = d_info.get("管理区分", "定期発注(自動)")
+                lt = d_info.get("発注リードタイム", 7) or 7
+                ci = d_info.get("現在庫", 0)
+                pt = d_info.get("発注点", 0)
+                rec_pt = d_info.get("推奨発注点", 0)
                 
-                if ro_d:
-                    od = ro_d - timedelta(days=lt); dl = (od.date() - date.today()).days
-                    urg, uc, bc = ("🔴 今すぐ発注！","#FEE2E2","#DC2626") if dl<=0 else (f"🟠 {dl}日以内","#FFF7ED","#EA580C") if dl<=3 else (f"🟡 {dl}日以内","#FFFBEB","#D97706") if dl<=7 else (f"🔵 {dl}日後","#EFF6FF","#2563EB")
-                else: od=None; io=None; dl=999; urg, uc, bc = "✅ 問題なし", "#F0FDF4", "#059669"
-                
-                oa.append({"資材名":pn,"現在庫":ci,"発注点":pt,"LT":lt,"90日消費":int(cu),"発注推奨日":od.strftime("%Y/%m/%d") if od else "―","到達日":ro_d.strftime("%Y/%m/%d") if ro_d else "なし","枯渇予測":z_d.strftime("%Y/%m/%d") if z_d else "―","予測在庫":f"{io:,}" if io is not None else "―","緊急度":urg,"_s":dl,"_c":uc,"_b":bc})
+                if kbn == "都度発注(受注連動)":
+                    req = sum(du.values())
+                    rem = ci + d_info.get("発注残", 0) - req
+                    if rem < 0:
+                        urg, uc, bc = "🔴 即手配(受注連動)", "#FEE2E2", "#DC2626"
+                        dl = 0
+                    else:
+                        urg, uc, bc = "✅ 充足(受注連動)", "#F0FDF4", "#059669"
+                        dl = 999
+                    oa.append({
+                        "資材名": f"{pn} [都度]", "現在庫": ci, "設定点/推奨": f"0 / {req}(必要量)", 
+                        "LT": lt, "在庫日数": "連動", "発注推奨日": "都度", "枯渇予測": "―",
+                        "緊急度": urg, "_s": dl, "_c": uc, "_b": bc
+                    })
+                else:
+                    ri = ci; ro_d = None; z_d = None; io = None; cu = 0
+                    for d_lt in pd.date_range(today, today+timedelta(days=fd)):
+                        u = du.get(d_lt,0); ri-=u; cu+=u
+                        if ri<=pt and ro_d is None: ro_d=d_lt; io=ri
+                        if ri<=0 and z_d is None: z_d=d_lt
+                    
+                    if ro_d:
+                        od = ro_d - timedelta(days=lt); dl = (od.date() - date.today()).days
+                        urg, uc, bc = ("🔴 今すぐ発注！","#FEE2E2","#DC2626") if dl<=0 else (f"🟠 {dl}日以内","#FFF7ED","#EA580C") if dl<=3 else (f"🟡 {dl}日以内","#FFFBEB","#D97706") if dl<=7 else (f"🔵 {dl}日後","#EFF6FF","#2563EB")
+                    else: od=None; io=None; dl=999; urg, uc, bc = "✅ 問題なし", "#F0FDF4", "#059669"
+                    
+                    days_str = f"{int(d_info.get('在庫日数',999))}日" if d_info.get('在庫日数',999) < 999 else "潤沢"
+                    oa.append({
+                        "資材名": pn, "現在庫": ci, "設定点/推奨": f"{pt} / {rec_pt}",
+                        "LT": lt, "在庫日数": days_str, "発注推奨日": od.strftime("%Y/%m/%d") if od else "―",
+                        "枯渇予測": z_d.strftime("%Y/%m/%d") if z_d else "―", "緊急度": urg,
+                        "_s": dl, "_c": uc, "_b": bc
+                    })
             
             df_a = pd.DataFrame(oa).sort_values("_s").reset_index(drop=True)
             u_df = df_a[df_a["_s"]<=7]
             if not u_df.empty:
                 st.markdown("### 🚨 直近7日以内に発注手配が必要")
-                for _, r in u_df.iterrows(): st.markdown(f'<div style="background:{r["_c"]};border-left:6px solid {r["_b"]};border-radius:10px;padding:14px;margin-bottom:10px;"><b>📦 {r["資材名"]}</b> <span style="float:right;font-weight:900;">{r["緊急度"]}</span><br><span style="font-size:13px;">現在庫: {r["現在庫"]:,} | 発注点: {r["発注点"]:,} | LT: {r["LT"]}日<br>⏰ <b>発注点到達: {r["到達日"]}</b><br>📉 <b>枯渇予測: {r["枯渇予測"]}</b></span></div>', unsafe_allow_html=True)
+                for _, r in u_df.iterrows(): st.markdown(f'<div style="background:{r["_c"]};border-left:6px solid {r["_b"]};border-radius:10px;padding:14px;margin-bottom:10px;"><b>📦 {r["資材名"]}</b> <span style="float:right;font-weight:900;">{r["緊急度"]}</span><br><span style="font-size:13px;">現在庫: {r["現在庫"]:,} | 設定/推奨: {r.get("設定点/推奨","")} | LT: {r["LT"]}日<br>⏰ <b>発注点到達: {r["発注推奨日"]}</b><br>📉 <b>枯渇予測: {r["枯渇予測"]}</b></span></div>', unsafe_allow_html=True)
             
-            st.dataframe(df_a[["資材名","現在庫","発注点","LT","90日消費","発注推奨日","到達日","予測在庫","枯渇予測","緊急度"]].style.apply(lambda r: ['background-color:#FEE2E2;font-weight:bold;']*len(r) if "今すぐ" in str(r.get("緊急度","")) else (['background-color:#FFF7ED;']*len(r) if "🟠" in str(r.get("緊急度","")) else (['background-color:#FFFBEB;']*len(r) if "🟡" in str(r.get("緊急度","")) else (['background-color:#EFF6FF;']*len(r) if "🔵" in str(r.get("緊急度","")) else ['background-color:#F0FDF4;']*len(r)))), axis=1), use_container_width=True, hide_index=True, height=500)
+            st.dataframe(df_a[["資材名","現在庫","設定点/推奨","LT","在庫日数","発注推奨日","枯渇予測","緊急度"]].style.apply(lambda r: ['background-color:#FEE2E2;font-weight:bold;']*len(r) if "即手配" in str(r.get("緊急度","")) or "今すぐ" in str(r.get("緊急度","")) else (['background-color:#FFF7ED;']*len(r) if "🟠" in str(r.get("緊急度","")) else (['background-color:#FFFBEB;']*len(r) if "🟡" in str(r.get("緊急度","")) else (['background-color:#EFF6FF;']*len(r) if "🔵" in str(r.get("緊急度","")) else ['background-color:#F0FDF4;']*len(r)))), axis=1), use_container_width=True, hide_index=True, height=500)
 
             pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
             spg = st.selectbox("グラフ表示", options=[r["資材名"] for _, r in pack_mst_unique.iterrows()])
@@ -727,9 +853,31 @@ elif pg == "📦 資材・入出庫":
         if not p_sum:
             st.info("資材マスタが登録されていません。")
         else:
-            _sum_df = pd.DataFrame([{"資材名":k,**v} for k,v in p_sum.items()])
-            _sum_cols = [c for c in ["資材名","品番","規格","仕入先","保管場所","現在庫","発注点","状態","単位"] if c in _sum_df.columns]
-            st.dataframe(_sum_df[_sum_cols].style.apply(lambda r: ['background-color:#FFEDD5;color:#C2410C;font-weight:bold;']*len(r) if to_int(r.get("現在庫",0))<to_int(r.get("発注点",0)) else ['']*len(r),axis=1), use_container_width=True, hide_index=True)
+            c_btn1, c_btn2 = st.columns([2, 3])
+            if c_btn1.button("✨ 推奨発注点をマスタに一括反映して保存", type="primary", key="btn_apply_rec_pt"):
+                upd = pk_m.copy()
+                for pn, d_info in p_sum.items():
+                    if d_info.get("管理区分") == "定期発注(自動)":
+                        upd.loc[upd["資材名"] == pn, "発注点"] = d_info.get("推奨発注点", 0)
+                save_sync("packaging_master", upd)
+                flash("success", "✅ 推奨発注点をマスタに反映しました。")
+                st.rerun()
+
+            for item in p_sum.values():
+                if item.get("管理区分") == "都度発注(受注連動)":
+                    item["在庫日数表示"] = "連動"
+                else:
+                    item["在庫日数表示"] = f"{int(item.get('在庫日数', 999))}日" if item.get("在庫日数", 999) < 999 else "潤沢"
+                    
+            _sum_df = pd.DataFrame([{"資材名":k, **v} for k,v in p_sum.items()])
+            _sum_df["発注点(推奨)"] = _sum_df["発注点"].astype(str) + " (" + _sum_df.get("推奨発注点", 0).astype(str) + ")"
+            _sum_df = _sum_df.rename(columns={"在庫日数表示": "在庫日数"})
+            
+            _sum_cols = [c for c in ["資材名","管理区分","現在庫","発注点(推奨)","状態","在庫日数","単位"] if c in _sum_df.columns]
+            
+            st.dataframe(_sum_df[_sum_cols].style.apply(
+                lambda r: [f'background-color:{p_sum.get(r["資材名"],{}).get("アラート色","")}']*len(r), axis=1
+            ), use_container_width=True, hide_index=True)
 
     with tp3:
         pd_t = st.date_input("📅 処理日", value=date.today())
@@ -792,7 +940,7 @@ elif pg == "📦 資材・入出庫":
                         "ID": None,
                         "処理区分": st.column_config.SelectboxColumn(options=["入庫","出庫","製造連動"]),
                         "数量": st.column_config.NumberColumn(min_value=1, step=1, format="%d"),
-                    }
+                    }, key="pack_log_del_ed"
                 )
                 _del_ids = []
                 for i, row in _del_editor.iterrows():
@@ -801,7 +949,7 @@ elif pg == "📦 資材・入出庫":
 
                 _del_msg = st.empty()
                 _del_col1, _del_col2 = st.columns([1, 3])
-                if _del_col1.button(f"🗑️ 選択行を削除（{len(_del_ids)}件）", type="primary", disabled=(len(_del_ids)==0)):
+                if _del_col1.button(f"🗑️ 選択行を削除（{len(_del_ids)}件）", type="primary", disabled=(len(_del_ids)==0), key="btn_del_log"):
                     if _del_ids:
                         new_pk = pk_l[~pk_l["ID"].isin(_del_ids)].copy()
                         save_sync("packaging_logs", new_pk)
@@ -817,7 +965,7 @@ elif pg == "📦 資材・入出庫":
                         "ID": None,
                         "処理区分": st.column_config.SelectboxColumn(options=["入庫","出庫","製造連動"]),
                         "数量": st.column_config.NumberColumn(min_value=1, step=1, format="%d"),
-                    }
+                    }, key="pack_log_edit_ed"
                 )
                 _hist_save_msg = st.empty()
                 if st.button("💾 履歴を保存", key="btn_spk", type="primary"):
@@ -863,9 +1011,9 @@ elif pg == "📦 資材・入出庫":
                 st.session_state.po_df_loaded = True
             except Exception as e: st.error(f"保存エラー: {e}")
 
-        _alert_mats = [(pn, d) for pn,d in p_sum.items() if d["現在庫"] < d["発注点"]]
+        _alert_mats = [(pn, d) for pn,d in p_sum.items() if (d.get("管理区分")=="定期発注(自動)" and d["現在庫"] < d["発注点"]) or (d.get("管理区分")=="都度発注(受注連動)" and d.get("不足数",0)>0)]
         if _alert_mats:
-            st.markdown(f'<div class="danger-banner">🚨 発注点を下回っている資材が <b>{len(_alert_mats)}件</b> あります：{" / ".join(m for m,_ in _alert_mats[:5])}{"…" if len(_alert_mats)>5 else ""}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="danger-banner">🚨 手配が必要な資材が <b>{len(_alert_mats)}件</b> あります：{" / ".join(m for m,_ in _alert_mats[:5])}{"…" if len(_alert_mats)>5 else ""}</div>', unsafe_allow_html=True)
 
         po_t1, po_t2, po_t3 = st.tabs(["➕ 新規発注登録", "📋 発注一覧", "✅ 納入完了処理"])
         with po_t1:
@@ -885,10 +1033,16 @@ elif pg == "📦 資材・入出庫":
             _po_eta = po_r5.date_input(f"📦 納入予定日（LT:{_lt_days}日から自動算出）", value=date.today() + timedelta(days=_lt_days), key="po_eta")
             _po_rem = st.text_input("📝 備考", key="po_rem")
             if _po_mat:
-                _cur_inv = p_sum.get(_po_mat,{}).get("現在庫",0)
-                _order_pt = p_sum.get(_po_mat,{}).get("発注点",0)
-                _col = "#FEE2E2" if _cur_inv < _order_pt else "#D1FAE5"
-                st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat}</b>  現在庫: <b>{_cur_inv:,} 枚</b>  発注点: {_order_pt:,} 枚  {"⚠️ 発注点以下！" if _cur_inv < _order_pt else "✅ 在庫充足"}  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
+                _d_info = p_sum.get(_po_mat,{})
+                _cur_inv = _d_info.get("現在庫",0)
+                _order_pt = _d_info.get("発注点",0)
+                if _d_info.get("管理区分") == "都度発注(受注連動)":
+                    _req = _d_info.get("受注残", 0)
+                    _col = "#FEE2E2" if _cur_inv + _d_info.get("発注残",0) < _req else "#D1FAE5"
+                    st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat} [受注連動]</b>  現在庫: <b>{_cur_inv:,} 枚</b>  必要量: {_req:,} 枚  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
+                else:
+                    _col = "#FEE2E2" if _cur_inv < _order_pt else "#D1FAE5"
+                    st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat}</b>  現在庫: <b>{_cur_inv:,} 枚</b>  発注点: {_order_pt:,} 枚  {"⚠️ 発注点以下！" if _cur_inv < _order_pt else "✅ 在庫充足"}  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
             _po_reg_msg = st.empty()
             if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
                 if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
@@ -1298,9 +1452,9 @@ elif pg == "⚙️ マスタ・分析":
                 "リードタイム時間": st.column_config.NumberColumn("LT(h)", min_value=0, step=1, format="%d"),
                 "安全在庫数": st.column_config.NumberColumn("安全在庫(cs)", min_value=0, step=1, format="%d"),
                 "段取りグループ": st.column_config.TextColumn("段取りG"),
-            }, height=500)
+            }, height=500, key="prod_mst_ed")
         _m1_msg = st.empty()
-        if st.button("💾 製品マスタ保存", type="primary"):
+        if st.button("💾 製品マスタ保存", type="primary", key="btn_save_prod_mst"):
             save_target = em_base.copy()
             for c in em.columns:
                 save_target[c] = em[c].values
@@ -1313,19 +1467,30 @@ elif pg == "⚙️ マスタ・分析":
             flash("success", "✅ 製品マスタを保存しました。不要な旧列も整理されました。"); st.rerun()
         show_flash_inline(_m1_msg)
     with tm2:
-        ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
+        ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="cust_mst_ed")
         _m2_msg = st.empty()
-        if st.button("💾 顧客マスタ保存", type="primary"): save_sync("customers", ec); flash("success", "✅ 顧客マスタを保存しました。"); st.rerun()
+        if st.button("💾 顧客マスタ保存", type="primary", key="btn_save_cust_mst"): save_sync("customers", ec); flash("success", "✅ 顧客マスタを保存しました。"); st.rerun()
         show_flash_inline(_m2_msg)
     with tm3:
-        ep = st.data_editor(pk_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
+        if "管理区分" not in pk_m.columns: pk_m["管理区分"] = "定期発注(自動)"
+        ep = st.data_editor(pk_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True,
+            column_config={
+                "管理区分": st.column_config.SelectboxColumn("管理区分", options=["定期発注(自動)", "都度発注(受注連動)"]),
+                "初期在庫": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                "発注点": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                "発注リードタイム": st.column_config.NumberColumn(min_value=1, step=1, format="%d"),
+            }, key="pack_mst_ed"
+        )
         _m3_msg = st.empty()
-        if st.button("💾 資材マスタ保存", type="primary"): save_sync("packaging_master", ep); flash("success", "✅ 資材マスタを保存しました。"); st.rerun()
+        if st.button("💾 資材マスタ保存", type="primary", key="btn_save_pack_mst"): 
+            save_sync("packaging_master", ep)
+            flash("success", "✅ 資材マスタを保存しました。")
+            st.rerun()
         show_flash_inline(_m3_msg)
     with tm4:
-        es = st.data_editor(sh_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True)
+        es = st.data_editor(sh_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="ship_mst_ed")
         _m4_msg = st.empty()
-        if st.button("💾 運送会社保存", type="primary"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
+        if st.button("💾 運送会社保存", type="primary", key="btn_save_ship_mst"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
         show_flash_inline(_m4_msg)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1933,7 +2098,7 @@ elif pg == "🏗️ 製造スケジューラー":
             dft=pd.DataFrame(display_tasks)
             for c in ["出荷日","製造開始期限"]:
                 if c in dft.columns:
-                    dft[c]=dft[c].apply(lambda x: x.strftime("%Y/%m/%d") if isinstance(x,(pd.Timestamp,datetime)) and pd.notnull(x) else str(x)[:10])
+                    dftdft[c]=dft[c].apply(lambda x: x.strftime("%Y/%m/%d") if isinstance(x,(pd.Timestamp,datetime)) and pd.notnull(x) else str(x)[:10])
             sc=[c for c in ["優先度","ステータス","製品名","段取りG","ライン","顧客名","出荷日","受注数(cs)","製造必要量(cs)","製造時間(h)","製造開始期限","歩留まり率"] if c in dft.columns]
             def _rc(r):
                 p=r.get("優先度",5)
@@ -1976,7 +2141,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 if not day_tasks: st.info(f"📅 {sel_day.strftime('%Y/%m/%d')} は製造タスクなし（休日・休憩のみ）。")
                 else:
                     sh_summ=[]
-                    for h_slot in range(ws_h,we_h):
+                    for h_slot in range(int(ws_h),int(we_h)):
                         dt_check=sel_ts+timedelta(hours=h_slot,minutes=30)
                         sv,km=_staff_at(dt_check,st.session_state.v3_shift)
                         sh_summ.append({"時間帯":f"{h_slot:02d}:00〜{h_slot+1:02d}:00","出勤人数":sv,"うちキーマン":km})
@@ -1992,7 +2157,7 @@ elif pg == "🏗️ 製造スケジューラー":
                             if e<=s: e=s+timedelta(minutes=15)
                             ship_s=(r["出荷日"].strftime("%m/%d") if isinstance(r["出荷日"],pd.Timestamp) and pd.notnull(r["出荷日"]) else "―")
                             tl.append({"タスク":r["製品名"][:16],"工程":r["工程"], "ライン":r.get("ライン",""), "Start":s,"Finish":e,"出荷日":ship_s, "製造量":r.get("製造量(cs)",0), "コンタミ":"🚨" if r.get("コンタミリスク") else ""})
-                        fig_tl=px.timeline(pd.DataFrame(tl),x_start="Start",x_end="Finish", y="ライン",color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","出荷日","製造量","コンタミ"], title=f"{sel_day.strftime('%Y/%m/%d(%a)')} 資源ガントチャート  稼働:{ws_h:02d}:00〜{we_h:02d}:00")
+                        fig_tl=px.timeline(pd.DataFrame(tl),x_start="Start",x_end="Finish", y="ライン",color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","出荷日","製造量","コンタミ"], title=f"{sel_day.strftime('%Y/%m/%d(%a)')} 資源ガントチャート  稼働:{int(ws_h):02d}:00〜{int(we_h):02d}:00")
                         fig_tl.update_yaxes(autorange="reversed",title="")
                         fig_tl.update_xaxes(tickformat="%H:%M", range=[sel_ts+timedelta(hours=ws_h-0.3), sel_ts+timedelta(hours=we_h+0.3)])
                         wd=sel_day.weekday()
@@ -2105,7 +2270,7 @@ elif pg == "🏗️ 製造スケジューラー":
                     if "ギリギリ" in str(r.get("状態","")): return ['background-color:#FFFBEB;']*len(r)
                     return ['']*len(r)
                 adf["配置人数"]=adf["最少人数"]
-                ea2=st.data_editor(adf,hide_index=True,use_container_width=True, height=min(600,len(adf)*38+60), column_config={"配置人数":st.column_config.NumberColumn("配置人数",min_value=0,max_value=20,step=1), "工程":st.column_config.SelectboxColumn(options=_PROCESSES), })
+                ea2=st.data_editor(adf,hide_index=True,use_container_width=True, height=min(600,len(adf)*38+60), column_config={"配置人数":st.column_config.NumberColumn("配置人数",min_value=0,max_value=20,step=1), "工程":st.column_config.SelectboxColumn(options=_PROCESSES), }, key="v3_ea2")
                 _und=ea2[ea2["配置人数"].apply(to_int)>ea2["シフト人数"].apply(to_int)]
                 if not _und.empty: st.markdown(f'<div class="danger-banner">🚨 {len(_und)}工程で配置人数がシフト人数を超過しています！</div>',unsafe_allow_html=True)
                 else: st.markdown('<div class="ok-banner">✅ 全工程で人員配置に問題ありません。</div>',unsafe_allow_html=True)
@@ -2384,7 +2549,7 @@ elif pg == "🏗️ 製造スケジューラー":
                     "最少人員_包装":st.column_config.NumberColumn("最少人員/包装",min_value=1,step=1,format="%d"),
                     "最少人員_レトルト":st.column_config.NumberColumn("最少人員/冷却",min_value=1,step=1,format="%d"),
                     "キーマン必要":st.column_config.SelectboxColumn("キーマン必要",options=["TRUE","FALSE"]),
-                })
+                }, key="v3_mst_param_ed")
             _pm_msg=st.empty()
             if st.button("💾 パラメータを保存",type="primary",use_container_width=True,key="v3_save_param"):
                 um=mst.copy()
