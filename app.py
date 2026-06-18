@@ -1,16 +1,3 @@
-度々のエラーでご不便をおかけして申し訳ありません。
-
-隠蔽された KeyError の原因は、「空のデータが存在したときに、存在しない辞書のキー（列）へ直接アクセスしようとしたこと」
-にあります。特に資材マスタが空だった場合や、特定の条件で DataFrame が空になった場合に
-df["列名"] や dict["キー"] が落ちてしまう箇所がいくつか存在していました。
-
-すべての辞書・DataFrameのアクセス箇所に .get() や if not df.empty:
-等の**安全装置（セーフガード）**を組み込んだ修正版のフルコードを作成しました。
-
-以下のコードで テスト.py を完全に上書きして実行してください。これで KeyError は解消されます。
-
---- START OF FILE テスト.py ---
-
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
