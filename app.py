@@ -860,6 +860,7 @@ elif pg == "📦 資材・入出庫":
                 flash("success", "✅ 推奨発注点をマスタに反映しました。")
                 st.rerun()
 
+            # 表示用テキストの生成
             for item in p_sum.values():
                 if item.get("管理区分") == "都度発注(受注連動)":
                     item["在庫日数表示"] = "連動"
@@ -870,19 +871,19 @@ elif pg == "📦 資材・入出庫":
             
             if not _sum_df.empty:
                 _sum_df["発注点(推奨)"] = _sum_df.get("発注点", 0).astype(str) + " (" + _sum_df.get("推奨発注点", 0).astype(str) + ")"
+                
+                # ★修正ポイント: 列の重複エラー(KeyError)を防ぐため、元の数値列を消してからリネームする
+                if "在庫日数" in _sum_df.columns:
+                    _sum_df = _sum_df.drop(columns=["在庫日数"])
                 _sum_df = _sum_df.rename(columns={"在庫日数表示": "在庫日数"})
                 
-                # 存在する列だけを抽出
                 _sum_cols = [c for c in ["資材名","管理区分","現在庫","発注点(推奨)","状態","在庫日数","単位"] if c in _sum_df.columns]
                 
-                # スタイル関数: pd.Seriesを返すことでPandasの要求仕様に完全対応させる
                 def _highlight_mat(row):
                     mat_name = row.get("資材名", "")
                     color = p_sum.get(mat_name, {}).get("アラート色", "")
-                    # rowの長さ（列数）と同じ長さのリストを作成
                     return [f"background-color: {color}" if color else ""] * len(row)
 
-                # 表示
                 st.dataframe(
                     _sum_df[_sum_cols].style.apply(_highlight_mat, axis=1), 
                     use_container_width=True, 
