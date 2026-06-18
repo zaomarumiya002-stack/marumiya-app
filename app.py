@@ -872,14 +872,17 @@ elif pg == "📦 資材・入出庫":
                 _sum_df["発注点(推奨)"] = _sum_df.get("発注点", 0).astype(str) + " (" + _sum_df.get("推奨発注点", 0).astype(str) + ")"
                 _sum_df = _sum_df.rename(columns={"在庫日数表示": "在庫日数"})
                 
+                # 存在する列だけを抽出
                 _sum_cols = [c for c in ["資材名","管理区分","現在庫","発注点(推奨)","状態","在庫日数","単位"] if c in _sum_df.columns]
                 
-                # 安全に色付けを行う関数
+                # スタイル関数: pd.Seriesを返すことでPandasの要求仕様に完全対応させる
                 def _highlight_mat(row):
                     mat_name = row.get("資材名", "")
                     color = p_sum.get(mat_name, {}).get("アラート色", "")
+                    # rowの長さ（列数）と同じ長さのリストを作成
                     return [f"background-color: {color}" if color else ""] * len(row)
 
+                # 表示
                 st.dataframe(
                     _sum_df[_sum_cols].style.apply(_highlight_mat, axis=1), 
                     use_container_width=True, 
@@ -887,7 +890,6 @@ elif pg == "📦 資材・入出庫":
                 )
             else:
                 st.info("表示できる資材データがありません。")
-
     with tp3:
         pd_t = st.date_input("📅 処理日", value=date.today())
         pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
