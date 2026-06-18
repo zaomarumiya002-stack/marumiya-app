@@ -846,7 +846,7 @@ elif pg == "📦 資材・入出庫":
                 fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
                 fig.update_layout(title=f"【{spg}】 在庫推移予測", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380); st.plotly_chart(fig, use_container_width=True)
 
-　　　　with tp2:
+with tp2:
         if not p_sum:
             st.info("資材マスタが登録されていません。")
         else:
