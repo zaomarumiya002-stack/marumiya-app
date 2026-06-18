@@ -846,7 +846,7 @@ elif pg == "📦 資材・入出庫":
                 fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
                 fig.update_layout(title=f"【{spg}】 在庫推移予測", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380); st.plotly_chart(fig, use_container_width=True)
 
-with tp2:
+    with tp2:
         if not p_sum:
             st.info("資材マスタが登録されていません。")
         else:
@@ -887,18 +887,8 @@ with tp2:
                 )
             else:
                 st.info("表示できる資材データがありません。")
-                    
-            _sum_df = pd.DataFrame([{"資材名":k, **v} for k,v in p_sum.items()])
-            _sum_df["発注点(推奨)"] = _sum_df.get("発注点", 0).astype(str) + " (" + _sum_df.get("推奨発注点", 0).astype(str) + ")"
-            _sum_df = _sum_df.rename(columns={"在庫日数表示": "在庫日数"})
-            
-            _sum_cols = [c for c in ["資材名","管理区分","現在庫","発注点(推奨)","状態","在庫日数","単位"] if c in _sum_df.columns]
-            
-            st.dataframe(_sum_df[_sum_cols].style.apply(
-                lambda r: [f'background-color:{p_sum.get(r["資材名"],{}).get("アラート色","")}']*len(r), axis=1
-            ), use_container_width=True, hide_index=True)
 
-    　　with tp3:
+    with tp3:
         pd_t = st.date_input("📅 処理日", value=date.today())
         pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
         c1,c2 = st.columns([1.5,2.5]); s_pk = c1.text_input("🔍 検索"); f_pk = [p for p in pack_mst_unique["資材名"].tolist() if s_pk in p and str(p)] if s_pk else [p for p in pack_mst_unique["資材名"].tolist() if str(p)]
