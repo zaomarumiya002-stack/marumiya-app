@@ -846,7 +846,7 @@ elif pg == "📦 資材・入出庫":
                 fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
                 fig.update_layout(title=f"【{spg}】 在庫推移予測", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380); st.plotly_chart(fig, use_container_width=True)
 
-    with tp2:
+with tp2:
         if not p_sum:
             st.info("資材マスタが登録されていません。")
         else:
@@ -865,6 +865,28 @@ elif pg == "📦 資材・入出庫":
                     item["在庫日数表示"] = "連動"
                 else:
                     item["在庫日数表示"] = f"{int(item.get('在庫日数', 999))}日" if item.get("在庫日数", 999) < 999 else "潤沢"
+                    
+            _sum_df = pd.DataFrame([{"資材名":k, **v} for k,v in p_sum.items()])
+            
+            if not _sum_df.empty:
+                _sum_df["発注点(推奨)"] = _sum_df.get("発注点", 0).astype(str) + " (" + _sum_df.get("推奨発注点", 0).astype(str) + ")"
+                _sum_df = _sum_df.rename(columns={"在庫日数表示": "在庫日数"})
+                
+                _sum_cols = [c for c in ["資材名","管理区分","現在庫","発注点(推奨)","状態","在庫日数","単位"] if c in _sum_df.columns]
+                
+                # 安全に色付けを行う関数
+                def _highlight_mat(row):
+                    mat_name = row.get("資材名", "")
+                    color = p_sum.get(mat_name, {}).get("アラート色", "")
+                    return [f"background-color: {color}" if color else ""] * len(row)
+
+                st.dataframe(
+                    _sum_df[_sum_cols].style.apply(_highlight_mat, axis=1), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
+            else:
+                st.info("表示できる資材データがありません。")
                     
             _sum_df = pd.DataFrame([{"資材名":k, **v} for k,v in p_sum.items()])
             _sum_df["発注点(推奨)"] = _sum_df.get("発注点", 0).astype(str) + " (" + _sum_df.get("推奨発注点", 0).astype(str) + ")"
