@@ -182,29 +182,74 @@ def load_data(name):
     except: return pd.DataFrame(columns=tc)
 
 def save_sync(name, df):
-    try: ws = sheet.worksheet(name)
-    except: ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
-    ws.clear(); ds = df.copy()
-    for col in ds.columns:
-        if pd.api.types.is_datetime64_any_dtype(ds[col]): ds[col] = ds[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('').replace('NaT','')
-        elif pd.api.types.is_bool_dtype(ds[col]): ds[col] = ds[col].astype(str).str.upper()
-        elif pd.api.types.is_numeric_dtype(ds[col]): ds[col] = ds[col].fillna(0).apply(to_int).astype(str)
-        else: ds[col] = ds[col].astype(str)
-    ws.update(values=[ds.columns.tolist()] + ds.fillna("").replace(["nan","None","NaT","NaN"],"").values.tolist(), range_name='A1')
-    st.cache_data.clear(); st.session_state[f"{name}_df"] = load_data(name)
+    # 【安全ガード】データが空の場合は保存を中止
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        st.warning(f"⚠️ {name} のデータが空のため、消失を防ぐために保存を中止しました。")
+        return
+
+    try:
+        ws = sheet.worksheet(name)
+        ws.clear()
+        
+        # 【修正】データをスプレッドシート用の文字列形式に変換
+        ds = df.copy()
+        for col in ds.columns:
+            # 日付型: datetime -> str (YYYY-MM-DD)
+            if pd.api.types.is_datetime64_any_dtype(ds[col]):
+                ds[col] = ds[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+            # bool型: True/False -> "TRUE"/"FALSE"
+            elif pd.api.types.is_bool_dtype(ds[col]):
+                ds[col] = ds[col].astype(str).str.upper()
+            # 数値型: nanを0に変換してから文字列へ
+            elif pd.api.types.is_numeric_dtype(ds[col]):
+                ds[col] = ds[col].fillna(0).astype(str)
+            # その他: 全て文字列へ
+            else:
+                ds[col] = ds[col].fillna('').astype(str)
+        
+        # 空文字以外の "nan", "None", "NaT" を除去
+        ds = ds.replace(["nan", "None", "NaT", "NaN"], "")
+        
+        # リストに変換して更新
+        ws.update(values=[ds.columns.tolist()] + ds.values.tolist(), range_name='A1')
+        
+        st.cache_data.clear()
+        st.session_state[f"{name}_df"] = df
+        st.success(f"✅ {name} を正常に保存しました。")
+    except Exception as e:
+        st.error(f"保存処理中にエラーが発生しました: {str(e)}")
+        # 詳細なログ出力
+        st.write("発生箇所のDF情報:")
+        st.write(df.dtypes)
 
 def app_sync(name, nr):
-    try: ws = sheet.worksheet(name)
-    except: ws = sheet.add_worksheet(title=name, rows="1000", cols="30"); ws.append_row(nr.columns.tolist())
-    rc = nr.copy(); ec = pd.DataFrame(ws.get("A1:Z1")).values[0].tolist() if len(ws.get("A1:Z1"))>0 else []
-    for c in rc.columns:
-        if c not in ec: ec.append(c)
-    rc = rc.reindex(columns=ec, fill_value="")
-    for col in rc.columns:
-        if pd.api.types.is_datetime64_any_dtype(rc[col]): rc[col] = rc[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('').replace('NaT','')
-        elif pd.api.types.is_bool_dtype(rc[col]): rc[col] = rc[col].astype(str).str.upper()
-    ws.append_row(rc.fillna("").astype(str).replace(["nan","None","NaT","NaN"],"").values[0].tolist())
-    st.cache_data.clear(); st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
+    if nr.empty: return
+    try:
+        ws = sheet.worksheet(name)
+        # 既存の列情報を取得して整合性を保つ
+        try:
+            header = ws.row_values(1)
+        except:
+            header = nr.columns.tolist()
+            ws.append_row(header)
+            
+        rc = nr.copy()
+        # 列の整合性合わせ
+        for col in header:
+            if col not in rc.columns: rc[col] = ""
+        rc = rc[header]
+        
+        # 変換
+        for col in rc.columns:
+            if pd.api.types.is_datetime64_any_dtype(rc[col]): rc[col] = rc[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+            elif pd.api.types.is_bool_dtype(rc[col]): rc[col] = rc[col].astype(str).str.upper()
+            else: rc[col] = rc[col].fillna('').astype(str)
+            
+        ws.append_row(rc.fillna("").values[0].tolist())
+        st.cache_data.clear()
+        st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
+    except Exception as e:
+        st.error(f"追加保存エラー: {e}")
 
 for _s in ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]:
     if f"{_s}_df" not in st.session_state: st.session_state[f"{_s}_df"] = load_data(_s)
