@@ -16,58 +16,75 @@ from google.oauth2.service_account import Credentials
 import numpy as np
 
 # --- c_def をここで定義することで読み込み関数の前でも参照可能にします ---
-c_def = {
-    "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
-    "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
-    "master":       ["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ","段取りタイプ","ラインID","最小製造ロット","調合比率","成形比率","包装比率","レトルト比率","最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
-    "customers":        ["顧客名","ふりがな","帳合先","支店名"],
-    "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム","管理区分"],
-    "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
-    "shipping_master":  ["運送会社名"],
-    "special_schedule": ["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"],
-    "order_purchases":  ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先","納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"],
-}
-
-# ─────────────────────────────────────────────
-# Google SpreadSheet連携・データ保護関数 (ここを修正)
-# ─────────────────────────────────────────────
-@st.cache_resource
-def get_client(): 
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"])
-    return gspread.authorize(creds)
-
-client = get_client(); sheet = client.open_by_url(st.secrets["spreadsheet_url"])
-
 def load_data(name):
+    c_def = {
+        "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
+        "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
+        "master":       ["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ","段取りタイプ","ラインID","最小製造ロット","調合比率","成形比率","包装比率","レトルト比率","最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
+        "customers":        ["顧客名","ふりがな","帳合先","支店名"],
+        "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム","管理区分"],
+        "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
+        "shipping_master":  ["運送会社名"],
+        "special_schedule": ["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"],
+        "order_purchases":  ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先","納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"],
+    }
     tc = c_def.get(name, [])
+    if not tc: return pd.DataFrame()
+    
     try:
         ws = sheet.worksheet(name)
+    except:
+        ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
+        ws.update(values=[tc], range_name="A1")
+    
+    try:
         data = ws.get_all_values()
         if len(data) <= 1: return pd.DataFrame(columns=tc)
         df = pd.DataFrame(data[1:], columns=data[0])
         df.columns = df.columns.str.strip().str.replace(' ','').str.replace('　','')
-        # ... (中略：既存の型変換処理) ...
-        # [既存の型変換ロジックをここに移植してください。行数が多いため割愛しますが、元のload_dataの中身です]
-        return df
+        
+        # 既存のロジック（型変換等）をそのまま記述
+        extra_cols = [c for c in df.columns if c not in tc]
+        ordered_cols = tc + extra_cols
+        df = df.loc[:, ~df.columns.duplicated()].reindex(columns=ordered_cols, fill_value="")
+        
+        # 数値・日付変換（元のコードのまま）
+        for c in ["ケース数","初期在庫数","初期在庫","発注点","数量","理論在庫","入数","甲消費数","最小製造ロット","最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","調合比率","成形比率","包装比率","レトルト比率","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム"]:
+            if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        
+        for c in ["納品予定日","製造予定日","登録日","登録日時","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","出荷予定日","更新日時"]:
+            if c in df.columns:
+                _parsed = pd.to_datetime(df[c], errors='coerce', utc=False)
+                if _parsed.dt.tz is not None: _parsed = _parsed.dt.tz_localize(None)
+                df[c] = _parsed
+        
+        for c in ["荷姿チェック","不良廃棄フラグ","リパックフラグ","日付未定フラグ","特注フラグ","チャーターフラグ"]:
+            if c in df.columns: df[c] = df[c].astype(str).str.upper() == "TRUE"
+        
+        return df[ordered_cols]
     except Exception as e:
-        st.error(f"⚠️ データ読み込みエラー: {name}。保存しないでください！")
-        st.error(str(e))
-        st.stop() # 読み込み失敗時にアプリを停止し、誤保存を阻止
+        # 【ガード】ここが重要：読み込みで死んだらアプリを止める
+        st.error(f"⚠️ データ読み込みエラー ({name}): {e}")
+        st.stop() 
 
 def save_sync(name, df):
-    # 【安全ガード】データが空の場合は保存を中止
+    # 【ガード】空データ保存阻止
     if df.empty and name in ["orders", "manufactures", "master", "packaging_master"]:
-        st.error(f"⚠️ 保存中断: {name} のデータが空のため、消失を防ぐために保存を中止しました。")
+        st.error(f"⚠️ {name} のデータが空のため、消失防止のため保存を中止しました。")
         return
-
+        
     try:
         ws = sheet.worksheet(name)
         ws.clear()
         ds = df.copy()
-        # ... (中略：既存の変換ロジック) ...
+        for col in ds.columns:
+            if pd.api.types.is_datetime64_any_dtype(ds[col]): ds[col] = ds[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('').replace('NaT','')
+            elif pd.api.types.is_bool_dtype(ds[col]): ds[col] = ds[col].astype(str).str.upper()
+            elif pd.api.types.is_numeric_dtype(ds[col]): ds[col] = ds[col].fillna(0).apply(to_int).astype(str)
+            else: ds[col] = ds[col].astype(str)
         ws.update(values=[ds.columns.tolist()] + ds.fillna("").replace(["nan","None","NaT","NaN"],"").values.tolist(), range_name='A1')
         st.cache_data.clear()
-        st.session_state[f"{name}_df"] = df
+        st.session_state[f"{name}_df"] = load_data(name)
     except Exception as e:
         st.error(f"保存失敗: {e}")
 
