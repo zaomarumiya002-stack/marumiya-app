@@ -131,67 +131,53 @@ def load_data(name):
     c_def = {
         "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
         "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
-        "master":       ["大カテゴリ","製品名","初期在庫数",
-                         "使用資材名","製造登録区分","入数","甲消費数",
-                         "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ",
-                         "段取りタイプ","ラインID","最小製造ロット",
-                         "調合比率","成形比率","包装比率","レトルト比率",
-                         "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
+        "master":       ["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ","段取りタイプ","ラインID","最小製造ロット","調合比率","成形比率","包装比率","レトルト比率","最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
         "customers":        ["顧客名","ふりがな","帳合先","支店名"],
         "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム","管理区分"],
         "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
         "shipping_master":  ["運送会社名"],
         "special_schedule": ["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"],
-        "order_purchases":  ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先",
-                             "納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"],
+        "order_purchases":  ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先","納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"],
     }
     tc = c_def.get(name, [])
-    if not tc: return pd.DataFrame()
-    try: ws = sheet.worksheet(name)
-    except:
-        ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
-        ws.update(values=[tc,["ヤマト運輸"],["佐川急便"],["自社配送"]] if name=="shipping_master" else [tc], range_name="A1")
     try:
+        ws = sheet.worksheet(name)
         data = ws.get_all_values()
         if len(data) <= 1: return pd.DataFrame(columns=tc)
         df = pd.DataFrame(data[1:], columns=data[0])
         df.columns = df.columns.str.strip().str.replace(' ','').str.replace('　','')
-        extra_cols = [c for c in df.columns if c not in tc]
-        ordered_cols = tc + extra_cols
-        df = df.loc[:, ~df.columns.duplicated()].reindex(columns=ordered_cols, fill_value="")
-        for c in ["ケース数","初期在庫数","初期在庫","発注点","数量","理論在庫",
-                  "入数","甲消費数","最小製造ロット","最少人員_調合","最少人員_成形",
-                  "最少人員_包装","最少人員_レトルト","調合比率","成形比率","包装比率","レトルト比率",
-                  "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム"]:
+        # 型変換処理
+        for c in ["ケース数","初期在庫数","初期在庫","発注点","数量","理論在庫","入数","甲消費数","最小製造ロット","最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","調合比率","成形比率","包装比率","レトルト比率","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム"]:
             if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-        for c in ["納品予定日","製造予定日","登録日","登録日時","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","出荷予定日","更新日時"]:
-            if c in df.columns:
-                _parsed = pd.to_datetime(df[c], errors='coerce', utc=False)
-                try:
-                    if _parsed.dt.tz is not None: _parsed = _parsed.dt.tz_localize(None)
-                except Exception: pass
-                df[c] = _parsed
-        for c in ["荷姿チェック","不良廃棄フラグ","リパックフラグ","日付未定フラグ","特注フラグ","チャーターフラグ"]:
-            if c in df.columns: df[c] = df[c].astype(str).str.upper() == "TRUE"
-            
-        if "製造登録区分" not in df.columns: df["製造登録区分"] = df.get("資材消費単位", "ケース")
-        if "入数" not in df.columns: df["入数"] = df.get("入数(袋/cs)", 10)
-        if "甲消費数" not in df.columns: df["甲消費数"] = df.get("甲入数", 4)
-            
-        return df[ordered_cols]
-    except: return pd.DataFrame(columns=tc)
+        return df
+    except Exception as e:
+        st.error(f"読み込みエラー ({name}): {e}")
+        st.stop()
 
 def save_sync(name, df):
-    try: ws = sheet.worksheet(name)
-    except: ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
-    ws.clear(); ds = df.copy()
-    for col in ds.columns:
-        if pd.api.types.is_datetime64_any_dtype(ds[col]): ds[col] = ds[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('').replace('NaT','')
-        elif pd.api.types.is_bool_dtype(ds[col]): ds[col] = ds[col].astype(str).str.upper()
-        elif pd.api.types.is_numeric_dtype(ds[col]): ds[col] = ds[col].fillna(0).apply(to_int).astype(str)
-        else: ds[col] = ds[col].astype(str)
-    ws.update(values=[ds.columns.tolist()] + ds.fillna("").replace(["nan","None","NaT","NaN"],"").values.tolist(), range_name='A1')
-    st.cache_data.clear(); st.session_state[f"{name}_df"] = load_data(name)
+    # 安全ガード：空のデータは保存しない
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        st.warning(f"保存対象のデータが空のため、中断しました。")
+        return
+        
+    try:
+        ws = sheet.worksheet(name)
+        ws.clear()
+        # 型変換
+        ds = df.copy()
+        for col in ds.columns:
+            if ds[col].dtype == 'datetime64[ns]':
+                ds[col] = ds[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+            elif ds[col].dtype == 'bool':
+                ds[col] = ds[col].astype(str).str.upper()
+            else:
+                ds[col] = ds[col].fillna('').astype(str)
+        
+        ws.update(values=[ds.columns.tolist()] + ds.values.tolist(), range_name='A1')
+        st.cache_data.clear()
+        st.session_state[f"{name}_df"] = load_data(name)
+    except Exception as e:
+        st.error(f"保存失敗: {e}")
 
 def app_sync(name, nr):
     try: ws = sheet.worksheet(name)
