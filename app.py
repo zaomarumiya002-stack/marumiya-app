@@ -536,29 +536,17 @@ if pg == "📋 受注登録":
         st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cs.get(prod,0)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cs.get(prod,0)}</span></div>', unsafe_allow_html=True)
     
     m_add = st.empty()
-    if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
-                if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
-                else:
-                    # ▼ ここから追加・修正 ▼
-                    _new_po = pd.DataFrame([{
-                        "発注ID": f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                        "発注日": _po_date.strftime("%Y-%m-%d"),
-                        "資材名": _po_mat,
-                        "発注時在庫": p_sum.get(_po_mat, {}).get("現在庫", 0),
-                        "発注数": _po_qty,
-                        "発注単価": _po_price,
-                        "仕入先": _po_supplier,
-                        "納入予定日": _po_eta.strftime("%Y-%m-%d"),
-                        "実際納入日": "",
-                        "実際納入数": 0,
-                        "ステータス": "発注済",
-                        "備考": _po_rem,
-                        "登録日時": datetime.now(JST).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-                    }])
-                    merged_po = pd.concat([po_df, _new_po], ignore_index=True)
-                    _save_po(merged_po)
-                    flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
-                    st.rerun()
+    if st.button("✅ 受注を登録", type="primary", use_container_width=True):
+        if not prod or not qty or to_int(qty)<1:
+            m_add.error("⚠️ 製品・数量は必須です。")
+        else:
+            frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整+】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
+            cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
+            nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
+            if iadj:
+                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"リパックフラグ":False,"備考":f"【在庫調整+】{frem}","登録日時": datetime.now(JST).replace(tzinfo=None)}]))
+                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(prod)}】 ＋{to_int(qty):,}  現在庫: {cs.get(prod,0):,} → {cs.get(prod,0)+to_int(qty):,}")
+                st.rerun()
             else:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 if ("特注" in stype or "チャーター" in stype) and od:
@@ -1115,29 +1103,15 @@ elif pg == "📦 資材・入出庫":
                     st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat}</b>  現在庫: <b>{_cur_inv:,} 枚</b>  発注点: {_order_pt:,} 枚  {"⚠️ 発注点以下！" if _cur_inv < _order_pt else "✅ 在庫充足"}  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
             _po_reg_msg = st.empty()
             if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
-                if not _po_mat:
-                    _po_reg_msg.error("⚠️ 資材名は必須です")
+                if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
                 else:
-                    _new_po = pd.DataFrame([{
-                        "発注ID": f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                        "発注日": _po_date.strftime("%Y-%m-%d"),
-                        "資材名": _po_mat,
-                        "発注時在庫": p_sum.get(_po_mat, {}).get("現在庫", 0),
-                        "発注数": _po_qty,
-                        "発注単価": _po_price,
-                        "仕入先": _po_supplier,
-                        "納入予定日": _po_eta.strftime("%Y-%m-%d"),
-                        "実際納入日": "",
-                        "実際納入数": 0,
-                        "ステータス": "発注済",
-                        "備考": _po_rem,
-                        "登録日時": datetime.now(JST).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-                    }])
+                    # ... (元の発注登録ロジック) ...
                     merged_po = pd.concat([po_df, _new_po], ignore_index=True)
                     _save_po(merged_po)
+                    # 【修正1】flash関数を使って共通ポップアップを表示
                     flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
                     st.rerun()
-            show_flash_inline(_po_reg_msg)
+            show_flash_inline(_po_reg_msg) # 【修正1】共通の表示ロジックへ
 
         with po_t2:
             if po_df.empty: st.info("発注データがありません。")
