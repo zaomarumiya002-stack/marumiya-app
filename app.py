@@ -1101,17 +1101,32 @@ elif pg == "📦 資材・入出庫":
                 else:
                     _col = "#FEE2E2" if _cur_inv < _order_pt else "#D1FAE5"
                     st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat}</b>  現在庫: <b>{_cur_inv:,} 枚</b>  発注点: {_order_pt:,} 枚  {"⚠️ 発注点以下！" if _cur_inv < _order_pt else "✅ 在庫充足"}  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
+            
             _po_reg_msg = st.empty()
             if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
-                if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
+                if not _po_mat:
+                    _po_reg_msg.error("⚠️ 資材名は必須です")
                 else:
-                    # ... (元の発注登録ロジック) ...
+                    _new_po = pd.DataFrame([{
+                        "発注ID": f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        "発注日": _po_date.strftime("%Y-%m-%d"),
+                        "資材名": _po_mat,
+                        "発注時在庫": p_sum.get(_po_mat, {}).get("現在庫", 0),
+                        "発注数": _po_qty,
+                        "発注単価": _po_price,
+                        "仕入先": _po_supplier,
+                        "納入予定日": _po_eta.strftime("%Y-%m-%d"),
+                        "実際納入日": "",
+                        "実際納入数": 0,
+                        "ステータス": "発注済",
+                        "備考": _po_rem,
+                        "登録日時": datetime.now(JST).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+                    }])
                     merged_po = pd.concat([po_df, _new_po], ignore_index=True)
                     _save_po(merged_po)
-                    # 【修正1】flash関数を使って共通ポップアップを表示
                     flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
                     st.rerun()
-            show_flash_inline(_po_reg_msg) # 【修正1】共通の表示ロジックへ
+            show_flash_inline(_po_reg_msg)
 
         with po_t2:
             if po_df.empty: st.info("発注データがありません。")
