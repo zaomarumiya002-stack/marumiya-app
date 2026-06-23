@@ -10,7 +10,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
+JST = timezone(timedelta(hours=+9))
 import gspread
 from google.oauth2.service_account import Credentials
 import numpy as np
@@ -543,11 +544,11 @@ if pg == "📋 受注登録":
             cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
             nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
             if iadj:
-                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"リパックフラグ":False,"備考":f"【在庫調整+】{frem}","登録日時":datetime.now()}]))
+                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"リパックフラグ":False,"備考":f"【在庫調整+】{frem}","登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(prod)}】 ＋{to_int(qty):,}  現在庫: {cs.get(prod,0):,} → {cs.get(prod,0)+to_int(qty):,}")
                 st.rerun()
             else:
-                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時":datetime.now()}]))
+                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 if ("特注" in stype or "チャーター" in stype) and od:
                     app_sync("special_schedule", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
                 _cur = cs.get(prod, 0)
@@ -755,13 +756,13 @@ elif pg == "🏭 製造登録":
                     "ケース数": to_int(mq), "運送会社": "",
                     "備考": rt_adj, "荷姿チェック": False, "発送備考": "",
                     "不良廃棄フラグ": False, "日付未定フラグ": False,
-                    "登録日時": datetime.now()
+                    "登録日時": datetime.now(JST).replace(tzinfo=None)
                 }]))
                 flash("success", f"📊 在庫調整(－)を登録しました！【{fn(pm)}】 -{to_int(mq):,} cs  現在庫: {cs.get(pm,0):,} → {cs.get(pm,0)-to_int(mq):,} cs")
                 st.rerun()
             else:
                 rt = f"{'【リパック】' if irp else ''} {'【資材非連動】' if irp and not ipl else ''} {mr}".strip()
-                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":pd.to_datetime(mdt),"大カテゴリ":c_m,"製品名":pm,"ケース数":to_int(mq),"リパックフラグ":irp,"備考":rt,"登録日時":datetime.now()}]))
+                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":pd.to_datetime(mdt),"大カテゴリ":c_m,"製品名":pm,"ケース数":to_int(mq),"リパックフラグ":irp,"備考":rt,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 _mfg_mat_msg = ""
                 if ipl and not mst_u.empty and pm in mst_u["製品名"].values:
                     _mrow2 = mst_u[mst_u["製品名"]==pm].iloc[0]
@@ -783,7 +784,7 @@ elif pg == "🏭 製造登録":
                             "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(mdt), "資材名": _pnn,
                             "処理区分": "製造連動", "数量": _deduct_qty, "理由": f"製造ID:{nid} ({_calc_memo})",
                             "関連製品名": pm, "理論在庫": p_sum.get(_pnn,{}).get("現在庫",0) - _deduct_qty,
-                            "備考": f"自動記録 [{_calc_memo}]", "登録日時": datetime.now()
+                            "備考": f"自動記録 [{_calc_memo}]", "登録日時": datetime.now(JST).replace(tzinfo=None)
                         }]))
                         _mfg_mat_msg = f"  ＋【{_pnn}】 {_deduct_qty:,}枚 自動減算（{_calc_memo}）"
                 flash("success", f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}cs  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
@@ -1167,7 +1168,7 @@ elif pg == "📦 資材・入出庫":
                         app_sync("packaging_logs", pd.DataFrame([{
                             "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(_actual_date), "資材名": _mat_nm, "処理区分": "入庫", "数量": _actual_qty,
                             "理由": f"発注納入 [{_sel_row.get('発注ID','')}]", "関連製品名": "", "理論在庫": p_sum.get(_mat_nm,{}).get("現在庫",0) + _actual_qty,
-                            "備考": f"発注納入完了 仕入先:{_sel_row.get('仕入先','')} {_po_comp_rem}", "登録日時": datetime.now()
+                            "備考": f"発注納入完了 仕入先:{_sel_row.get('仕入先','')} {_po_comp_rem}", "登録日時": datetime.now(JST).replace(tzinfo=None)
                         }]))
                         _po_updated = po_df.copy()
                         _po_updated.loc[_po_updated["発注ID"]==_sel_row["発注ID"], "実際納入日"] = _actual_date.strftime("%Y-%m-%d")
@@ -1420,7 +1421,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
             st.dataframe(fsp[[c for c in ["製品名","顧客名","出荷予定日","ケース数","備考"] if c in fsp.columns]], hide_index=True)
     with ts3:
         if not spo.empty:
-            ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時":datetime.now()} for _,r in spo.iterrows() if r["ID"] not in ex]
+            ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時": datetime.now(JST).replace(tzinfo=None)} for _,r in spo.iterrows() if r["ID"] not in ex]
             sw = pd.concat([sp_s, pd.DataFrame(nr)], ignore_index=True) if nr else sp_s.copy()
             se = pd.merge(sw, odf[["ID","備考"]].rename(columns={"ID":"受注ID","備考":"受注備考"}), on="受注ID", how="left")
             se["種別"] = se["受注備考"].apply(lambda x: "特注" if "特注" in str(x) else "チャーター便"); se["出荷予定日(表示)"] = pd.to_datetime(se["納品予定日"],errors='coerce').apply(format_date_jp); se["出荷予定日_edit"] = pd.to_datetime(se["出荷予定日"],errors='coerce').dt.date
