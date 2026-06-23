@@ -1506,17 +1506,29 @@ elif pg == "⚙️ マスタ・分析":
             }, height=500, key="prod_mst_ed")
         _m1_msg = st.empty()
         if st.button("💾 製品マスタ保存", type="primary", key="btn_save_prod_mst"):
-            save_target = em_base.copy()
-            for c in em.columns:
-                save_target[c] = em[c].values
-            
-            for drop_c in ["資材使用数", "入数(袋/cs)", "資材消費単位", "甲入数", "単位区分"]:
-                if drop_c in save_target.columns:
-                    save_target = save_target.drop(columns=[drop_c])
-                    
-            save_sync("master", save_target)
-            flash("success", "✅ 製品マスタを保存しました。不要な旧列も整理されました。"); st.rerun()
-        show_flash_inline(_m1_msg)
+            try:
+                # 編集結果をコピー
+                save_target = ep.copy() 
+
+                # 数値列の強制変換
+                numeric_cols = ["初期在庫数", "時間あたり生産量", "歩留まり率", "リードタイム時間", "安全在庫数", "入数", "甲消費数", "最小製造ロット"]
+                for col in numeric_cols:
+                    if col in save_target.columns:
+                        save_target[col] = pd.to_numeric(save_target[col], errors='coerce').fillna(0).astype(int)
+
+                # 必須列の欠損チェック
+                save_target["製造登録区分"] = save_target["製造登録区分"].replace(["", None], "ケース")
+                save_target["大カテゴリ"] = save_target["大カテゴリ"].replace(["", None], "その他")
+
+                # 保存実行
+                save_sync("master", save_target)
+                
+                # 【追加】これで他のページと同じポップアップ（flash）が出ます
+                flash("success", "✅ 製品マスタを保存しました。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"保存失敗: {e}")
+                st.exception(e)
     with tm2:
         ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="cust_mst_ed")
         _m2_msg = st.empty()
