@@ -539,20 +539,6 @@ if pg == "📋 受注登録":
     if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
                 if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
                 else:
-                    # ... (元の発注登録ロジック) ...
-                    merged_po = pd.concat([po_df, _new_po], ignore_index=True)
-                    _save_po(merged_po)
-                    # 【修正1】flash関数を使って共通ポップアップを表示
-                    flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
-                    st.rerun()
-【修正後のコード】
-else: の中身を以下のように書き換えてください。
-入力された発注日や数量を元に、新しいデータフレーム（_new_po）を作る処理を追加しています。
-code
-Python
-if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
-                if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
-                else:
                     # ▼ ここから追加・修正 ▼
                     _new_po = pd.DataFrame([{
                         "発注ID": f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}",
