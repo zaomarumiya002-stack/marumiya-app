@@ -1507,8 +1507,8 @@ elif pg == "⚙️ マスタ・分析":
         _m1_msg = st.empty()
         if st.button("💾 製品マスタ保存", type="primary", key="btn_save_prod_mst"):
             try:
-                # 編集結果をコピー
-                save_target = ep.copy() 
+                # 【修正】変数名を em に変更しました
+                save_target = em.copy() 
 
                 # 数値列の強制変換
                 numeric_cols = ["初期在庫数", "時間あたり生産量", "歩留まり率", "リードタイム時間", "安全在庫数", "入数", "甲消費数", "最小製造ロット"]
@@ -1523,7 +1523,7 @@ elif pg == "⚙️ マスタ・分析":
                 # 保存実行
                 save_sync("master", save_target)
                 
-                # 【追加】これで他のページと同じポップアップ（flash）が出ます
+                # フラッシュメッセージ表示
                 flash("success", "✅ 製品マスタを保存しました。")
                 st.rerun()
             except Exception as e:
