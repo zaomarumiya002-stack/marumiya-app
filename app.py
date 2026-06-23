@@ -1104,48 +1104,41 @@ elif pg == "📦 資材・入出庫":
             if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
                 if not _po_mat: _po_reg_msg.error("⚠️ 資材名は必須です")
                 else:
-                    _new_po = pd.DataFrame([{
-                        "発注ID": str(uuid.uuid4())[:8].upper(), "発注日": pd.to_datetime(_po_date).strftime("%Y-%m-%d"),
-                        "資材名": _po_mat, "発注時在庫": p_sum.get(_po_mat,{}).get("現在庫",0),
-                        "発注数": _po_qty, "発注単価": _po_price, "仕入先": _po_supplier or p_sum.get(_po_mat,{}).get("仕入先",""),
-                        "納入予定日": pd.to_datetime(_po_eta).strftime("%Y-%m-%d"), "実際納入日": "", "実際納入数": "",
-                        "ステータス": "発注済", "備考": _po_rem, "登録日時": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    }])
+                    # ... (元の発注登録ロジック) ...
                     merged_po = pd.concat([po_df, _new_po], ignore_index=True)
                     _save_po(merged_po)
-                    flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}  （LT:{_lt_days}日）")
+                    # 【修正1】flash関数を使って共通ポップアップを表示
+                    flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
                     st.rerun()
-            show_flash_inline(_po_reg_msg)
+            show_flash_inline(_po_reg_msg) # 【修正1】共通の表示ロジックへ
 
         with po_t2:
-            if po_df.empty: st.info("発注データがありません。「➕ 新規発注登録」タブから登録してください。")
+            if po_df.empty: st.info("発注データがありません。")
             else:
-                _po_f1, _po_f2 = st.columns(2)
-                _po_status_filter = _po_f1.multiselect("ステータス絞り込み", options=["発注済","一部納入","納入完了","キャンセル"], default=["発注済","一部納入"], key="po_stat_filt")
-                _po_mat_filter = _po_f2.text_input("🔍 資材名絞り込み", key="po_mat_filt")
-                _po_view = po_df.copy()
-                if _po_status_filter: _po_view = _po_view[_po_view["ステータス"].isin(_po_status_filter)]
-                if _po_mat_filter: _po_view = _po_view[_po_view["資材名"].str.contains(_po_mat_filter, na=False)]
-                _pk1, _pk2, _pk3, _pk4 = st.columns(4)
-                _pk1.metric("発注中件数", f"{len(_po_view[_po_view['ステータス']=='発注済'])} 件")
-                _pk2.metric("一部納入", f"{len(_po_view[_po_view['ステータス']=='一部納入'])} 件")
-                _pk3.metric("今週納入予定", f"{sum(1 for _,r in _po_view.iterrows() if r.get('納入予定日') and date.today() <= pd.to_datetime(r['納入予定日'],errors='coerce').date() <= date.today()+timedelta(days=7))} 件")
-                _pk4.metric("発注総数", f"{pd.to_numeric(_po_view['発注数'],errors='coerce').sum():,.0f} 枚")
-                _overdue = _po_view[(_po_view["ステータス"].isin(["発注済","一部納入"])) & (_po_view["納入予定日"].apply(lambda x: pd.to_datetime(x,errors='coerce').date() < date.today() if x else False))]
-                if not _overdue.empty: st.markdown(f'<div class="warn-banner">⚠️ 納入予定日を過ぎている発注が <b>{len(_overdue)}件</b> あります！仕入先に確認してください。</div>', unsafe_allow_html=True)
-                def _po_sty(r):
-                    s = str(r.get("ステータス",""))
-                    if s == "納入完了": return ['background-color:#D1FAE5;color:#065F46;']*len(r)
-                    if s == "一部納入": return ['background-color:#FEF3C7;']*len(r)
-                    if s == "キャンセル": return ['background-color:#F1F5F9;color:#94A3B8;text-decoration:line-through;']*len(r)
-                    try:
-                        eta = pd.to_datetime(r.get("納入予定日",""), errors="coerce").date()
-                        if eta < date.today(): return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
-                    except: pass
-                    return ['']*len(r)
-                _disp_cols = [c for c in ["発注ID","発注日","資材名","発注時在庫","発注数","仕入先","納入予定日","実際納入日","実際納入数","ステータス","備考"] if c in _po_view.columns]
-                st.dataframe(_po_view[_disp_cols].style.apply(_po_sty, axis=1), hide_index=True, use_container_width=True, height=min(600, max(280, len(_po_view)*38+60)))
-                st.download_button("📥 発注一覧CSV", data=make_csv_bytes(_po_view[_disp_cols]), file_name=f"発注一覧_{date.today()}.csv", mime="text/csv")
+                st.markdown("💡 編集して「保存」ボタンを押してください。削除は行チェックボックスで行います。")
+                
+                # 削除用の列を追加
+                po_edit = po_df.copy()
+                po_edit.insert(0, "🗑️ 削除", False)
+                
+                # 編集エディタ
+                edited_df = st.data_editor(
+                    po_edit, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={"🗑️ 削除": st.column_config.CheckboxColumn(width="small")},
+                    key="po_edit_editor"
+                )
+                
+                c1, c2 = st.columns(2)
+                if c1.button("💾 変更を保存"):
+                    # 削除処理
+                    to_keep = edited_df[edited_df["🗑️ 削除"] == False].drop(columns=["🗑️ 削除"])
+                    _save_po(to_keep)
+                    flash("success", "✅ 発注データを更新しました。")
+                    st.rerun()
+                
+                show_flash_inline() # 共通ポップアップ表示
 
         with po_t3:
             st.markdown("**✅ 納入完了処理**")
