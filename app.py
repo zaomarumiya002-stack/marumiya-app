@@ -166,7 +166,6 @@ def load_data(name):
                   "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム"]:
             if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             
-        # ★【修復処理】過去のバグで0になってしまった設定値をデフォルトに戻してシステムエラーを防ぐ
         if "入数" in df.columns: df["入数"] = df["入数"].apply(lambda x: 10 if x <= 0 else x)
         if "甲消費数" in df.columns: df["甲消費数"] = df["甲消費数"].apply(lambda x: 4 if x <= 0 else x)
         if "時間あたり生産量" in df.columns: df["時間あたり生産量"] = df["時間あたり生産量"].apply(lambda x: 10 if x <= 0 else x)
@@ -189,13 +188,11 @@ def load_data(name):
     except: return pd.DataFrame(columns=tc)
 
 def save_sync(name, df):
-    # 【安全ガード】データが空の場合は保存を中止
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         st.warning(f"⚠️ {name} のデータが空のため、消失を防ぐために保存を中止しました。")
         return
 
     try:
-        # ★【バグ修正】変換処理が完全に成功した後にのみ、シートをクリアして書き込む
         ds = df.copy()
         for col in ds.columns:
             if pd.api.types.is_datetime64_any_dtype(ds[col]):
@@ -369,22 +366,41 @@ for pn in p_sum.keys(): pf.setdefault(pn, {})
 
 past_30_days = today - timedelta(days=30)
 daily_usage = {}
+net_change_by_day = {} # ★追加：グラフ逆算用の日別純増減
+
 if not pk_l.empty:
     for _, r in pk_l.iterrows():
         dt = pd.to_datetime(r.get("登録日", today), errors="coerce")
         if pd.isna(dt): continue
         if dt.tz is not None: dt = dt.tz_localize(None)
         
-        pn, q, pt = str(r.get("資材名","")), to_int(r.get("数量",0)), str(r.get("処理区分",""))
-        if pn in p_sum and "連動" not in pt:
-            if "入庫" in pt: p_sum[pn]["入庫"] += q
-            elif "出庫" in pt: p_sum[pn]["出庫"] += q
+        pn = str(r.get("資材名",""))
+        q = to_int(r.get("数量",0))
+        pt = str(r.get("処理区分",""))
+        
+        if pn in p_sum:
+            # ★修復：mdfからの二重計上をやめ、純粋に履歴から入出庫を計算する
+            if "入庫" in pt:
+                p_sum[pn]["入庫"] += q
+                net_chg = q
+            elif "出庫" in pt or "連動" in pt:
+                p_sum[pn]["出庫"] += q
+                net_chg = -q
+            else:
+                net_chg = 0
+                
+            # 逆算グラフ用
+            d_norm = dt.normalize().date()
+            net_change_by_day.setdefault(pn, {})
+            net_change_by_day[pn].setdefault(d_norm, 0)
+            net_change_by_day[pn][d_norm] += net_chg
             
-        if dt >= past_30_days and pn in p_sum:
-            if "出庫" in pt or "連動" in pt:
-                d_str = dt.normalize().strftime("%Y-%m-%d")
-                daily_usage.setdefault(pn, {}).setdefault(d_str, 0)
-                daily_usage[pn][d_str] += q
+            # 統計用
+            if dt >= past_30_days:
+                if "出庫" in pt or "連動" in pt:
+                    d_str = dt.normalize().strftime("%Y-%m-%d")
+                    daily_usage.setdefault(pn, {}).setdefault(d_str, 0)
+                    daily_usage[pn][d_str] += q
 
 total_usage = {pn: sum(daily_usage.get(pn, {}).values()) for pn in p_sum.keys()}
 total_all = sum(total_usage.values()) or 1
@@ -397,19 +413,7 @@ for pn, u in sorted_usage:
     elif ratio <= 0.95: abc_rank[pn] = "B"
     else: abc_rank[pn] = "C"
 
-if not mdf.empty and not mst_u.empty:
-    mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
-    for _, r in mdf.iterrows():
-        prod, q, rem = str(r.get("製品名","")), to_int(r.get("ケース数",0)), str(r.get("備考",""))
-        if prod in mpi and "【資材非連動】" not in rem:
-            pn = str(mpi[prod].get("使用資材名",""))
-            kbn = str(mpi[prod].get("製造登録区分","ケース")).strip()
-            nyu = max(1, to_int(mpi[prod].get("入数", 10)))
-            kou = max(1, to_int(mpi[prod].get("甲消費数", 4)))
-            if pn and pn in p_sum:
-                if kbn == "袋": p_sum[pn]["出庫"] += to_int(q / nyu)
-                elif kbn == "甲": p_sum[pn]["出庫"] += to_int(q * kou)
-                else: p_sum[pn]["出庫"] += q
+# ★修復：mdfをループして出庫を足す処理（二重計上の元凶）を完全に削除しました。
 
 for pn, d in p_sum.items():
     d["現在庫"] = d.get("期首在庫", 0) + d.get("入庫", 0) - d.get("出庫", 0)
@@ -868,15 +872,43 @@ elif pg == "📦 資材・入出庫":
             pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
             spg = st.selectbox("グラフ表示", options=[r["資材名"] for _, r in pack_mst_unique.iterrows() if r["資材名"]])
             if spg:
-                ri = p_sum.get(spg,{}).get("現在庫",0); gd, gs, gu = [], [], []
+                # ★修復：過去30日の実績〜未来90日の予測を繋げて描画する
+                ri = p_sum.get(spg,{}).get("現在庫",0)
+                ri_future = ri
+                gd, gs, gu = [], [], []
+                
+                # 未来予測（現在庫から順算）
                 for d_g in pd.date_range(today, today+timedelta(days=fd)):
-                    ug = pf.get(spg,{}).get(d_g,0); ri-=ug; gd.append(d_g.strftime("%m/%d")); gs.append(ri); gu.append(ug)
+                    ug = pf.get(spg,{}).get(d_g,0)
+                    ri_future -= ug
+                    gd.append(d_g)
+                    gs.append(ri_future)
+                    gu.append(-ug)
+                
+                # 過去30日実績（現在庫から逆算）
+                ri_past = ri
+                past_dates = pd.date_range(today-timedelta(days=30), today-timedelta(days=1))
+                past_gd, past_gs, past_gu = [], [], []
+                for d_g in reversed(past_dates):
+                    net = net_change_by_day.get(spg, {}).get((d_g + timedelta(days=1)).date(), 0)
+                    ri_past = ri_past - net
+                    past_gd.insert(0, d_g)
+                    past_gs.insert(0, ri_past)
+                    past_u = daily_usage.get(spg, {}).get(d_g.strftime("%Y-%m-%d"), 0)
+                    past_gu.insert(0, -past_u)
+                
+                full_gd = past_gd + gd
+                full_gs = past_gs + gs
+                full_gu = past_gu + gu
+
                 fig = go.Figure()
-                fig.add_trace(go.Bar(x=gd, y=gu, name="日別消費", marker_color="#F43F5E", opacity=0.55))
-                fig.add_trace(go.Scatter(x=gd, y=gs, name="予測在庫", mode="lines+markers", line=dict(color="#2563EB", width=2.5)))
+                fig.add_trace(go.Bar(x=full_gd, y=full_gu, name="日別出庫/消費", marker_color="#F43F5E", opacity=0.55))
+                fig.add_trace(go.Scatter(x=full_gd, y=full_gs, name="予測/実績在庫", mode="lines+markers", line=dict(color="#2563EB", width=2.5)))
                 fig.add_hline(y=p_sum.get(spg,{}).get("発注点",0), line_dash="dash", line_color="#F59E0B", annotation_text="発注点")
                 fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
-                fig.update_layout(title=f"【{spg}】 在庫推移予測", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380); st.plotly_chart(fig, use_container_width=True)
+                fig.add_vline(x=today, line_dash="dash", line_color="#10B981", annotation_text="今日")
+                fig.update_layout(title=f"【{spg}】 過去30日実績〜未来予測 在庫推移", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380)
+                st.plotly_chart(fig, use_container_width=True)
 
     with tp2:
         if not p_sum:
@@ -999,6 +1031,7 @@ elif pg == "📦 資材・入出庫":
                         st.rerun()
                 show_flash_inline(_del_msg)
             else:
+                # ★修復：エディタから返ってきたIDを信頼するように変更し、履歴消失バグを防止
                 edp = st.data_editor(
                     _dpk_show[_tp4_cols], hide_index=True,
                     use_container_width=True,
@@ -1011,14 +1044,13 @@ elif pg == "📦 資材・入出庫":
                 )
                 _hist_save_msg = st.empty()
                 if st.button("💾 履歴を保存", key="btn_spk", type="primary"):
-                    edited_ids = _dpk_show["ID"].tolist()
+                    edited_ids = edp["ID"].tolist()
                     rest = pk_l[~pk_l["ID"].isin(edited_ids)].copy()
                     edp_with_id = edp.copy()
-                    edp_with_id["ID"] = _dpk_show["ID"].values
                     edp_with_id["登録日"] = pd.to_datetime(edp_with_id["登録日(表示)"].str.split(" ").str[0], errors="coerce")
                     keep_cols = [c for c in ["ID","理論在庫","登録日時"] if c in pk_l.columns]
                     merged = pd.merge(edp_with_id.drop(columns=["登録日(表示)"], errors="ignore"), pk_l[keep_cols], on="ID", how="left")
-                    merged = merged.reindex(columns=pk_l.columns) # カラム順を確実に維持
+                    merged = merged.reindex(columns=pk_l.columns)
                     save_sync("packaging_logs", pd.concat([rest, merged], ignore_index=True))
                     flash("success", "✅ 資材履歴を保存しました。")
                     st.rerun()
@@ -1506,7 +1538,6 @@ elif pg == "⚙️ マスタ・分析":
             try:
                 save_target = em.copy() 
 
-                # ★【バグ修正】表示されていないその他の必須列（段取りタイプ、比率など）を補完して、データ消失を防ぐ
                 missing_cols = [c for c in mst.columns if c not in save_target.columns]
                 if not mst.empty and missing_cols:
                     save_target = pd.merge(save_target, mst[["製品名"] + missing_cols], on="製品名", how="left")
@@ -1514,17 +1545,14 @@ elif pg == "⚙️ マスタ・分析":
                     if c not in save_target.columns:
                         save_target[c] = ""
 
-                # 数値列の強制変換
                 numeric_cols = ["初期在庫数", "時間あたり生産量", "歩留まり率", "リードタイム時間", "安全在庫数", "入数", "甲消費数", "最小製造ロット"]
                 for col in numeric_cols:
                     if col in save_target.columns:
                         save_target[col] = pd.to_numeric(save_target[col], errors='coerce').fillna(0).astype(int)
 
-                # 必須列の欠損チェック
                 save_target["製造登録区分"] = save_target["製造登録区分"].replace(["", None], "ケース")
                 save_target["大カテゴリ"] = save_target["大カテゴリ"].replace(["", None], "その他")
 
-                # 保存実行
                 save_sync("master", save_target)
                 
                 flash("success", "✅ 製品マスタを保存しました。")
@@ -1760,20 +1788,7 @@ elif pg == "🏗️ 製造スケジューラー":
         for _,row in sdf.iterrows():
             wk = str(row.get("曜日区分","平日"))
             if wk not in ("全日",ws): continue
-            try:
-                s = str(row.get("開始時刻","08:00")); e = str(row.get("終了時刻","17:00"))
-                if s <= t < e:
-                    bs = max(bs, max(0, int(float(str(row.get("出勤人数",0) or 0)))))
-                    bk = max(bk, max(0, int(float(str(row.get("うちキーマン数",0) or 0)))))
-            except: pass
-        return (bs,bk)
-
-    def _build_shift_slots(sdf):
-        slots = {}
-        if sdf.empty: return slots
-        for _, row in sdf.iterrows():
-            wk = str(row.get("曜日区分","平日"))
-            try:
+    try:
                 s_h, s_m = int(str(row.get("開始時刻","08:00"))[:2]), int(str(row.get("開始時刻","08:00"))[3:5])
                 e_h, e_m = int(str(row.get("終了時刻","17:00"))[:2]), int(str(row.get("終了時刻","17:00"))[3:5])
                 n  = max(0, int(float(str(row.get("出勤人数",0) or 0))))
