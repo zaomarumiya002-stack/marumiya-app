@@ -801,10 +801,6 @@ elif pg == "🏭 製造登録":
                 save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left"))
                 flash("success", "✅ 製造全データを保存しました。"); st.rerun()
             show_flash_inline(_mfg_all_msg)
-            ありがとうございます。続いて、後半部分のコードになります。 先ほどの【前半のコード】の末尾（show_flash_inline(_mfg_all_msg)
-の行）の下に、そのまま以下のコードを貼り付けてください。
-
-👇 【後半のコード】（前半の続き〜最後まで）
 
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
