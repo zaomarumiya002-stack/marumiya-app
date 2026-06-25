@@ -801,6 +801,10 @@ elif pg == "🏭 製造登録":
                 save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left"))
                 flash("success", "✅ 製造全データを保存しました。"); st.rerun()
             show_flash_inline(_mfg_all_msg)
+            ありがとうございます。続いて、後半部分のコードになります。 先ほどの【前半のコード】の末尾（show_flash_inline(_mfg_all_msg)
+の行）の下に、そのまま以下のコードを貼り付けてください。
+
+👇 【後半のコード】（前半の続き〜最後まで）
 
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
@@ -1092,7 +1096,7 @@ elif pg == "📦 資材・入出庫":
 
         po_t1, po_t2, po_t3 = st.tabs(["➕ 新規発注登録", "📋 発注一覧", "✅ 納入完了処理"])
         with po_t1:
-            st.markdown("**📝 新規発注を登録**")
+            st.markdown("**📝 新発注を登録**")
             pack_names = [pn for pn in p_sum.keys()] if p_sum else []
             po_c1, po_c2 = st.columns([1.5, 2.5])
             _po_s = po_c1.text_input("🔍 資材検索", key="po_search")
@@ -1788,7 +1792,29 @@ elif pg == "🏗️ 製造スケジューラー":
         for _,row in sdf.iterrows():
             wk = str(row.get("曜日区分","平日"))
             if wk not in ("全日",ws): continue
-    try:
+            try:
+                s_h, s_m = int(str(row.get("開始時刻","08:00"))[:2]), int(str(row.get("開始時刻","08:00"))[3:5])
+                e_h, e_m = int(str(row.get("終了時刻","17:00"))[:2]), int(str(row.get("終了時刻","17:00"))[3:5])
+                n  = max(0, int(float(str(row.get("出勤人数",0) or 0))))
+                km = max(0, int(float(str(row.get("うちキーマン数",0) or 0))))
+                cur_h, cur_m = s_h, s_m
+                while (cur_h, cur_m) < (e_h, e_m):
+                    t_str = f"{cur_h:02d}:{cur_m:02d}"
+                    for wd_ in (["平日","土曜","日曜"] if wk=="全日" else [wk]):
+                        if t_str == t and wd_ == ws:
+                            bs = max(bs, n)
+                            bk = max(bk, km)
+                    cur_m += 30
+                    if cur_m >= 60: cur_h += 1; cur_m = 0
+            except: pass
+        return (bs,bk)
+
+    def _build_shift_slots(sdf):
+        slots = {}
+        if sdf.empty: return slots
+        for _, row in sdf.iterrows():
+            wk = str(row.get("曜日区分","平日"))
+            try:
                 s_h, s_m = int(str(row.get("開始時刻","08:00"))[:2]), int(str(row.get("開始時刻","08:00"))[3:5])
                 e_h, e_m = int(str(row.get("終了時刻","17:00"))[:2]), int(str(row.get("終了時刻","17:00"))[3:5])
                 n  = max(0, int(float(str(row.get("出勤人数",0) or 0))))
