@@ -1,3 +1,5 @@
+システム修復中です。志村からの連絡をおまちください。。。。
+
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
