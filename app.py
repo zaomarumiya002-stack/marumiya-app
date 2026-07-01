@@ -477,6 +477,15 @@ with st.sidebar:
         if st.button(m, use_container_width=True, type="primary" if st.session_state.current_page == m else "secondary"):
             st.session_state.current_page = m; st.session_state.drill_product = None; st.rerun()
 
+    st.markdown("<div style='height:1px; background:rgba(255,255,255,0.1); margin:14px 0 10px;'></div>", unsafe_allow_html=True)
+    if st.button("🔄 スプレッドシートを再読込", use_container_width=True, help="Googleスプレッドシートを直接編集した場合など、最新データを読み込み直します"):
+        for _s in ["orders","manufactures","master","customers","packaging_master",
+                   "packaging_logs","shipping_master","special_schedule","order_purchases"]:
+            st.session_state.pop(f"{_s}_df", None)
+        st.cache_data.clear()
+        st.session_state._flash = {"type": "success", "msg": "✅ スプレッドシートから最新データを再読込しました。"}
+        st.rerun()
+
 pg = st.session_state.current_page
 hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
 def page_header(t):
@@ -1239,7 +1248,7 @@ elif pg == "📑 登録一覧":
 # ─────────────────────────────────────────────
 elif pg == "📊 在庫・スケジュール":
     page_header("📊 在庫予測 ＆ スケジュール")
-    t1, t0, t2, t3, t4 = st.tabs(["📉 1ヶ月在庫予測", "⚠️ 7日以内欠品予測", "📅 週間カレンダー", "🔍 製品別詳細ビュー", "👤 顧客別スケジュール"])
+    t1, t0, t2, t3, t4, t5 = st.tabs(["📉 1ヶ月在庫予測", "⚠️ 7日以内欠品予測", "📅 週間カレンダー", "🔍 製品別詳細ビュー", "👤 顧客別スケジュール", "📋 棚卸入力"])
 
     with t0:
         al = []
@@ -1427,6 +1436,75 @@ elif pg == "📊 在庫・スケジュール":
                 co=co.sort_values("納品予定日"); co["在庫状況"]=co.apply(lambda r: f"❌ 欠品 ({fs.get(r['製品名'],{}).get(pd.Timestamp(r['納品予定日']).normalize(),0)})" if fs.get(r['製品名'],{}).get(pd.Timestamp(r['納品予定日']).normalize(),0)<0 else "✅ OK",axis=1)
                 co["納品予定日"]=co["納品予定日"].apply(format_date_jp)
                 st.dataframe(co[["納品予定日","製品名","ケース数","在庫状況","備考"]].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
+
+    with t5:
+        st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
+        st.markdown("""<div class="info-tip">💡 実際に数えた在庫数（実棚卸数）を入力すると、現在の計算上の在庫との差分を自動計算し、「棚卸調整」として登録します。マスタの「初期在庫数」は変更しません。微調整用途を想定しています。</div>""", unsafe_allow_html=True)
+        inv_d = st.date_input("📅 棚卸日", value=date.today(), key="inv_date")
+        prod_list = sorted(mst_u["製品名"].dropna().unique().tolist()) if not mst_u.empty else []
+        ic1, ic2 = st.columns([1.5, 2.5])
+        inv_s = ic1.text_input("🔍 検索", key="inv_search")
+        inv_f = [p for p in prod_list if inv_s in p] if inv_s else prod_list
+        sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod")
+        if sel_p:
+            _cur_cs = cs.get(sel_p, 0)
+            st.markdown(f'<div class="info-card">現在の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
+            actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=0, step=1, value=None, key="inv_qty")
+            inv_note = st.text_input("📝 備考", key="inv_note")
+            if actual_q is not None:
+                _diff = to_int(actual_q) - _cur_cs
+                if _diff == 0:
+                    st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています（登録不要）</div>', unsafe_allow_html=True)
+                else:
+                    _dcolor = "#059669" if _diff > 0 else "#DC2626"
+                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_cur_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
+            _inv_msg = st.empty()
+            if st.button("✅ 棚卸差分を登録", type="primary", use_container_width=True, key="inv_submit"):
+                if actual_q is None:
+                    _inv_msg.error("⚠️ 実棚卸数を入力してください")
+                else:
+                    _diff = to_int(actual_q) - _cur_cs
+                    if _diff == 0:
+                        flash("info", f"ℹ️【{sel_p}】在庫数に変更なし（棚卸一致）")
+                        st.rerun()
+                    else:
+                        nid = str(uuid.uuid4())[:6].upper()
+                        _cat = mst_u[mst_u["製品名"] == sel_p]["大カテゴリ"].iloc[0] if sel_p in mst_u["製品名"].values else ""
+                        if _diff > 0:
+                            app_sync("manufactures", pd.DataFrame([{
+                                "ID": nid, "製造予定日": pd.to_datetime(inv_d),
+                                "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
+                                "リパックフラグ": False, "備考": f"【棚卸調整+】{inv_note}".strip(),
+                                "登録日時": datetime.now(JST).replace(tzinfo=None),
+                            }]))
+                        else:
+                            app_sync("orders", pd.DataFrame([{
+                                "ID": nid, "納品予定日": pd.to_datetime(inv_d),
+                                "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
+                                "ケース数": abs(_diff), "運送会社": "",
+                                "備考": f"【棚卸調整-】{inv_note}".strip(), "荷姿チェック": False, "発送備考": "",
+                                "不良廃棄フラグ": False, "日付未定フラグ": False,
+                                "登録日時": datetime.now(JST).replace(tzinfo=None),
+                            }]))
+                        flash("success", f"✅【{sel_p}】棚卸差分 {_diff:+,} cs を登録しました（{_cur_cs:,} → {to_int(actual_q):,}）")
+                        st.rerun()
+            show_flash_inline(_inv_msg)
+
+        st.markdown('<div class="section-title">📜 棚卸調整 履歴</div>', unsafe_allow_html=True)
+        _adj_o = odf[odf["備考"].fillna("").str.contains("【棚卸調整-】")] if not odf.empty else pd.DataFrame()
+        _adj_m = mdf[mdf["備考"].fillna("").str.contains("【棚卸調整\\+】")] if not mdf.empty else pd.DataFrame()
+        _hist_rows = []
+        if not _adj_o.empty:
+            for _, r in _adj_o.iterrows():
+                _hist_rows.append({"日付": format_date_jp(r.get("納品予定日")), "製品名": r.get("製品名", ""), "差分": -to_int(r.get("ケース数", 0)), "備考": r.get("備考", ""), "登録日時": r.get("登録日時", "")})
+        if not _adj_m.empty:
+            for _, r in _adj_m.iterrows():
+                _hist_rows.append({"日付": format_date_jp(r.get("製造予定日")), "製品名": r.get("製品名", ""), "差分": to_int(r.get("ケース数", 0)), "備考": r.get("備考", ""), "登録日時": r.get("登録日時", "")})
+        if _hist_rows:
+            _hist_df = pd.DataFrame(_hist_rows).sort_values("登録日時", ascending=False)
+            st.dataframe(_hist_df[["日付", "製品名", "差分", "備考"]], hide_index=True, use_container_width=True, height=300)
+        else:
+            st.info("棚卸調整の履歴はまだありません。")
 
 # ─────────────────────────────────────────────
 # ⭐ 特注・チャータースケジュール
