@@ -315,8 +315,17 @@ if not mst_u.empty:
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
     pe = ae[ae["日付"] < today].groupby("製品名")["qty"].sum(); fe = ae[ae["日付"] >= today]
     piv = fe.pivot_table(index="製品名", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
+    # 日付未定（出荷日未確定）の受注は、納品予定日がNaTのため上記の日付ベース集計から漏れる。
+    # 特注・チャーター便などで先に受注だけ確定しているケースが多いため、
+    # 「いずれ必ず出庫される確定引当数量」として現在庫～今後すべての予測日から差し引く。
+    pend = pd.Series(dtype=int)
+    if not odf.empty and "日付未定フラグ" in odf.columns:
+        _pnd = odf[odf["日付未定フラグ"] == True]
+        if not _pnd.empty:
+            pend = _pnd.groupby("製品名")["ケース数"].apply(lambda s: s.apply(to_int).sum())
     for _, r in mst_u.iterrows():
-        p = r["製品名"]; c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(p,0)); cs[p] = c_s
+        p = r["製品名"]
+        c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(p,0)) - to_int(pend.get(p,0)); cs[p] = c_s
         pr = piv.loc[p] if p in piv.index else pd.Series(0, index=dates)
         if isinstance(pr, pd.DataFrame): pr = pr.sum(axis=0)
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
@@ -1265,6 +1274,8 @@ elif pg == "📊 在庫・スケジュール":
     with t1:
         if mst_u.empty: st.info("マスタ空")
         else:
+            if 'pend' in dir() and isinstance(pend, pd.Series) and not pend.empty:
+                st.markdown(f'<div class="info-tip">💡 特注・チャーター便などで<b>出荷日未定</b>のまま登録されている受注が {int(pend.sum()):,} cs（{pend[pend>0].shape[0]}品目）あります。出荷日が確定していないため日別の列には表示されませんが、確定引当分として「現在庫」からは差し引いて計算しています。日付を確定するには「📋 受注登録」ページ下部の「🟡 日付未定受注を確定する」から対応してください。</div>', unsafe_allow_html=True)
             sd = pd.date_range(today, today+timedelta(days=30))
             iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_u.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
