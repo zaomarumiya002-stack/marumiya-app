@@ -312,38 +312,104 @@ for _ext_col, _ext_def in [
         mst_u = mst.drop_duplicates(subset=["製品名"])
 
 # ─────────────────────────────────────────────
-# 在庫計算・資材計算エンジン
+# 在庫計算・資材計算エンジン (超高速 & 過去棚卸遡及絶対値化版)
 # ─────────────────────────────────────────────
 if not mst_u.empty:
     _mst_keys = set(mst_u["製品名"].apply(nk))
     nk2name = {nk(p): p for p in mst_u["製品名"]}
-    ev_o = odf[["納品予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
+    ev_o = odf[["納品予定日","製品名","ケース数","備考","顧客名","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","顧客名","登録日時"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
     ev_m = vm[["製造予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
+    if "顧客名" not in ev_m.columns: ev_m["顧客名"] = ""
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
-    ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
-    ae["製品名key"] = ae["製品名"].apply(nk)  # 全角/半角・空白ゆれを吸収した照合キー
-    # マスタに存在しない製品名（表記ゆれ・入力ミス等）を検出 → 画面側で警告表示するために保持
+    
+    ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"])
+    ae["qty"] = ae["qty"].apply(to_int)
+    ae["備考"] = ae["備考"].fillna("").astype(str)
+    ae["顧客名"] = ae["顧客名"].fillna("").astype(str)
+    ae["日付"] = pd.to_datetime(ae["日付"]).dt.normalize()
+    ae["製品名key"] = ae["製品名"].apply(nk)
+    
+    # 未一致製品の検出
     unmatched_products = sorted(set(ae.loc[~ae["製品名key"].isin(_mst_keys), "製品名"].dropna().unique().tolist()))
-    pe = ae[ae["日付"] < today].groupby("製品名key")["qty"].sum(); fe = ae[ae["日付"] >= today]
-    piv = fe.pivot_table(index="製品名key", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
-    # 日付未定（出荷日未確定）の受注は、納品予定日がNaTのため上記の日付ベース集計から漏れる。
-    # 特注・チャーター便などで先に受注だけ確定しているケースが多いため、
-    # 「いずれ必ず出庫される確定引当数量」として現在庫～今後すべての予測日から差し引く。
+    
+    # 日付未定の受注引当
     pend = pd.Series(dtype=int)
     if not odf.empty and "日付未定フラグ" in odf.columns:
         _pnd = odf[odf["日付未定フラグ"] == True]
         if not _pnd.empty:
             pend = _pnd.assign(製品名key=_pnd["製品名"].apply(nk)).groupby("製品名key")["ケース数"].apply(lambda s: s.apply(to_int).sum())
-    # 棚卸基準アンカー：備考に埋め込まれた「実棚卸数=NNN」を持つ最新の棚卸登録を、
-    # 過去の全履歴を毎回積み上げる代わりの「起点」として利用する（製品ごと）。
-    # これにより、古いデータ入力漏れ等が理論在庫にいつまでも影響し続けることを防ぐ。
+
+    # 棚卸実績の判定（「実棚卸数=」のタグ、または古い「棚卸」の文字を含む全レコードのケース数を絶対値として自動判定）
     _anc_re = re.compile(r"実棚卸数[:=]\s*(-?\d+)")
-    ae["_anchor_val"] = ae["備考"].fillna("").apply(lambda s: (lambda m: int(m.group(1)) if m else None)(_anc_re.search(str(s))))
-    _anc_df = ae[ae["_anchor_val"].notna()].copy()
-    anchors = _anc_df.sort_values(["日付","登録日時"], na_position="first").groupby("製品名key").last()[["日付","_anchor_val"]] if not _anc_df.empty else pd.DataFrame(columns=["日付","_anchor_val"])
+    def get_inv_val(row):
+        memo = row["備考"]
+        cust = row["顧客名"]
+        if "棚卸" in memo or "棚卸" in cust:
+            m = _anc_re.search(memo)
+            if m:
+                return abs(int(m.group(1)))
+            else:
+                return abs(row["qty"]) # タグがない過去の棚卸調整データも、ケース数を実棚数量（絶対値）とする
+        return None
+
+    ae["anchor_val"] = ae.apply(get_inv_val, axis=1)
+    ae["is_inv"] = ae["anchor_val"].notna()
+    ae = ae.sort_values(["日付", "is_inv"])
+
+    # グループ化し、高速にループを回すための製品別辞書作成 (pandasスライスを排除して読み込みを劇的に高速化)
+    p_events_dict = {}
+    for pk, group in ae.groupby("製品名key"):
+        p_events_dict[pk] = group.to_dict("records")
+        
     for _, r in mst_u.iterrows():
+        p = r["製品名"]; pk = nk(p)
+        events = p_events_dict.get(pk, [])
+        
+        current_stock = to_int(r.get("初期在庫数", 0))
+        
+        # 今日より前の過去シミュレーション
+        past_events = [e for e in events if e["日付"] < today]
+        inv_events = [e for e in past_events if e["is_inv"]]
+        
+        if inv_events:
+            # 最新の棚卸を基準（絶対値）にして、過去の無駄なマイナスをカット
+            latest_inv = inv_events[-1]
+            inv_date = latest_inv["日付"]
+            base_qty = latest_inv["anchor_val"]
+            valid_past = [e for e in past_events if e["日付"] > inv_date]
+        else:
+            base_qty = to_int(r.get("初期在庫数", 0))
+            valid_past = past_events
+            
+        # 現在庫 (出荷未定引当もここで差し引き)
+        c_s = base_qty + sum(e["qty"] for e in valid_past) - to_int(pend.get(pk, 0))
+        cs[p] = c_s
+        
+        # 今日以降の未来在庫シミュレーション
+        if inv_events:
+            future_events = [e for e in events if e["日付"] >= today and e["日付"] > inv_date]
+        else:
+            future_events = [e for e in events if e["日付"] >= today]
+            
+        future_by_date = {}
+        for event in future_events:
+            d = event["日付"]
+            future_by_date.setdefault(d, []).append(event)
+            
+        fs_p = {}
+        sim_stock = c_s
+        for d in dates:
+            daily_evs = future_by_date.get(d, [])
+            for event in daily_evs:
+                if event["is_inv"]:
+                    sim_stock = event["anchor_val"]
+                else:
+                    sim_stock += event["qty"]
+            fs_p[d] = sim_stock
+            
+        fs[p] = fs_p
         p = r["製品名"]; pk = nk(p)
         if pk in anchors.index:
             a_date = anchors.loc[pk, "日付"]; a_val = to_int(anchors.loc[pk, "_anchor_val"])
