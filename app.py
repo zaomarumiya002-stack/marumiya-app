@@ -1275,7 +1275,7 @@ elif pg == "📊 在庫・スケジュール":
         if mst_u.empty: st.info("マスタ空")
         else:
             if 'pend' in dir() and isinstance(pend, pd.Series) and not pend.empty:
-                st.markdown(f'<div class="info-tip">💡 特注・チャーター便などで<b>出荷日未定</b>のまま登録されている受注が {int(pend.sum()):,} cs（{pend[pend>0].shape[0]}品目）あります。出荷日が確定していないため日別の列には表示されませんが、確定引当分として「現在庫」からは差し引いて計算しています。日付を確定するには「📋 受注登録」ページ下部の「🟡 日付未定受注を確定する」から対応してください。</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-tip">💡 出荷日未定の受注 {int(pend.sum()):,} cs（{pend[pend>0].shape[0]}品目）を現在庫から引当済みです。</div>', unsafe_allow_html=True)
             sd = pd.date_range(today, today+timedelta(days=30))
             iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_u.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
@@ -1291,17 +1291,42 @@ elif pg == "📊 在庫・スケジュール":
                 ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)].copy() if not odf.empty else pd.DataFrame()
                 mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)].copy() if not mdf.empty else pd.DataFrame()
                 
-                with st.expander("📜 過去1年履歴", expanded=True):
+                with st.expander("📜 過去1年履歴 ＆ 出荷予定", expanded=True):
+                    _fo = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)] if not odf.empty else pd.DataFrame()
+                    _fm = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=today)&(~mdf["備考"].fillna("").str.contains("【在庫非反映】"))] if not mdf.empty else pd.DataFrame()
                     tho = ph["ケース数"].apply(to_int).sum() if not ph.empty else 0; thm = mh["ケース数"].apply(to_int).sum() if not mh.empty else 0
-                    k1,k2,k3,k4 = st.columns(4)
-                    k1.metric("出荷合計",f"{tho:,} cs"); k2.metric("製造合計",f"{thm:,} cs"); k3.metric("差引",f"{thm-tho:+,} cs"); k4.metric("現在庫",f"{cs.get(dp,0):,} cs")
+                    fto = _fo["ケース数"].apply(to_int).sum() if not _fo.empty else 0; ftm = _fm["ケース数"].apply(to_int).sum() if not _fm.empty else 0
+                    k1,k2,k3,k4,k5 = st.columns(5)
+                    k1.metric("過去1年 出荷",f"{tho:,} cs"); k2.metric("過去1年 製造",f"{thm:,} cs"); k3.metric("現在庫",f"{cs.get(dp,0):,} cs"); k4.metric("今後 出荷予定",f"{fto:,} cs"); k5.metric("今後 製造予定",f"{ftm:,} cs")
+
+                    _gr = []
+                    for _df, _dc, _lb in [(ph,"納品予定日","出荷(実績)"), (mh,"製造予定日","製造(実績)"), (_fo,"納品予定日","出荷(予定)"), (_fm,"製造予定日","製造(予定)")]:
+                        if not _df.empty:
+                            _t = _df.copy(); _t["年月"] = pd.to_datetime(_t[_dc],errors='coerce').dt.to_period("M").astype(str)
+                            for ym, g in _t.groupby("年月"): _gr.append({"年月":ym,"種別":_lb,"ケース数":g["ケース数"].apply(to_int).sum()})
+                    if _gr:
+                        _dgp = pd.DataFrame(_gr).sort_values("年月")
+                        _figp = px.bar(_dgp, x="年月", y="ケース数", color="種別", barmode="group",
+                                        color_discrete_map={"出荷(実績)":"#F43F5E","出荷(予定)":"#FCA5A5","製造(実績)":"#10B981","製造(予定)":"#6EE7B7"})
+                        _figp.update_layout(margin=dict(l=10,r=10,t=20,b=10), height=280, legend=dict(orientation="h", y=1.15))
+                        st.plotly_chart(_figp, use_container_width=True)
+
                     ch1, ch2 = st.columns(2)
                     with ch1:
-                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>', unsafe_allow_html=True)
-                        if not ph.empty: st.dataframe(ph.assign(日付=ph["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True)
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴（過去）</div>', unsafe_allow_html=True)
+                        if not ph.empty: st.dataframe(ph.assign(日付=ph["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True, height=220)
                     with ch2:
-                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
-                        if not mh.empty: st.dataframe(mh.assign(日付=mh["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴（過去）</div>', unsafe_allow_html=True)
+                        if not mh.empty: st.dataframe(mh.assign(日付=mh["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True, height=220)
+                    ch3, ch4 = st.columns(2)
+                    with ch3:
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#F97316;border-left:4px solid #F97316;padding-left:8px;">📦 出荷予定（今後）</div>', unsafe_allow_html=True)
+                        if not _fo.empty: st.dataframe(_fo.assign(日付=_fo["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付"), hide_index=True, height=220)
+                        else: st.caption("予定なし")
+                    with ch4:
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#6EE7B7;border-left:4px solid #10B981;padding-left:8px;">🏭 製造予定（今後）</div>', unsafe_allow_html=True)
+                        if not _fm.empty: st.dataframe(_fm.assign(日付=_fm["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付"), hide_index=True, height=220)
+                        else: st.caption("予定なし")
 
                 st.markdown('<div class="section-title">📅 今後60日間スケジュール</div>', unsafe_allow_html=True)
                 pof = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)] if not odf.empty else pd.DataFrame()
