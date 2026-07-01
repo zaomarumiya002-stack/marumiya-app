@@ -211,7 +211,6 @@ def save_sync(name, df):
         ws.clear()
         ws.update(values=update_values, range_name='A1')
         
-        st.cache_data.clear()
         st.session_state[f"{name}_df"] = df
         st.success(f"✅ {name} を正常に保存しました。")
     except Exception as e:
@@ -240,7 +239,6 @@ def app_sync(name, nr):
             else: rc[col] = rc[col].fillna('').astype(str)
             
         ws.append_row(rc.fillna("").values[0].tolist())
-        st.cache_data.clear()
         st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
     except Exception as e:
         st.error(f"追加保存エラー: {e}")
