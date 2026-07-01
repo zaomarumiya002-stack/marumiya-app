@@ -317,35 +317,60 @@ if not mst_u.empty:
     ae["qty"] = ae["qty"].apply(to_int)
     ae["備考"] = ae["備考"].fillna("").astype(str)
     ae["日付"] = pd.to_datetime(ae["日付"]).dt.normalize()
-    # 棚卸実績の判定（自動登録の差分データ「棚卸調整」は除外し、絶対値の棚卸レコードを優先）
-    ae["is_inv"] = ae["備考"].str.contains("棚卸") & ~ae["備考"].str.contains("棚卸調整")
+    
+    # 備考に [実棚: 数字] タグを含むものを「絶対値棚卸レコード」として認識
+    ae["is_inv"] = ae["備考"].str.contains(r"\[実棚:\d+\]")
     ae = ae.sort_values(["日付", "is_inv"])
-
+    
+    # 高速化のためにデータをグループ化し辞書形式に変換（pandasフィルタ排除）
+    p_events_dict = {}
+    for p, group in ae.groupby("製品名"):
+        p_events_dict[p] = group.to_dict("records")
+        
     for _, r in mst_u.iterrows():
         p = r["製品名"]
-        p_ae = ae[ae["製品名"] == p]
+        events = p_events_dict.get(p, [])
         
         current_stock = to_int(r.get("初期在庫数", 0))
         
-        # 今日より前の在庫推移を時系列でシミュレーション
-        past_events = p_ae[p_ae["日付"] < today]
-        for _, event in past_events.iterrows():
+        # 今日より前の過去シミュレーション
+        past_events = [e for e in events if e["日付"] < today]
+        for event in past_events:
             if event["is_inv"]:
-                current_stock = abs(event["qty"]) # 棚卸数量でリセット（過去を断ち切る）
+                # 備考欄の [実棚:120] から実在庫数を抽出してリセット
+                try:
+                    memo_str = event["備考"]
+                    start_idx = memo_str.find("[実棚:") + 4
+                    end_idx = memo_str.find("]", start_idx)
+                    current_stock = int(memo_str[start_idx:end_idx])
+                except Exception:
+                    pass
             else:
                 current_stock += event["qty"]
         
         c_s = current_stock
         cs[p] = c_s
         
-        # 今日以降の未来在庫をシミュレーション
+        # 今日以降の未来在庫シミュレーション
+        future_events = [e for e in events if e["日付"] >= today]
+        future_by_date = {}
+        for event in future_events:
+            d = event["日付"]
+            future_by_date.setdefault(d, []).append(event)
+            
         fs_p = {}
         sim_stock = c_s
         for d in dates:
-            daily_events = p_ae[p_ae["日付"] == d]
-            for _, event in daily_events.iterrows():
+            daily_evs = future_by_date.get(d, [])
+            for event in daily_evs:
                 if event["is_inv"]:
-                    sim_stock = abs(event["qty"])
+                    try:
+                        memo_str = event["備考"]
+                        start_idx = memo_str.find("[実棚:") + 4
+                        end_idx = memo_str.find("]", start_idx)
+                        sim_stock = int(memo_str[start_idx:end_idx])
+                    except Exception:
+                        pass
                 else:
                     sim_stock += event["qty"]
             fs_p[d] = sim_stock
@@ -1494,7 +1519,16 @@ elif pg == "📊 在庫・スケジュール":
                             app_sync("manufactures", pd.DataFrame([{
                                 "ID": nid, "製造予定日": pd.to_datetime(inv_d),
                                 "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
-                                "リパックフラグ": False, "備考": f"【棚卸調整+】{inv_note}".strip(),
+                                "リパックフラグ": False, "備考": f"【棚卸調整+】[実棚:{to_int(actual_q)}] {inv_note}".strip(),
+                                "登録日時": datetime.now(JST).replace(tzinfo=None),
+                            }]))
+                        else:
+                            app_sync("orders", pd.DataFrame([{
+                                "ID": nid, "納品予定日": pd.to_datetime(inv_d),
+                                "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
+                                "ケース数": abs(_diff), "運送会社": "",
+                                "備考": f"【棚卸調整-】[実棚:{to_int(actual_q)}] {inv_note}".strip(), "荷姿チェック": False, "発送備考": "",
+                                "不良廃棄フラグ": False, "日付未定フラグ": False,
                                 "登録日時": datetime.now(JST).replace(tzinfo=None),
                             }]))
                         else:
