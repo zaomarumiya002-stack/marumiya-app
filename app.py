@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import uuid
+import re
 from datetime import datetime, timedelta, date, timezone
 JST = timezone(timedelta(hours=+9))
 import gspread
@@ -306,21 +307,62 @@ for _ext_col, _ext_def in [
 # ─────────────────────────────────────────────
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
+TANAOSHI_TAG = "【棚卸確定"  # 棚卸チェックポイントの目印（この文字列＋実数を備考に埋め込む）
+ae = pd.DataFrame(columns=["日付", "製品名", "qty", "備考"])
+checkpoints = {}  # 製品名 -> {"日付":棚卸日, "実数":その時点の実カウント数}
+
 if not mst_u.empty:
-    ev_o = odf[["納品予定日","製品名","ケース数"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty"])
+    ev_o = odf[["納品予定日","製品名","ケース数","備考"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
-    ev_m = vm[["製造予定日","製品名","ケース数"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty"])
+    ev_m = vm[["製造予定日","製品名","ケース数","備考"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考"])
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
-    ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
+    ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"])
+    ae["qty"] = ae["qty"].apply(to_int); ae["備考"] = ae["備考"].fillna("")
+
+    # 📋 棚卸チェックポイント抽出：製品ごとに「最新の棚卸日」とその時の実数を特定する。
+    # それより前の履歴（初期在庫数や過去の受注・製造）は、以後の在庫計算では一切参照しない
+    # ＝ 棚卸を入力した瞬間の実数を基準に、以後の在庫はそこからリセットして積み上げる。
+    _tz_mask = ae["備考"].str.contains(TANAOSHI_TAG, regex=False)
+    if _tz_mask.any():
+        _tz = ae[_tz_mask].copy()
+        _tz["実数"] = _tz["備考"].str.extract(r"棚卸確定:(-?\d+)】").astype(float)
+        _tz = _tz.dropna(subset=["実数"]).sort_values("日付")
+        for p, g in _tz.groupby("製品名"):
+            last = g.iloc[-1]
+            checkpoints[p] = {"日付": last["日付"], "実数": to_int(last["実数"])}
+    ae = ae[~_tz_mask].copy()  # チェックポイント自体は実数へ統合済みなので、以後の流量計算からは除外
+
     pe = ae[ae["日付"] < today].groupby("製品名")["qty"].sum(); fe = ae[ae["日付"] >= today]
     piv = fe.pivot_table(index="製品名", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
     for _, r in mst_u.iterrows():
-        p = r["製品名"]; c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(p,0)); cs[p] = c_s
+        p = r["製品名"]; cp = checkpoints.get(p)
+        if cp:
+            # 棚卸チェックポイントあり：その日の実数を基準に、それより後の増減だけを積み上げる
+            _after = ae[(ae["製品名"] == p) & (ae["日付"] > cp["日付"]) & (ae["日付"] < today)]
+            c_s = cp["実数"] + to_int(_after["qty"].sum())
+        else:
+            # チェックポイントなし：従来通り初期在庫数からの積み上げ
+            c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(p,0))
+        cs[p] = c_s
         pr = piv.loc[p] if p in piv.index else pd.Series(0, index=dates)
         if isinstance(pr, pd.DataFrame): pr = pr.sum(axis=0)
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
+
+def stock_asof(p, asof_date):
+    """指定日の「開始時点」（その日の入出庫が反映される前）の計算上在庫を返す。
+    棚卸チェックポイントがあればそこを基準に、なければ初期在庫数を基準にする。"""
+    asof_ts = pd.Timestamp(asof_date).normalize()
+    cp = checkpoints.get(p)
+    if cp and cp["日付"] <= asof_ts:
+        base_qty, base_date = cp["実数"], cp["日付"]
+    else:
+        base_qty = to_int(mst_u[mst_u["製品名"] == p]["初期在庫数"].iloc[0]) if (not mst_u.empty and p in mst_u["製品名"].values) else 0
+        base_date = None
+    ev = ae[(ae["製品名"] == p) & (ae["日付"] < asof_ts)]
+    if base_date is not None: ev = ev[ev["日付"] > base_date]
+    return base_qty + to_int(ev["qty"].sum())
 
 # ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
 fd = 90; pf = {}
@@ -1439,7 +1481,7 @@ elif pg == "📊 在庫・スケジュール":
 
     with t5:
         st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
-        st.markdown("""<div class="info-tip">💡 実際に数えた在庫数（実棚卸数）を入力すると、現在の計算上の在庫との差分を自動計算し、「棚卸調整」として登録します。マスタの「初期在庫数」は変更しません。微調整用途を想定しています。</div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その瞬間の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。</div>""", unsafe_allow_html=True)
         inv_d = st.date_input("📅 棚卸日", value=date.today(), key="inv_date")
         prod_list = sorted(mst_u["製品名"].dropna().unique().tolist()) if not mst_u.empty else []
         ic1, ic2 = st.columns([1.5, 2.5])
@@ -1447,52 +1489,49 @@ elif pg == "📊 在庫・スケジュール":
         inv_f = [p for p in prod_list if inv_s in p] if inv_s else prod_list
         sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod")
         if sel_p:
-            _cur_cs = cs.get(sel_p, 0)
-            st.markdown(f'<div class="info-card">現在の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
+            _cur_cs = stock_asof(sel_p, inv_d)
+            st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
             actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=0, step=1, value=None, key="inv_qty")
             inv_note = st.text_input("📝 備考", key="inv_note")
             if actual_q is not None:
                 _diff = to_int(actual_q) - _cur_cs
                 if _diff == 0:
-                    st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています（登録不要）</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています（登録するとこの日を新しい基準点として確定します）</div>', unsafe_allow_html=True)
                 else:
                     _dcolor = "#059669" if _diff > 0 else "#DC2626"
                     st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_cur_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
             _inv_msg = st.empty()
-            if st.button("✅ 棚卸差分を登録", type="primary", use_container_width=True, key="inv_submit"):
+            if st.button("✅ 棚卸を確定（この時点にリセット）", type="primary", use_container_width=True, key="inv_submit"):
                 if actual_q is None:
                     _inv_msg.error("⚠️ 実棚卸数を入力してください")
                 else:
                     _diff = to_int(actual_q) - _cur_cs
-                    if _diff == 0:
-                        flash("info", f"ℹ️【{sel_p}】在庫数に変更なし（棚卸一致）")
-                        st.rerun()
+                    nid = str(uuid.uuid4())[:6].upper()
+                    _cat = mst_u[mst_u["製品名"] == sel_p]["大カテゴリ"].iloc[0] if sel_p in mst_u["製品名"].values else ""
+                    _tag = f"【棚卸確定:{to_int(actual_q)}】{inv_note}".strip()
+                    if _diff >= 0:
+                        app_sync("manufactures", pd.DataFrame([{
+                            "ID": nid, "製造予定日": pd.to_datetime(inv_d),
+                            "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
+                            "リパックフラグ": False, "備考": _tag,
+                            "登録日時": datetime.now(JST).replace(tzinfo=None),
+                        }]))
                     else:
-                        nid = str(uuid.uuid4())[:6].upper()
-                        _cat = mst_u[mst_u["製品名"] == sel_p]["大カテゴリ"].iloc[0] if sel_p in mst_u["製品名"].values else ""
-                        if _diff > 0:
-                            app_sync("manufactures", pd.DataFrame([{
-                                "ID": nid, "製造予定日": pd.to_datetime(inv_d),
-                                "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
-                                "リパックフラグ": False, "備考": f"【棚卸調整+】{inv_note}".strip(),
-                                "登録日時": datetime.now(JST).replace(tzinfo=None),
-                            }]))
-                        else:
-                            app_sync("orders", pd.DataFrame([{
-                                "ID": nid, "納品予定日": pd.to_datetime(inv_d),
-                                "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
-                                "ケース数": abs(_diff), "運送会社": "",
-                                "備考": f"【棚卸調整-】{inv_note}".strip(), "荷姿チェック": False, "発送備考": "",
-                                "不良廃棄フラグ": False, "日付未定フラグ": False,
-                                "登録日時": datetime.now(JST).replace(tzinfo=None),
-                            }]))
-                        flash("success", f"✅【{sel_p}】棚卸差分 {_diff:+,} cs を登録しました（{_cur_cs:,} → {to_int(actual_q):,}）")
-                        st.rerun()
+                        app_sync("orders", pd.DataFrame([{
+                            "ID": nid, "納品予定日": pd.to_datetime(inv_d),
+                            "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
+                            "ケース数": abs(_diff), "運送会社": "",
+                            "備考": _tag, "荷姿チェック": False, "発送備考": "",
+                            "不良廃棄フラグ": False, "日付未定フラグ": False,
+                            "登録日時": datetime.now(JST).replace(tzinfo=None),
+                        }]))
+                    flash("success", f"✅【{sel_p}】{format_date_jp(pd.Timestamp(inv_d))} 時点の在庫を {to_int(actual_q):,} cs で確定しました（{_cur_cs:,} → {to_int(actual_q):,}）。これより前の履歴は以後の計算に使われません。")
+                    st.rerun()
             show_flash_inline(_inv_msg)
 
-        st.markdown('<div class="section-title">📜 棚卸調整 履歴</div>', unsafe_allow_html=True)
-        _adj_o = odf[odf["備考"].fillna("").str.contains("【棚卸調整-】")] if not odf.empty else pd.DataFrame()
-        _adj_m = mdf[mdf["備考"].fillna("").str.contains("【棚卸調整\\+】")] if not mdf.empty else pd.DataFrame()
+        st.markdown('<div class="section-title">📜 棚卸 履歴</div>', unsafe_allow_html=True)
+        _adj_o = odf[odf["備考"].fillna("").str.contains(re.escape(TANAOSHI_TAG))] if not odf.empty else pd.DataFrame()
+        _adj_m = mdf[mdf["備考"].fillna("").str.contains(re.escape(TANAOSHI_TAG))] if not mdf.empty else pd.DataFrame()
         _hist_rows = []
         if not _adj_o.empty:
             for _, r in _adj_o.iterrows():
