@@ -30,10 +30,7 @@ def to_int(v):
 def nk(s):
     """製品名の全角/半角・前後スペースなどの表記ゆれを吸収した照合用キー"""
     try:
-        s = unicodedata.normalize("NFKC", str(s)).strip()
-        # 空白による不整合を排除
-        s = s.replace(" ", "").replace("　", "")
-        return s
+        return unicodedata.normalize("NFKC", str(s)).strip()
     except: return str(s).strip()
 
 def format_date_jp(d):
@@ -319,85 +316,25 @@ for _ext_col, _ext_def in [
 if not mst_u.empty:
     _mst_keys = set(mst_u["製品名"].apply(nk))
     nk2name = {nk(p): p for p in mst_u["製品名"]}
-    
-    # 名寄せ用関数: 表記ゆれや過去の製品名変更を現在のマスタ名に自動マッピング
-    def get_canonical_name(p_name):
-        if not p_name: return ""
-        p_nk = nk(p_name)
-        if p_nk in nk2name:
-            return nk2name[p_nk]
-        # 部分一致で最も近いマスタ名を探す
-        for mst_p in mst_u["製品名"]:
-            mst_nk = nk(mst_p)
-            if p_nk in mst_nk or mst_nk in p_nk:
-                return mst_p
-        return p_name
-
-    # 計算用バッファDFの作成および名寄せの適用
-    odf_calc = odf.copy() if not odf.empty else pd.DataFrame()
-    if not odf_calc.empty:
-        odf_calc["製品名_マスタ"] = odf_calc["製品名"].apply(get_canonical_name)
-    else:
-        odf_calc["製品名_マスタ"] = pd.Series(dtype=str)
-
-    mdf_calc = mdf.copy() if not mdf.empty else pd.DataFrame()
-    if not mdf_calc.empty:
-        mdf_calc["製品名_マスタ"] = mdf_calc["製品名"].apply(get_canonical_name)
-    else:
-        mdf_calc["製品名_マスタ"] = pd.Series(dtype=str)
-
-    # 特注・チャーター便の日付補完 (special_schedule から出荷予定日を取得して補完)
-    if not odf_calc.empty and not sp_s.empty:
-        sp_s_clean = sp_s.dropna(subset=["受注ID", "出荷予定日"])
-        sp_s_clean = sp_s_clean[sp_s_clean["受注ID"] != ""]
-        sp_s_mapping = sp_s_clean.set_index("受注ID")["出荷予定日"].to_dict()
-        
-        def fill_date_from_special(row):
-            dt = row.get("納品予定日")
-            # 日付未定フラグがTrueまたはNaTの場合、special_scheduleの出荷予定日で補完
-            if pd.isna(dt) or ("日付未定フラグ" in row and row["日付未定フラグ"] == True):
-                oid = row.get("ID")
-                if oid in sp_s_mapping and pd.notnull(sp_s_mapping[oid]):
-                    return pd.to_datetime(sp_s_mapping[oid])
-            return pd.to_datetime(dt)
-            
-        odf_calc["納品予定日_補完"] = odf_calc.apply(fill_date_from_special, axis=1)
-        
-        # スケジュールに入っている場合は「日付未定」のペンディング（引当控除）対象から除外して将来予測に組み込む
-        def recalc_undet_flag(row):
-            if "日付未定フラグ" in row and row["日付未定フラグ"] == True:
-                oid = row.get("ID")
-                if oid in sp_s_mapping and pd.notnull(sp_s_mapping[oid]):
-                    return False
-                return True
-            return False
-        odf_calc["日付未定フラグ_計算用"] = odf_calc.apply(recalc_undet_flag, axis=1)
-    else:
-        if not odf_calc.empty:
-            odf_calc["納品予定日_補完"] = pd.to_datetime(odf_calc["納品予定日"], errors='coerce')
-            odf_calc["日付未定フラグ_計算用"] = odf_calc["日付未定フラグ"] if "日付未定フラグ" in odf_calc.columns else False
-
-    # 補完後の日付および名寄せ後の製品名を用いて在庫予測を構築
-    ev_o = odf_calc[["納品予定日_補完","製品名_マスタ","ケース数"]].copy().rename(columns={"納品予定日_補完":"日付","ケース数":"qty","製品名_マスタ":"製品名"}) if not odf_calc.empty else pd.DataFrame(columns=["日付","製品名","qty"])
+    ev_o = odf[["納品予定日","製品名","ケース数"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
-    
-    vm = mdf_calc[~mdf_calc["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf_calc.empty else pd.DataFrame()
-    ev_m = vm[["製造予定日","製品名_マスタ","ケース数"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty","製品名_マスタ":"製品名"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty"])
+    vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
+    ev_m = vm[["製造予定日","製品名","ケース数"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
-    
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
-    ae["製品名key"] = ae["製品名"].apply(nk)
-    
+    ae["製品名key"] = ae["製品名"].apply(nk)  # 全角/半角・空白ゆれを吸収した照合キー
+    # マスタに存在しない製品名（表記ゆれ・入力ミス等）を検出 → 画面側で警告表示するために保持
     unmatched_products = sorted(set(ae.loc[~ae["製品名key"].isin(_mst_keys), "製品名"].dropna().unique().tolist()))
     pe = ae[ae["日付"] < today].groupby("製品名key")["qty"].sum(); fe = ae[ae["日付"] >= today]
     piv = fe.pivot_table(index="製品名key", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
-    
+    # 日付未定（出荷日未確定）の受注は、納品予定日がNaTのため上記の日付ベース集計から漏れる。
+    # 特注・チャーター便などで先に受注だけ確定しているケースが多いため、
+    # 「いずれ必ず出庫される確定引当数量」として現在庫～今後すべての予測日から差し引く。
     pend = pd.Series(dtype=int)
-    if not odf_calc.empty and "日付未定フラグ_計算用" in odf_calc.columns:
-        _pnd = odf_calc[odf_calc["日付未定フラグ_計算用"] == True]
+    if not odf.empty and "日付未定フラグ" in odf.columns:
+        _pnd = odf[odf["日付未定フラグ"] == True]
         if not _pnd.empty:
-            pend = _pnd.assign(製品名key=_pnd["製品名_マスタ"].apply(nk)).groupby("製品名key")["ケース数"].apply(lambda s: s.apply(to_int).sum())
-            
+            pend = _pnd.assign(製品名key=_pnd["製品名"].apply(nk)).groupby("製品名key")["ケース数"].apply(lambda s: s.apply(to_int).sum())
     for _, r in mst_u.iterrows():
         p = r["製品名"]; pk = nk(p)
         c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(pk,0)) - to_int(pend.get(pk,0)); cs[p] = c_s
@@ -410,8 +347,8 @@ if not mst_u.empty:
 fd = 90; pf = {}
 if not mst_u.empty and not odf.empty:
     mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
-    for _, r in odf_calc.iterrows():
-        p, q, dt = str(r.get("製品名_マスタ","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日_補完"),errors="coerce")
+    for _, r in odf.iterrows():
+        p, q, dt = str(r.get("製品名","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日"),errors="coerce")
         if pd.isna(dt) or dt.date()<date.today() or dt>today+timedelta(days=fd) or p not in mpi: continue
         pn = str(mpi[p].get("使用資材名",""))
         kbn = str(mpi[p].get("製造登録区分","ケース")).strip()
@@ -450,7 +387,7 @@ for pn in p_sum.keys(): pf.setdefault(pn, {})
 
 past_30_days = today - timedelta(days=30)
 daily_usage = {}
-net_change_by_day = {}
+net_change_by_day = {} # ★追加：グラフ逆算用の日別純増減
 
 if not pk_l.empty:
     for _, r in pk_l.iterrows():
@@ -463,6 +400,7 @@ if not pk_l.empty:
         pt = str(r.get("処理区分",""))
         
         if pn in p_sum:
+            # ★修復：mdfからの二重計上をやめ、純粋に履歴から入出庫を計算する
             if "入庫" in pt:
                 p_sum[pn]["入庫"] += q
                 net_chg = q
@@ -472,11 +410,13 @@ if not pk_l.empty:
             else:
                 net_chg = 0
                 
+            # 逆算グラフ用
             d_norm = dt.normalize().date()
             net_change_by_day.setdefault(pn, {})
             net_change_by_day[pn].setdefault(d_norm, 0)
             net_change_by_day[pn][d_norm] += net_chg
             
+            # 統計用
             if dt >= past_30_days:
                 if "出庫" in pt or "連動" in pt:
                     d_str = dt.normalize().strftime("%Y-%m-%d")
@@ -493,6 +433,8 @@ for pn, u in sorted_usage:
     if ratio <= 0.7: abc_rank[pn] = "A"
     elif ratio <= 0.95: abc_rank[pn] = "B"
     else: abc_rank[pn] = "C"
+
+# ★修復：mdfをループして出庫を足す処理（二重計上の元凶）を完全に削除しました。
 
 for pn, d in p_sum.items():
     d["現在庫"] = d.get("期首在庫", 0) + d.get("入庫", 0) - d.get("出庫", 0)
@@ -654,8 +596,8 @@ if pg == "📋 受注登録":
             _udf_msg = st.empty()
             if st.button("✅ 日付確定保存", type="primary", use_container_width=True):
                 upd = odf.copy(); cnt=0
-                for _, r in ed_u.iterrows():
-                    oid = r.get("ID")  # 位置参照ではなく直接IDを取得して不整合を防止
+                for i, r in ed_u.iterrows():
+                    oid = u_df.iloc[i]["ID"] if i<len(u_df) else None
                     if not oid or pd.isnull(r.get("納品予定日(確定)")): continue
                     m = upd["ID"]==oid
                     upd.loc[m,"納品予定日"] = pd.to_datetime(r.get("納品予定日(確定)")); upd.loc[m,"日付未定フラグ"] = False
@@ -960,10 +902,12 @@ elif pg == "📦 資材・入出庫":
             pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
             spg = st.selectbox("グラフ表示", options=[r["資材名"] for _, r in pack_mst_unique.iterrows() if r["資材名"]])
             if spg:
+                # ★修復：過去30日の実績〜未来90日の予測を繋げて描画する
                 ri = p_sum.get(spg,{}).get("現在庫",0)
                 ri_future = ri
                 gd, gs, gu = [], [], []
                 
+                # 未来予測（現在庫から順算）
                 for d_g in pd.date_range(today, today+timedelta(days=fd)):
                     ug = pf.get(spg,{}).get(d_g,0)
                     ri_future -= ug
@@ -971,6 +915,7 @@ elif pg == "📦 資材・入出庫":
                     gs.append(ri_future)
                     gu.append(-ug)
                 
+                # 過去30日実績（現在庫から逆算）
                 ri_past = ri
                 past_dates = pd.date_range(today-timedelta(days=30), today-timedelta(days=1))
                 past_gd, past_gs, past_gu = [], [], []
@@ -1116,6 +1061,7 @@ elif pg == "📦 資材・入出庫":
                         st.rerun()
                 show_flash_inline(_del_msg)
             else:
+                # ★修復：エディタから返ってきたIDを信頼するように変更し、履歴消失バグを防止
                 edp = st.data_editor(
                     _dpk_show[_tp4_cols], hide_index=True,
                     use_container_width=True,
@@ -1383,10 +1329,10 @@ elif pg == "📊 在庫・スケジュール":
 
                     ch1, ch2 = st.columns(2)
                     with ch1:
-                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>', unsafe_allow_html=True)
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴（過去）</div>', unsafe_allow_html=True)
                         if not ph.empty: st.dataframe(ph.assign(日付=ph["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True, height=220)
                     with ch2:
-                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴（過去）</div>', unsafe_allow_html=True)
                         if not mh.empty: st.dataframe(mh.assign(日付=mh["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True, height=220)
                     ch3, ch4 = st.columns(2)
                     with ch3:
@@ -1620,7 +1566,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
     spo = odf[odf["備考"].apply(is_special_order)].copy() if not odf.empty else pd.DataFrame()
     ts1, ts2, ts3 = st.tabs(["📋 一覧","📅 製品別スケジュール","✏️ 編集・保存"])
     with ts1:
-        if spo.empty: st.info("対象の特注・チャーター便予定はありません。")
+        if spo.empty: st.info("なし")
         else:
             spo["種別"] = spo["備考"].apply(lambda r: "特注+チャーター便" if "特注" in str(r) and "チャーター便" in str(r) else ("特注" if "特注" in str(r) else "チャーター便"))
             _dtcol = pd.to_datetime(spo["納品予定日"], errors="coerce")
@@ -1641,14 +1587,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
             if spo_future.empty: st.caption("なし")
             else:
                 spo_future["出荷予定日"] = spo_future["納品予定日"].apply(format_date_jp)
-                # get_canonical_name を活用し、名称変更後のマスタ予測在庫と正しくマッチング
-                def _get_spo_stock_status(r):
-                    p_canon = get_canonical_name(r["製品名"])
-                    d_norm = pd.to_datetime(r["納品予定日"]).normalize()
-                    stock_val = fs.get(p_canon, {}).get(d_norm, cs.get(p_canon, 0))
-                    return "❌ 欠品" if stock_val < 0 else "✅ OK"
-                
-                spo_future["在庫状況"] = spo_future.apply(_get_spo_stock_status, axis=1)
+                spo_future["在庫状況"] = spo_future.apply(lambda r: ("❌ 欠品" if fs.get(nk2name.get(nk(r["製品名"]), r["製品名"]),{}).get(pd.to_datetime(r["納品予定日"]).normalize(), cs.get(nk2name.get(nk(r["製品名"]), r["製品名"]),0)) < 0 else "✅ OK"), axis=1)
                 spo_future = spo_future.sort_values("納品予定日")
                 _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","在庫状況","備考"] if c in spo_future.columns]
                 st.dataframe(_style_spo(spo_future[_sc]), hide_index=True, use_container_width=True)
@@ -1683,10 +1622,8 @@ elif pg == "⭐ 特注・チャータースケジュール":
             ed = st.data_editor(se[[c for c in ["ID","種別","製品名","顧客名","出荷予定日(表示)","出荷予定日_edit","備考"] if c in se.columns]], hide_index=True, column_config={"ID":None,"種別":st.column_config.TextColumn(disabled=True),"製品名":st.column_config.TextColumn(disabled=True),"顧客名":st.column_config.TextColumn(disabled=True),"出荷予定日(表示)":st.column_config.TextColumn(disabled=True),"出荷予定日_edit":st.column_config.DateColumn("📅 出荷予定日",format="YYYY/MM/DD")})
             _sp_save_msg = st.empty()
             if st.button("💾 保存", type="primary"):
-                for _, r in ed.iterrows():
-                    row_id = r.get("ID")  # 位置（iloc）からではなく直接IDで検索して InvalidIndexError を回避
-                    if not row_id: continue
-                    m = sw["ID"]==row_id
+                for i, r in ed.iterrows():
+                    m = sw["ID"]==se.iloc[i]["ID"]
                     if r.get("出荷予定日_edit"): sw.loc[m,"出荷予定日"] = pd.to_datetime(r.get("出荷予定日_edit"))
                     sw.loc[m,"備考"] = str(r.get("備考","")); sw.loc[m,"更新日時"] = datetime.now()
                 save_sync("special_schedule", sw)
@@ -2202,11 +2139,13 @@ elif pg == "🏗️ 製造スケジューラー":
         needed.sort(key=lambda t:(t["段取りG"] or "ZZZ",t["優先度"],t["出荷日"]))
         return needed+[t for t in tasks if t["製造必要量(cs)"]==0]
 
+    # --- ASPROVA型：ライン別の並行稼働エンジン ---
     def _engine_fcs(tasks_in, mode, start_dt, ws_h, we_h, co_matrix, shift_slots, break_slots, co_df, do_2opt=True):
         res = []
         if not tasks_in: return res
         pa_cache = {t["製品名"]: _gpp(t["製品名"]) for t in tasks_in}
         
+        # ラインごとにタスクを分割
         line_tasks = {}
         for t in tasks_in:
             line_id = pa_cache[t["製品名"]]["ラインID"]
@@ -2216,6 +2155,7 @@ elif pg == "🏗️ 製造スケジューラー":
         PROC_MIN = {"調合・練り":"最少人員_調合","成形・糊付け":"最少人員_成形","包装・充填":"最少人員_包装","レトルト・冷却":"最少人員_レトルト"}
         PROC_RATIO = {"調合・練り":"調合比率","成形・糊付け":"成形比率","包装・充填":"包装比率","レトルト・冷却":"レトルト比率"}
         
+        # ライン別に独立してスケジュール（FCS）
         for line, l_tasks in line_tasks.items():
             ordered = _tsp_2opt(l_tasks, co_matrix) if do_2opt else sorted(l_tasks, key=lambda t:(t.get("優先度",5), t["出荷日"] if isinstance(t["出荷日"],pd.Timestamp) else pd.Timestamp.today()))
             
@@ -2239,6 +2179,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 lt = float(pa["リードタイム時間"])
                 ship = task.get("出荷日", pd.NaT)
 
+                # 段取り
                 com = _co_time(prev_pn, pn, co_matrix) if prev_pn else 0
                 coh = com / 60.
                 con = _is_contam(prev_pn, pn, co_df)
@@ -2250,11 +2191,13 @@ elif pg == "🏗️ 製造スケジューラー":
                         "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":com,"コンタミリスク":con, "優先度":task.get("優先度",5), "ステータス":"⚠️ 黒→白 要徹底洗浄" if con else "段取り", "最少人数":1,"キーマン必要":con,"_segs":[]})
                     cursor = ce_
 
+                # 準備
                 if lt > 0:
                     lt_e, lt_segs = _advance(cursor, lt, ws_h, we_h, shift_slots, break_slots, pa["最少人員_調合"])
                     res.append({"区分":"🟡 準備","製品名":pn,"工程":"準備","ライン":line, "開始":cursor,"終了":lt_e,"所要時間(h)":round(lt,2),"製造量(cs)":0, "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":0,"コンタミリスク":False, "優先度":task.get("優先度",5),"ステータス":task.get("ステータス",""), "最少人数":pa["最少人員_調合"],"キーマン必要":pa["キーマン必要"],"_segs":lt_segs})
                     cursor = lt_e
 
+                # 4工程展開
                 for proc in _PROCESSES:
                     ph = round(mh * pa[PROC_RATIO[proc]], 2)
                     ms = pa[PROC_MIN[proc]]
@@ -2267,6 +2210,7 @@ elif pg == "🏗️ 製造スケジューラー":
 
                 prev_pn = pn
         
+        # 全ライン分をマージして時間順ソート
         res.sort(key=lambda x: (x["開始"] if isinstance(x["開始"], pd.Timestamp) else pd.Timestamp.min))
         return res
 
@@ -2328,7 +2272,7 @@ elif pg == "🏗️ 製造スケジューラー":
 
     _co_matrix   = _build_co(st.session_state.v3_co)
     all_tasks    = _calc_tasks(hd, ws_h, we_h)
-    needed_tasks = [t for t in all_tasks if t["製造必要量(cs)"] > 0]
+    needed_tasks = [t for t in all_tasks if t["製造必要量(cs)"]>0]
     display_tasks = all_tasks if show_ok else needed_tasks
 
     if st.session_state.v3_manual_order:
@@ -2337,47 +2281,47 @@ elif pg == "🏗️ 製造スケジューラー":
     else:
         _tasks_for_engine = needed_tasks
 
-    _sh_slots = _build_shift_slots(st.session_state.v3_shift)
-    _br_slots = _build_break_slots(st.session_state.v3_break)
+    import hashlib, json
+    def _make_cache_key():
+        key_data = {
+            "hd": hd, "mode": sched_mode, "ws": ws_h, "we": we_h, "start": str(start_date), "do2opt": do_2opt,
+            "tasks": [(t["製品名"], t["製造必要量(cs)"], str(t["出荷日"])) for t in _tasks_for_engine],
+            "co": st.session_state.v3_co.to_json() if not st.session_state.v3_co.empty else "",
+            "shift": st.session_state.v3_shift.to_json() if not st.session_state.v3_shift.empty else "",
+            "break": st.session_state.v3_break.to_json() if not st.session_state.v3_break.empty else "",
+            "order": st.session_state.v3_manual_order,
+        }
+        return hashlib.md5(json.dumps(key_data, default=str, sort_keys=True).encode()).hexdigest()[:12]
 
-    _sched = []
-    if _tasks_for_engine:
-        # キャッシュキーの作成と再計算判定
-        def _make_cache_key():
-            import hashlib, json
-            key_data = {
-                "hd": hd, "mode": sched_mode, "ws": ws_h, "we": we_h, "start": str(start_date), "do2opt": do_2opt,
-                "tasks": [(t["製品名"], t["製造必要量(cs)"], str(t["出荷日"])) for t in _tasks_for_engine],
-                "co": st.session_state.v3_co.to_json() if not st.session_state.v3_co.empty else "",
-                "shift": st.session_state.v3_shift.to_json() if not st.session_state.v3_shift.empty else "",
-                "break": st.session_state.v3_break.to_json() if not st.session_state.v3_break.empty else "",
-                "order": st.session_state.v3_manual_order,
-            }
-            return hashlib.md5(json.dumps(key_data, default=str, sort_keys=True).encode()).hexdigest()[:12]
+    _cache_key = _make_cache_key()
+    _cached_key  = st.session_state.get("v3_sched_key", "")
+    _cached_sched = st.session_state.get("v3_sched_result", [])
+    _shift_slots = _build_shift_slots(st.session_state.v3_shift)
+    _break_slots = _build_break_slots(st.session_state.v3_break)
+    _needs_recalc = (_cache_key != _cached_key)
 
-        _cache_key = _make_cache_key()
-        _cached_key  = st.session_state.get("v3_sched_key", "")
-        _cached_sched = st.session_state.get("v3_sched_result", [])
-        _needs_recalc = (_cache_key != _cached_key)
+    st.markdown("<div style='margin:6px 0 4px;'></div>", unsafe_allow_html=True)
+    _btn_col, _info_col = st.columns([2, 5])
+    if _btn_col.button("🔄 スケジュールを計算・更新", type="primary" if _needs_recalc else "secondary", use_container_width=True, key="v3_run_sched"):
+        _needs_recalc = True
 
-        st.markdown("<div style='margin:6px 0 4px;'></div>", unsafe_allow_html=True)
-        _btn_col, _info_col = st.columns([2, 5])
-        if _btn_col.button("🔄 スケジュールを計算・更新", type="primary" if _needs_recalc else "secondary", use_container_width=True, key="v3_run_sched"):
-            _needs_recalc = True
-
-        if _needs_recalc:
-            with st.spinner(f"⚙️ 計算中… {len(_tasks_for_engine)}品目{'・2-opt最適化' if do_2opt else '（高速モード）'}"):
-                _sched = _engine_fcs(
-                    _tasks_for_engine, mode="forward" if "フォワード" in sched_mode else "backward",
-                    start_dt=datetime.combine(start_date, datetime.min.time()),
-                    ws_h=float(ws_h), we_h=float(we_h), co_matrix=_co_matrix, shift_slots=_sh_slots, break_slots=_br_slots, co_df=st.session_state.v3_co, do_2opt=do_2opt,
-                )
-            st.session_state.v3_sched_result = _sched
-            st.session_state.v3_sched_key    = _cache_key
-            _info_col.success(f"✅ 計算完了（{len(_sched)}工程）")
-        else:
-            _sched = _cached_sched
-            _info_col.caption(f"📋 前回計算済みの結果を表示中（{len(_sched)}工程）  設定を変更したら「🔄 計算・更新」を押してください")
+    if _needs_recalc and _tasks_for_engine:
+        with st.spinner(f"⚙️ 計算中… {len(_tasks_for_engine)}品目{'・2-opt最適化' if do_2opt else '（高速モード）'}"):
+            _sched = _engine_fcs(
+                _tasks_for_engine, mode="forward" if "フォワード" in sched_mode else "backward",
+                start_dt=datetime.combine(start_date, datetime.min.time()),
+                ws_h=float(ws_h), we_h=float(we_h), co_matrix=_co_matrix, shift_slots=_shift_slots, break_slots=_break_slots, co_df=st.session_state.v3_co, do_2opt=do_2opt,
+            )
+        st.session_state.v3_sched_result = _sched
+        st.session_state.v3_sched_key    = _cache_key
+        _info_col.success(f"✅ 計算完了（{len(_sched)}工程）")
+    elif not _tasks_for_engine:
+        _sched = []
+        st.session_state.v3_sched_result = []
+        st.session_state.v3_sched_key    = _cache_key
+    else:
+        _sched = _cached_sched
+        _info_col.caption(f"📋 前回計算済みの結果を表示中（{len(_sched)}工程）  設定を変更したら「🔄 計算・更新」を押してください")
 
     cnt_urg = sum(1 for t in needed_tasks if t["優先度"]<=2)
     cnt_cau = sum(1 for t in needed_tasks if t["優先度"]==3)
