@@ -1,7 +1,3 @@
-システム修繕中です。志村からの連絡をおまちください。。。。
-
-
-
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
@@ -312,29 +308,39 @@ for _ext_col, _ext_def in [
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
 TANAOSHI_TAG = "【棚卸確定"  # 棚卸チェックポイントの目印（この文字列＋実数を備考に埋め込む）
-ae = pd.DataFrame(columns=["日付", "製品名", "qty", "備考"])
-checkpoints = {}  # 製品名 -> {"日付":棚卸日, "実数":その時点の実カウント数}
+ae = pd.DataFrame(columns=["日付", "製品名", "qty", "備考", "登録日時"])
+checkpoints = {}  # 製品名 -> {"日付":棚卸日, "登録日時":登録時刻, "実数":その時点の実カウント数}
+
+def _after_checkpoint_mask(df, cp):
+    """同じ日でも「棚卸の登録より後に入力された取引」だけを True にする。
+    （＝棚卸カウント後に登録された製造・出荷は、正しく以後の在庫に加算される）"""
+    if cp is None: return pd.Series(True, index=df.index)
+    cp_dt = cp.get("登録日時")
+    if pd.isna(cp_dt): cp_dt = pd.Timestamp.min
+    ev_dt = df["登録日時"].fillna(pd.Timestamp.min)
+    return (df["日付"] > cp["日付"]) | ((df["日付"] == cp["日付"]) & (ev_dt > cp_dt))
 
 if not mst_u.empty:
-    ev_o = odf[["納品予定日","製品名","ケース数","備考"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考"])
+    ev_o = odf[["納品予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
-    ev_m = vm[["製造予定日","製品名","ケース数","備考"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考"])
+    ev_m = vm[["製造予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"])
     ae["qty"] = ae["qty"].apply(to_int); ae["備考"] = ae["備考"].fillna("")
+    ae["登録日時"] = pd.to_datetime(ae["登録日時"], errors="coerce")
 
-    # 📋 棚卸チェックポイント抽出：製品ごとに「最新の棚卸日」とその時の実数を特定する。
+    # 📋 棚卸チェックポイント抽出：製品ごとに「最新の棚卸日時」とその時の実数を特定する。
     # それより前の履歴（初期在庫数や過去の受注・製造）は、以後の在庫計算では一切参照しない
     # ＝ 棚卸を入力した瞬間の実数を基準に、以後の在庫はそこからリセットして積み上げる。
     _tz_mask = ae["備考"].str.contains(TANAOSHI_TAG, regex=False)
     if _tz_mask.any():
         _tz = ae[_tz_mask].copy()
         _tz["実数"] = _tz["備考"].str.extract(r"棚卸確定:(-?\d+)】").astype(float)
-        _tz = _tz.dropna(subset=["実数"]).sort_values("日付")
+        _tz = _tz.dropna(subset=["実数"]).sort_values(["日付","登録日時"])
         for p, g in _tz.groupby("製品名"):
             last = g.iloc[-1]
-            checkpoints[p] = {"日付": last["日付"], "実数": to_int(last["実数"])}
+            checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"])}
     ae = ae[~_tz_mask].copy()  # チェックポイント自体は実数へ統合済みなので、以後の流量計算からは除外
 
     pe = ae[ae["日付"] < today].groupby("製品名")["qty"].sum(); fe = ae[ae["日付"] >= today]
@@ -342,8 +348,9 @@ if not mst_u.empty:
     for _, r in mst_u.iterrows():
         p = r["製品名"]; cp = checkpoints.get(p)
         if cp:
-            # 棚卸チェックポイントあり：その日の実数を基準に、それより後の増減だけを積み上げる
-            _after = ae[(ae["製品名"] == p) & (ae["日付"] > cp["日付"]) & (ae["日付"] < today)]
+            # 棚卸チェックポイントあり：その実数を基準に、棚卸登録より後の増減だけを積み上げる
+            _pmask = ae["製品名"] == p
+            _after = ae[_pmask & _after_checkpoint_mask(ae, cp) & (ae["日付"] < today)]
             c_s = cp["実数"] + to_int(_after["qty"].sum())
         else:
             # チェックポイントなし：従来通り初期在庫数からの積み上げ
@@ -360,12 +367,11 @@ def stock_asof(p, asof_date):
     asof_ts = pd.Timestamp(asof_date).normalize()
     cp = checkpoints.get(p)
     if cp and cp["日付"] <= asof_ts:
-        base_qty, base_date = cp["実数"], cp["日付"]
+        base_qty = cp["実数"]
     else:
         base_qty = to_int(mst_u[mst_u["製品名"] == p]["初期在庫数"].iloc[0]) if (not mst_u.empty and p in mst_u["製品名"].values) else 0
-        base_date = None
-    ev = ae[(ae["製品名"] == p) & (ae["日付"] < asof_ts)]
-    if base_date is not None: ev = ev[ev["日付"] > base_date]
+        cp = None
+    ev = ae[(ae["製品名"] == p) & (ae["日付"] < asof_ts) & _after_checkpoint_mask(ae, cp)]
     return base_qty + to_int(ev["qty"].sum())
 
 # ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
@@ -1487,11 +1493,12 @@ elif pg == "📊 在庫・スケジュール":
         st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
         st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その瞬間の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。</div>""", unsafe_allow_html=True)
         inv_d = st.date_input("📅 棚卸日", value=date.today(), key="inv_date")
-        prod_list = sorted(mst_u["製品名"].dropna().unique().tolist()) if not mst_u.empty else []
+        inv_cat_full = st.pills("カテゴリ", CATS, default=CATS[0], label_visibility="collapsed", key="inv_cat")
+        inv_cat = inv_cat_full.split(" ",1)[1] if inv_cat_full else CATS[0].split(" ",1)[1]
         ic1, ic2 = st.columns([1.5, 2.5])
         inv_s = ic1.text_input("🔍 検索", key="inv_search")
-        inv_f = [p for p in prod_list if inv_s in p] if inv_s else prod_list
-        sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod")
+        inv_f = [p for p in mst_u["製品名"].tolist() if inv_s in p] if inv_s else (mst_u[mst_u["大カテゴリ"]==inv_cat]["製品名"].tolist() if not mst_u.empty else [])
+        sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod", format_func=fn)
         if sel_p:
             _cur_cs = stock_asof(sel_p, inv_d)
             st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
