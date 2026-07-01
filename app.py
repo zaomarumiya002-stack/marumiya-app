@@ -1,4 +1,6 @@
 import os
+import re
+import unicodedata
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
 os.environ["STREAMLIT_THEME_BACKGROUND_COLOR"] = "#F8FAFC"
@@ -25,6 +27,12 @@ def to_int(v):
         if pd.isna(v) or str(v).strip() == "": return 0
         return int(float(v))
     except: return 0
+
+def nk(s):
+    """製品名の全角/半角・前後スペースなどの表記ゆれを吸収した照合用キー"""
+    try:
+        return unicodedata.normalize("NFKC", str(s)).strip()
+    except: return str(s).strip()
 
 def format_date_jp(d):
     if d is None: return ""
@@ -211,6 +219,7 @@ def save_sync(name, df):
         ws.clear()
         ws.update(values=update_values, range_name='A1')
         
+        st.cache_data.clear()
         st.session_state[f"{name}_df"] = df
         st.success(f"✅ {name} を正常に保存しました。")
     except Exception as e:
@@ -239,6 +248,7 @@ def app_sync(name, nr):
             else: rc[col] = rc[col].fillna('').astype(str)
             
         ws.append_row(rc.fillna("").values[0].tolist())
+        st.cache_data.clear()
         st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
     except Exception as e:
         st.error(f"追加保存エラー: {e}")
@@ -285,7 +295,7 @@ def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.c
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
 today = pd.Timestamp.today().normalize(); dates = pd.date_range(today, today + timedelta(days=60))
-cs = {}; fs = {}
+cs = {}; fs = {}; unmatched_products = []; nk2name = {}
 mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(
     columns=["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数",
              "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
@@ -305,75 +315,48 @@ for _ext_col, _ext_def in [
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
 if not mst_u.empty:
-    ev_o = odf[["納品予定日","製品名","ケース数","備考"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考"])
+    _mst_keys = set(mst_u["製品名"].apply(nk))
+    nk2name = {nk(p): p for p in mst_u["製品名"]}
+    ev_o = odf[["納品予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
-    ev_m = vm[["製造予定日","製品名","ケース数","備考"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考"])
+    ev_m = vm[["製造予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
-    
-    ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"])
-    ae["qty"] = ae["qty"].apply(to_int)
-    ae["備考"] = ae["備考"].fillna("").astype(str)
-    ae["日付"] = pd.to_datetime(ae["日付"]).dt.normalize()
-    
-    # 備考に [実棚: 数字] タグを含むものを「絶対値棚卸レコード」として認識
-    ae["is_inv"] = ae["備考"].str.contains(r"\[実棚:\d+\]")
-    ae = ae.sort_values(["日付", "is_inv"])
-    
-    # 高速化のためにデータをグループ化し辞書形式に変換（pandasフィルタ排除）
-    p_events_dict = {}
-    for p, group in ae.groupby("製品名"):
-        p_events_dict[p] = group.to_dict("records")
-        
+    ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
+    ae["製品名key"] = ae["製品名"].apply(nk)  # 全角/半角・空白ゆれを吸収した照合キー
+    # マスタに存在しない製品名（表記ゆれ・入力ミス等）を検出 → 画面側で警告表示するために保持
+    unmatched_products = sorted(set(ae.loc[~ae["製品名key"].isin(_mst_keys), "製品名"].dropna().unique().tolist()))
+    pe = ae[ae["日付"] < today].groupby("製品名key")["qty"].sum(); fe = ae[ae["日付"] >= today]
+    piv = fe.pivot_table(index="製品名key", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
+    # 日付未定（出荷日未確定）の受注は、納品予定日がNaTのため上記の日付ベース集計から漏れる。
+    # 特注・チャーター便などで先に受注だけ確定しているケースが多いため、
+    # 「いずれ必ず出庫される確定引当数量」として現在庫～今後すべての予測日から差し引く。
+    pend = pd.Series(dtype=int)
+    if not odf.empty and "日付未定フラグ" in odf.columns:
+        _pnd = odf[odf["日付未定フラグ"] == True]
+        if not _pnd.empty:
+            pend = _pnd.assign(製品名key=_pnd["製品名"].apply(nk)).groupby("製品名key")["ケース数"].apply(lambda s: s.apply(to_int).sum())
+    # 棚卸基準アンカー：備考に埋め込まれた「実棚卸数=NNN」を持つ最新の棚卸登録を、
+    # 過去の全履歴を毎回積み上げる代わりの「起点」として利用する（製品ごと）。
+    # これにより、古いデータ入力漏れ等が理論在庫にいつまでも影響し続けることを防ぐ。
+    _anc_re = re.compile(r"実棚卸数[:=]\s*(-?\d+)")
+    ae["_anchor_val"] = ae["備考"].fillna("").apply(lambda s: (lambda m: int(m.group(1)) if m else None)(_anc_re.search(str(s))))
+    _anc_df = ae[ae["_anchor_val"].notna()].copy()
+    anchors = _anc_df.sort_values(["日付","登録日時"], na_position="first").groupby("製品名key").last()[["日付","_anchor_val"]] if not _anc_df.empty else pd.DataFrame(columns=["日付","_anchor_val"])
     for _, r in mst_u.iterrows():
-        p = r["製品名"]
-        events = p_events_dict.get(p, [])
-        
-        current_stock = to_int(r.get("初期在庫数", 0))
-        
-        # 今日より前の過去シミュレーション
-        past_events = [e for e in events if e["日付"] < today]
-        for event in past_events:
-            if event["is_inv"]:
-                # 備考欄の [実棚:120] から実在庫数を抽出してリセット
-                try:
-                    memo_str = event["備考"]
-                    start_idx = memo_str.find("[実棚:") + 4
-                    end_idx = memo_str.find("]", start_idx)
-                    current_stock = int(memo_str[start_idx:end_idx])
-                except Exception:
-                    pass
-            else:
-                current_stock += event["qty"]
-        
-        c_s = current_stock
-        cs[p] = c_s
-        
-        # 今日以降の未来在庫シミュレーション
-        future_events = [e for e in events if e["日付"] >= today]
-        future_by_date = {}
-        for event in future_events:
-            d = event["日付"]
-            future_by_date.setdefault(d, []).append(event)
-            
-        fs_p = {}
-        sim_stock = c_s
-        for d in dates:
-            daily_evs = future_by_date.get(d, [])
-            for event in daily_evs:
-                if event["is_inv"]:
-                    try:
-                        memo_str = event["備考"]
-                        start_idx = memo_str.find("[実棚:") + 4
-                        end_idx = memo_str.find("]", start_idx)
-                        sim_stock = int(memo_str[start_idx:end_idx])
-                    except Exception:
-                        pass
-                else:
-                    sim_stock += event["qty"]
-            fs_p[d] = sim_stock
-            
-        fs[p] = fs_p
+        p = r["製品名"]; pk = nk(p)
+        if pk in anchors.index:
+            a_date = anchors.loc[pk, "日付"]; a_val = to_int(anchors.loc[pk, "_anchor_val"])
+            _win = ae[(ae["製品名key"] == pk) & (ae["日付"] > a_date)]  # 棚卸日より後のイベントのみ加減算（棚卸日当日分は実棚卸数に反映済み）
+            c_s = a_val + to_int(_win[_win["日付"] < today]["qty"].sum()) - to_int(pend.get(pk, 0)); cs[p] = c_s
+            _pr = _win[_win["日付"] >= today].groupby("日付")["qty"].sum().reindex(dates, fill_value=0).fillna(0).cumsum()
+            fs[p] = {d: c_s + to_int(_pr.get(d, 0)) for d in dates}
+        else:
+            c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(pk,0)) - to_int(pend.get(pk,0)); cs[p] = c_s
+            pr = piv.loc[pk] if pk in piv.index else pd.Series(0, index=dates)
+            if isinstance(pr, pd.DataFrame): pr = pr.sum(axis=0)
+            pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
+            fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
 
 # ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
 fd = 90; pf = {}
@@ -419,7 +402,7 @@ for pn in p_sum.keys(): pf.setdefault(pn, {})
 
 past_30_days = today - timedelta(days=30)
 daily_usage = {}
-net_change_by_day = {}
+net_change_by_day = {} # ★追加：グラフ逆算用の日別純増減
 
 if not pk_l.empty:
     for _, r in pk_l.iterrows():
@@ -432,6 +415,7 @@ if not pk_l.empty:
         pt = str(r.get("処理区分",""))
         
         if pn in p_sum:
+            # ★修復：mdfからの二重計上をやめ、純粋に履歴から入出庫を計算する
             if "入庫" in pt:
                 p_sum[pn]["入庫"] += q
                 net_chg = q
@@ -441,11 +425,13 @@ if not pk_l.empty:
             else:
                 net_chg = 0
                 
+            # 逆算グラフ用
             d_norm = dt.normalize().date()
             net_change_by_day.setdefault(pn, {})
             net_change_by_day[pn].setdefault(d_norm, 0)
             net_change_by_day[pn][d_norm] += net_chg
             
+            # 統計用
             if dt >= past_30_days:
                 if "出庫" in pt or "連動" in pt:
                     d_str = dt.normalize().strftime("%Y-%m-%d")
@@ -462,6 +448,8 @@ for pn, u in sorted_usage:
     if ratio <= 0.7: abc_rank[pn] = "A"
     elif ratio <= 0.95: abc_rank[pn] = "B"
     else: abc_rank[pn] = "C"
+
+# ★修復：mdfをループして出庫を足す処理（二重計上の元凶）を完全に削除しました。
 
 for pn, d in p_sum.items():
     d["現在庫"] = d.get("期首在庫", 0) + d.get("入庫", 0) - d.get("出庫", 0)
@@ -530,6 +518,7 @@ with st.sidebar:
         for _s in ["orders","manufactures","master","customers","packaging_master",
                    "packaging_logs","shipping_master","special_schedule","order_purchases"]:
             st.session_state.pop(f"{_s}_df", None)
+        st.cache_data.clear()
         st.session_state._flash = {"type": "success", "msg": "✅ スプレッドシートから最新データを再読込しました。"}
         st.rerun()
 
@@ -928,10 +917,12 @@ elif pg == "📦 資材・入出庫":
             pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
             spg = st.selectbox("グラフ表示", options=[r["資材名"] for _, r in pack_mst_unique.iterrows() if r["資材名"]])
             if spg:
+                # ★修復：過去30日の実績〜未来90日の予測を繋げて描画する
                 ri = p_sum.get(spg,{}).get("現在庫",0)
                 ri_future = ri
                 gd, gs, gu = [], [], []
                 
+                # 未来予測（現在庫から順算）
                 for d_g in pd.date_range(today, today+timedelta(days=fd)):
                     ug = pf.get(spg,{}).get(d_g,0)
                     ri_future -= ug
@@ -939,6 +930,7 @@ elif pg == "📦 資材・入出庫":
                     gs.append(ri_future)
                     gu.append(-ug)
                 
+                # 過去30日実績（現在庫から逆算）
                 ri_past = ri
                 past_dates = pd.date_range(today-timedelta(days=30), today-timedelta(days=1))
                 past_gd, past_gs, past_gu = [], [], []
@@ -1084,6 +1076,7 @@ elif pg == "📦 資材・入出庫":
                         st.rerun()
                 show_flash_inline(_del_msg)
             else:
+                # ★修復：エディタから返ってきたIDを信頼するように変更し、履歴消失バグを防止
                 edp = st.data_editor(
                     _dpk_show[_tp4_cols], hide_index=True,
                     use_container_width=True,
@@ -1285,7 +1278,8 @@ elif pg == "📑 登録一覧":
         if not pk_l.empty:
             el = pk_l.sort_values("登録日時",ascending=False).copy(); el["日"] = el["登録日"].apply(format_date_jp)
             st.dataframe(el[["ID","日","資材名","処理区分","数量","理由","関連製品名","備考"]], hide_index=True, height=600)
-            # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
 # 📊 在庫・スケジュール
 # ─────────────────────────────────────────────
 elif pg == "📊 在庫・スケジュール":
@@ -1307,6 +1301,12 @@ elif pg == "📊 在庫・スケジュール":
     with t1:
         if mst_u.empty: st.info("マスタ空")
         else:
+            if 'pend' in dir() and isinstance(pend, pd.Series) and not pend.empty:
+                st.markdown(f'<div class="info-tip">💡 出荷日未定の受注 {int(pend.sum()):,} cs（{pend[pend>0].shape[0]}品目）を現在庫から引当済みです。</div>', unsafe_allow_html=True)
+            if unmatched_products:
+                with st.expander(f"⚠️ マスタと製品名が一致しないデータが {len(unmatched_products)} 件あります（在庫予測に反映されません）", expanded=False):
+                    st.warning("受注・製造データの製品名が「⚙️ マスタ・分析」の製品マスタと完全一致していないため、以下の製品名は在庫予測から除外されています。表記ゆれ（スペース・全角半角・記号違いなど）がないかご確認ください。")
+                    st.dataframe(pd.DataFrame({"未一致の製品名": unmatched_products}), hide_index=True, use_container_width=True)
             sd = pd.date_range(today, today+timedelta(days=30))
             iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_u.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
@@ -1322,17 +1322,42 @@ elif pg == "📊 在庫・スケジュール":
                 ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)].copy() if not odf.empty else pd.DataFrame()
                 mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)].copy() if not mdf.empty else pd.DataFrame()
                 
-                with st.expander("📜 過去1年履歴", expanded=True):
+                with st.expander("📜 過去1年履歴 ＆ 出荷予定", expanded=True):
+                    _fo = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)] if not odf.empty else pd.DataFrame()
+                    _fm = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=today)&(~mdf["備考"].fillna("").str.contains("【在庫非反映】"))] if not mdf.empty else pd.DataFrame()
                     tho = ph["ケース数"].apply(to_int).sum() if not ph.empty else 0; thm = mh["ケース数"].apply(to_int).sum() if not mh.empty else 0
-                    k1,k2,k3,k4 = st.columns(4)
-                    k1.metric("出荷合計",f"{tho:,} cs"); k2.metric("製造合計",f"{thm:,} cs"); k3.metric("差引",f"{thm-tho:+,} cs"); k4.metric("現在庫",f"{cs.get(dp,0):,} cs")
+                    fto = _fo["ケース数"].apply(to_int).sum() if not _fo.empty else 0; ftm = _fm["ケース数"].apply(to_int).sum() if not _fm.empty else 0
+                    k1,k2,k3,k4,k5 = st.columns(5)
+                    k1.metric("過去1年 出荷",f"{tho:,} cs"); k2.metric("過去1年 製造",f"{thm:,} cs"); k3.metric("現在庫",f"{cs.get(dp,0):,} cs"); k4.metric("今後 出荷予定",f"{fto:,} cs"); k5.metric("今後 製造予定",f"{ftm:,} cs")
+
+                    _gr = []
+                    for _df, _dc, _lb in [(ph,"納品予定日","出荷(実績)"), (mh,"製造予定日","製造(実績)"), (_fo,"納品予定日","出荷(予定)"), (_fm,"製造予定日","製造(予定)")]:
+                        if not _df.empty:
+                            _t = _df.copy(); _t["年月"] = pd.to_datetime(_t[_dc],errors='coerce').dt.to_period("M").astype(str)
+                            for ym, g in _t.groupby("年月"): _gr.append({"年月":ym,"種別":_lb,"ケース数":g["ケース数"].apply(to_int).sum()})
+                    if _gr:
+                        _dgp = pd.DataFrame(_gr).sort_values("年月")
+                        _figp = px.bar(_dgp, x="年月", y="ケース数", color="種別", barmode="group",
+                                        color_discrete_map={"出荷(実績)":"#F43F5E","出荷(予定)":"#FCA5A5","製造(実績)":"#10B981","製造(予定)":"#6EE7B7"})
+                        _figp.update_layout(margin=dict(l=10,r=10,t=20,b=10), height=280, legend=dict(orientation="h", y=1.15))
+                        st.plotly_chart(_figp, use_container_width=True)
+
                     ch1, ch2 = st.columns(2)
                     with ch1:
-                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>', unsafe_allow_html=True)
-                        if not ph.empty: st.dataframe(ph.assign(日付=ph["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True)
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴（過去）</div>', unsafe_allow_html=True)
+                        if not ph.empty: st.dataframe(ph.assign(日付=ph["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True, height=220)
                     with ch2:
-                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
-                        if not mh.empty: st.dataframe(mh.assign(日付=mh["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴（過去）</div>', unsafe_allow_html=True)
+                        if not mh.empty: st.dataframe(mh.assign(日付=mh["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True, height=220)
+                    ch3, ch4 = st.columns(2)
+                    with ch3:
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#F97316;border-left:4px solid #F97316;padding-left:8px;">📦 出荷予定（今後）</div>', unsafe_allow_html=True)
+                        if not _fo.empty: st.dataframe(_fo.assign(日付=_fo["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付"), hide_index=True, height=220)
+                        else: st.caption("予定なし")
+                    with ch4:
+                        st.markdown('<div style="font-size:13px;font-weight:800;color:#6EE7B7;border-left:4px solid #10B981;padding-left:8px;">🏭 製造予定（今後）</div>', unsafe_allow_html=True)
+                        if not _fm.empty: st.dataframe(_fm.assign(日付=_fm["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付"), hide_index=True, height=220)
+                        else: st.caption("予定なし")
 
                 st.markdown('<div class="section-title">📅 今後60日間スケジュール</div>', unsafe_allow_html=True)
                 pof = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)] if not odf.empty else pd.DataFrame()
@@ -1501,49 +1526,46 @@ elif pg == "📊 在庫・スケジュール":
                     _dcolor = "#059669" if _diff > 0 else "#DC2626"
                     st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_cur_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
             _inv_msg = st.empty()
-            if st.button("✅ 棚卸差分を登録", type="primary", use_container_width=True, key="inv_submit"):
+            if st.button("✅ 棚卸を登録", type="primary", use_container_width=True, key="inv_submit"):
                 if actual_q is None:
                     _inv_msg.error("⚠️ 実棚卸数を入力してください")
                 else:
                     _diff = to_int(actual_q) - _cur_cs
+                    _anchor = f"実棚卸数={to_int(actual_q)}"  # ← 将来在庫計算の基準値として解析される機械可読タグ
+                    nid = str(uuid.uuid4())[:6].upper()
+                    _cat = mst_u[mst_u["製品名"] == sel_p]["大カテゴリ"].iloc[0] if sel_p in mst_u["製品名"].values else ""
                     if _diff == 0:
-                        flash("info", f"ℹ️【{sel_p}】在庫数に変更なし（棚卸一致）")
-                        st.rerun()
+                        app_sync("manufactures", pd.DataFrame([{
+                            "ID": nid, "製造予定日": pd.to_datetime(inv_d),
+                            "大カテゴリ": _cat, "製品名": sel_p, "ケース数": 0,
+                            "リパックフラグ": False, "備考": f"【棚卸基準】{_anchor} {inv_note}".strip(),
+                            "登録日時": datetime.now(JST).replace(tzinfo=None),
+                        }]))
+                        flash("success", f"✅【{sel_p}】棚卸一致を確認し、この時点を新しい在庫計算の基準にしました（{_cur_cs:,} cs）")
+                    elif _diff > 0:
+                        app_sync("manufactures", pd.DataFrame([{
+                            "ID": nid, "製造予定日": pd.to_datetime(inv_d),
+                            "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
+                            "リパックフラグ": False, "備考": f"【棚卸調整+】{_anchor} {inv_note}".strip(),
+                            "登録日時": datetime.now(JST).replace(tzinfo=None),
+                        }]))
+                        flash("success", f"✅【{sel_p}】棚卸差分 {_diff:+,} cs を登録しました（{_cur_cs:,} → {to_int(actual_q):,}）。この時点が新しい在庫計算の基準になります。")
                     else:
-                        nid = str(uuid.uuid4())[:6].upper()
-                        _cat = mst_u[mst_u["製品名"] == sel_p]["大カテゴリ"].iloc[0] if sel_p in mst_u["製品名"].values else ""
-                        if _diff > 0:
-                            app_sync("manufactures", pd.DataFrame([{
-                                "ID": nid, "製造予定日": pd.to_datetime(inv_d),
-                                "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
-                                "リパックフラグ": False, "備考": f"【棚卸調整+】[実棚:{to_int(actual_q)}] {inv_note}".strip(),
-                                "登録日時": datetime.now(JST).replace(tzinfo=None),
-                            }]))
-                        else:
-                            app_sync("orders", pd.DataFrame([{
-                                "ID": nid, "納品予定日": pd.to_datetime(inv_d),
-                                "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
-                                "ケース数": abs(_diff), "運送会社": "",
-                                "備考": f"【棚卸調整-】[実棚:{to_int(actual_q)}] {inv_note}".strip(), "荷姿チェック": False, "発送備考": "",
-                                "不良廃棄フラグ": False, "日付未定フラグ": False,
-                                "登録日時": datetime.now(JST).replace(tzinfo=None),
-                            }]))
-                        else:
-                            app_sync("orders", pd.DataFrame([{
-                                "ID": nid, "納品予定日": pd.to_datetime(inv_d),
-                                "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
-                                "ケース数": abs(_diff), "運送会社": "",
-                                "備考": f"【棚卸調整-】{inv_note}".strip(), "荷姿チェック": False, "発送備考": "",
-                                "不良廃棄フラグ": False, "日付未定フラグ": False,
-                                "登録日時": datetime.now(JST).replace(tzinfo=None),
-                            }]))
-                        flash("success", f"✅【{sel_p}】棚卸差分 {_diff:+,} cs を登録しました（{_cur_cs:,} → {to_int(actual_q):,}）")
-                        st.rerun()
+                        app_sync("orders", pd.DataFrame([{
+                            "ID": nid, "納品予定日": pd.to_datetime(inv_d),
+                            "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
+                            "ケース数": abs(_diff), "運送会社": "",
+                            "備考": f"【棚卸調整-】{_anchor} {inv_note}".strip(), "荷姿チェック": False, "発送備考": "",
+                            "不良廃棄フラグ": False, "日付未定フラグ": False,
+                            "登録日時": datetime.now(JST).replace(tzinfo=None),
+                        }]))
+                        flash("success", f"✅【{sel_p}】棚卸差分 {_diff:+,} cs を登録しました（{_cur_cs:,} → {to_int(actual_q):,}）。この時点が新しい在庫計算の基準になります。")
+                    st.rerun()
             show_flash_inline(_inv_msg)
 
-        st.markdown('<div class="section-title">📜 棚卸調整 履歴</div>', unsafe_allow_html=True)
-        _adj_o = odf[odf["備考"].fillna("").str.contains("【棚卸調整-】")] if not odf.empty else pd.DataFrame()
-        _adj_m = mdf[mdf["備考"].fillna("").str.contains("【棚卸調整\\+】")] if not mdf.empty else pd.DataFrame()
+        st.markdown('<div class="section-title">📜 棚卸 履歴</div>', unsafe_allow_html=True)
+        _adj_o = odf[odf["備考"].fillna("").str.contains("実棚卸数=")] if not odf.empty else pd.DataFrame()
+        _adj_m = mdf[mdf["備考"].fillna("").str.contains("実棚卸数=")] if not mdf.empty else pd.DataFrame()
         _hist_rows = []
         if not _adj_o.empty:
             for _, r in _adj_o.iterrows():
@@ -1555,7 +1577,7 @@ elif pg == "📊 在庫・スケジュール":
             _hist_df = pd.DataFrame(_hist_rows).sort_values("登録日時", ascending=False)
             st.dataframe(_hist_df[["日付", "製品名", "差分", "備考"]], hide_index=True, use_container_width=True, height=300)
         else:
-            st.info("棚卸調整の履歴はまだありません。")
+            st.info("棚卸の履歴はまだありません。")
 
 # ─────────────────────────────────────────────
 # ⭐ 特注・チャータースケジュール
@@ -1568,9 +1590,44 @@ elif pg == "⭐ 特注・チャータースケジュール":
         if spo.empty: st.info("なし")
         else:
             spo["種別"] = spo["備考"].apply(lambda r: "特注+チャーター便" if "特注" in str(r) and "チャーター便" in str(r) else ("特注" if "特注" in str(r) else "チャーター便"))
-            spo["出荷予定日"] = spo["納品予定日"].apply(format_date_jp)
-            sc = [c for c in ["種別","顧客名","出荷予定日","製品名","ケース数","備考"] if c in spo.columns]
-            st.dataframe(spo[sc].style.apply(lambda r: ['background-color:#F3E8FF;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")) else (['background-color:#EDE9FE;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) else ['background-color:#E0F2FE;font-weight:bold;']*len(r)), axis=1), hide_index=True)
+            _dtcol = pd.to_datetime(spo["納品予定日"], errors="coerce")
+            _is_undet = (spo["日付未定フラグ"] == True) if "日付未定フラグ" in spo.columns else pd.Series(False, index=spo.index)
+            spo_future = spo[(_dtcol >= today) & (~_is_undet)].copy()
+            spo_past = spo[(_dtcol < today) & (~_is_undet)].copy()
+            spo_undet = spo[_is_undet | _dtcol.isna()].copy()
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("📅 今後の予定", f"{len(spo_future)} 件", f"{spo_future['ケース数'].apply(to_int).sum():,} cs" if not spo_future.empty else "0 cs")
+            m2.metric("🟡 日付未定", f"{len(spo_undet)} 件", f"{spo_undet['ケース数'].apply(to_int).sum():,} cs" if not spo_undet.empty else "0 cs")
+            m3.metric("📜 過去の履歴", f"{len(spo_past)} 件", f"{spo_past['ケース数'].apply(to_int).sum():,} cs" if not spo_past.empty else "0 cs")
+
+            def _style_spo(df):
+                return df.style.apply(lambda r: ['background-color:#F3E8FF;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")) else (['background-color:#EDE9FE;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) else ['background-color:#E0F2FE;font-weight:bold;']*len(r)), axis=1)
+
+            st.markdown('<div class="section-title">📅 今後の予定</div>', unsafe_allow_html=True)
+            if spo_future.empty: st.caption("なし")
+            else:
+                spo_future["出荷予定日"] = spo_future["納品予定日"].apply(format_date_jp)
+                spo_future["在庫状況"] = spo_future.apply(lambda r: ("❌ 欠品" if fs.get(nk2name.get(nk(r["製品名"]), r["製品名"]),{}).get(pd.to_datetime(r["納品予定日"]).normalize(), cs.get(nk2name.get(nk(r["製品名"]), r["製品名"]),0)) < 0 else "✅ OK"), axis=1)
+                spo_future = spo_future.sort_values("納品予定日")
+                _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","在庫状況","備考"] if c in spo_future.columns]
+                st.dataframe(_style_spo(spo_future[_sc]), hide_index=True, use_container_width=True)
+
+            st.markdown('<div class="section-title">🟡 日付未定</div>', unsafe_allow_html=True)
+            if spo_undet.empty: st.caption("なし")
+            else:
+                spo_undet["出荷予定日"] = "🟡 未定"
+                _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","備考"] if c in spo_undet.columns]
+                st.dataframe(_style_spo(spo_undet[_sc]), hide_index=True, use_container_width=True)
+                st.caption("💡 出荷日を確定するには「📋 受注登録」ページ下部の「🟡 日付未定受注を確定する」から対応してください。")
+
+            with st.expander(f"📜 過去の履歴を見る（{len(spo_past)}件）"):
+                if spo_past.empty: st.caption("なし")
+                else:
+                    spo_past["出荷予定日"] = spo_past["納品予定日"].apply(format_date_jp)
+                    spo_past = spo_past.sort_values("納品予定日", ascending=False)
+                    _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","備考"] if c in spo_past.columns]
+                    st.dataframe(_style_spo(spo_past[_sc]), hide_index=True, use_container_width=True)
     with ts2:
         if not spo.empty:
             pl = sorted(spo["製品名"].unique().tolist()); sl = st.selectbox("製品", ["（全製品）"]+pl)
@@ -1715,3 +1772,4 @@ elif pg == "⚙️ マスタ・分析":
         _m4_msg = st.empty()
         if st.button("💾 運送会社保存", type="primary", key="btn_save_ship_mst"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
         show_flash_inline(_m4_msg)
+
