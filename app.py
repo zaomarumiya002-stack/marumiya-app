@@ -1459,4 +1459,14 @@ elif pg == "📊 在庫・スケジュール":
                     fig_dtf.add_trace(go.Bar(x=dfd["日付"],y=[-(r["出荷(出)"] if r["出荷(出)"]!="" else 0) for _,r in dfd.iterrows()],name="出荷",marker_color="#F43F5E"))
                     fig_dtf.add_trace(go.Scatter(x=dfd["日付"],y=dfd["予定在庫"],name="予定在庫",mode="lines+markers",line=dict(color="#2563EB",width=2.5)))
                     fig_dtf.add_hline(y=0,line_dash="dot",line_color="#DC2626",annotation_text="在庫ゼロ")
-                    fig_dtf.update_layout(barmode="relative",
+                    fig_dtf.update_layout(
+                        barmode="relative", 
+                        hovermode="x unified", 
+                        margin=dict(l=10, r=10, t=30, b=10), 
+                        height=320, 
+                        plot_bgcolor="white"
+                    )
+                    st.plotly_chart(fig_dtf, use_container_width=True)
+                    st.dataframe(dfd.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予定在庫"]), hide_index=True, use_container_width=True)
+                else: 
+                    st.info("今後60日間の出荷・製造予定はありません。")
