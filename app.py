@@ -896,7 +896,6 @@ elif pg == "🏭 製造登録":
                 flash("success", "✅ 製造全データを保存しました。"); st.rerun()
             show_flash_inline(_mfg_all_msg)
 
-
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
 # ─────────────────────────────────────────────
@@ -1838,7 +1837,7 @@ elif pg == "⚙️ マスタ・分析":
         _m4_msg = st.empty()
         if st.button("💾 運送会社保存", type="primary", key="btn_save_ship_mst"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
         show_flash_inline(_m4_msg)
-        fd = 90; pf = {}
+fd = 90; pf = {}
 if not mst_u.empty and not odf.empty:
     mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
     mpi_nk = {nk(k): v for k, v in mpi.items()}
