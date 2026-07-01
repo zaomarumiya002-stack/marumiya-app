@@ -892,3 +892,174 @@ elif pg == "🏭 製造登録":
                 save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left"))
                 flash("success", "✅ 製造全データを保存しました。"); st.rerun()
             show_flash_inline(_mfg_all_msg)
+# ─────────────────────────────────────────────
+# 📦 資材・入出庫
+# ─────────────────────────────────────────────
+elif pg == "📦 資材・入出庫":
+    page_header("📦 資材・入出庫管理")
+    t1, t2 = st.tabs(["📊 資材在庫状況", "➕ 入庫・出庫登録"])
+    
+    with t1:
+        if p_sum:
+            df_mat = pd.DataFrame.from_dict(p_sum, orient="index").reset_index().rename(columns={"index":"資材名"})
+            # 表示用のカラムを整理
+            disp_cols = ["資材名", "現在庫", "発注点", "状態", "1日平均消費", "在庫日数", "発注残", "推奨発注点", "仕入先", "保管場所"]
+            df_disp = df_mat[[c for c in disp_cols if c in df_mat.columns]].copy()
+            
+            # 状態に応じて背景色をつける
+            st.dataframe(
+                df_disp.style.apply(lambda r: [f'background-color:{df_mat.iloc[r.name].get("アラート色", "#ffffff")}'] * len(r), axis=1),
+                use_container_width=True, 
+                hide_index=True
+            )
+        else:
+            st.info("資材のデータがありません。")
+
+    with t2:
+        sec("資材の入出庫・棚卸登録")
+        mat_sel = st.selectbox("対象の資材を選択", list(p_sum.keys()) if p_sum else [], index=None)
+        in_out = st.radio("処理区分", ["入庫（プラス）", "出庫（マイナス）", "棚卸（実数上書き）"], horizontal=True)
+        mqty = st.number_input("数量", min_value=1, step=1)
+        mrsn = st.text_input("理由・備考（納品書番号など）")
+        
+        _mat_msg = st.empty()
+        if st.button("💾 登録する", type="primary"):
+            if not mat_sel or mqty < 1:
+                _mat_msg.error("⚠️ 資材の選択と数量の入力は必須です。")
+            else:
+                cur_q = p_sum.get(mat_sel, {}).get("現在庫", 0)
+                if in_out == "入庫（プラス）":
+                    calc_qty = mqty
+                    new_q = cur_q + mqty
+                elif in_out == "出庫（マイナス）":
+                    calc_qty = -mqty
+                    new_q = cur_q - mqty
+                else: # 棚卸
+                    calc_qty = mqty - cur_q
+                    new_q = mqty
+                    
+                app_sync("packaging_logs", pd.DataFrame([{
+                    "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.Timestamp.now(),
+                    "資材名": mat_sel, "処理区分": in_out, "数量": calc_qty,
+                    "理由": mrsn, "備考": "手動登録", "関連製品名": "",
+                    "理論在庫": new_q,
+                    "登録日時": datetime.now(JST).replace(tzinfo=None)
+                }]))
+                flash("success", f"✅ 【{mat_sel}】 {in_out} を登録しました。 現在庫: {cur_q:,} → {new_q:,}")
+                st.rerun()
+        show_flash_inline(_mat_msg)
+
+# ─────────────────────────────────────────────
+# 📑 登録一覧
+# ─────────────────────────────────────────────
+elif pg == "📑 登録一覧":
+    page_header("📑 登録データ一覧")
+    t_ord, t_mfg = st.tabs(["📋 受注データ", "🏭 製造データ"])
+    
+    with t_ord:
+        st.markdown('<div class="info-card">💡 登録されたすべての<b>受注・出荷</b>データの一覧です。</div>', unsafe_allow_html=True)
+        do = odf.sort_values("登録日時", ascending=False).copy() if not odf.empty else pd.DataFrame()
+        st.dataframe(do, use_container_width=True, hide_index=True)
+        if not do.empty:
+            st.download_button("📥 受注データをCSVでダウンロード", make_csv_bytes(do), "受注データ.csv", "text/csv")
+            
+    with t_mfg:
+        st.markdown('<div class="info-card">💡 登録されたすべての<b>製造</b>データの一覧です。</div>', unsafe_allow_html=True)
+        dm = mdf.sort_values("登録日時", ascending=False).copy() if not mdf.empty else pd.DataFrame()
+        st.dataframe(dm, use_container_width=True, hide_index=True)
+        if not dm.empty:
+            st.download_button("📥 製造データをCSVでダウンロード", make_csv_bytes(dm), "製造データ.csv", "text/csv")
+
+# ─────────────────────────────────────────────
+# 📊 在庫・スケジュール
+# ─────────────────────────────────────────────
+elif pg == "📊 在庫・スケジュール":
+    page_header("📊 在庫推移・スケジュール")
+    
+    # 欠品警告
+    shortages = [p for p, f in fs.items() if any(v < 0 for v in list(f.values())[:14])]
+    if shortages:
+        st.markdown(f'<div class="info-card red">🚨 <b>向こう14日間で欠品が予測される製品（{len(shortages)}件）:</b><br>{", ".join(shortages)}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="info-card green">✅ 向こう14日間の欠品予測はありません。</div>', unsafe_allow_html=True)
+    
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.subheader("📈 製品別 在庫推移グラフ")
+        prod = st.selectbox("推移を確認したい製品を選択", list(fs.keys()), index=0 if fs else None, format_func=fn)
+        if prod:
+            df_f = pd.DataFrame(list(fs[prod].items()), columns=["日付", "予測在庫"])
+            fig = px.line(df_f, x="日付", y="予測在庫", markers=True, title=f"【{prod}】 の在庫推移 (向こう60日)")
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="欠品ライン")
+            
+            # 安全在庫ライン
+            if not mst_u[mst_u["製品名"]==prod].empty:
+                ss = to_int(mst_u[mst_u["製品名"]==prod].iloc[0].get("安全在庫数", 0))
+                if ss > 0: 
+                    fig.add_hline(y=ss, line_dash="dot", line_color="orange", annotation_text="安全在庫")
+                    
+            st.plotly_chart(fig, use_container_width=True)
+            
+    with c2:
+        st.subheader("📦 現在庫一覧")
+        if cs:
+            df_cs = pd.DataFrame(list(cs.items()), columns=["製品名", "現在庫数"])
+            st.dataframe(df_cs, use_container_width=True, hide_index=True, height=500)
+
+# ─────────────────────────────────────────────
+# ⭐ 特注・チャータースケジュール
+# ─────────────────────────────────────────────
+elif pg == "⭐ 特注・チャータースケジュール":
+    page_header("⭐ 特注・チャータースケジュール")
+    st.markdown('<div class="info-card badge-special" style="color:#fff;">受注時に「特注」または「チャーター便」として登録された予定の一覧です。</div>', unsafe_allow_html=True)
+    if not sp_s.empty:
+        st.dataframe(sp_s.sort_values("納品予定日", ascending=True), use_container_width=True, hide_index=True)
+    else:
+        st.info("現在、特注・チャーターの予定はありません。")
+
+# ─────────────────────────────────────────────
+# 📈 経営・分析ダッシュボード
+# ─────────────────────────────────────────────
+elif pg == "📈 経営・分析ダッシュボード":
+    page_header("📈 経営・分析ダッシュボード")
+    if not odf.empty:
+        df_ana = odf[odf["不良廃棄フラグ"] == False].copy()
+        df_ana["月"] = pd.to_datetime(df_ana["納品予定日"], errors="coerce").dt.to_period("M").astype(str)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            agg_m = df_ana.groupby("月")["ケース数"].sum().reset_index()
+            fig1 = px.bar(agg_m, x="月", y="ケース数", title="月別 出荷ケース数推移", text_auto=True)
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with c2:
+            agg_p = df_ana.groupby("大カテゴリ")["ケース数"].sum().reset_index()
+            fig2 = px.pie(agg_p, values="ケース数", names="大カテゴリ", title="カテゴリ別 出荷割合")
+            st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("分析用のデータがまだありません。")
+
+# ─────────────────────────────────────────────
+# ⚙️ マスタ・分析
+# ─────────────────────────────────────────────
+elif pg == "⚙️ マスタ・分析":
+    page_header("⚙️ マスタ管理")
+    t1, t2 = st.tabs(["📦 製品マスタ", "🏢 顧客マスタ"])
+    
+    with t1:
+        st.markdown('<div class="info-card">スプレッドシートを開かずに、製品ごとの設定（入数や使用資材など）を直接編集できます。</div>', unsafe_allow_html=True)
+        ed_m = st.data_editor(mst, num_rows="dynamic", use_container_width=True, hide_index=True)
+        _mst_msg = st.empty()
+        if st.button("💾 製品マスタを保存", type="primary"):
+            save_sync("master", ed_m)
+            flash("success", "✅ 製品マスタを更新しました。"); st.rerun()
+        show_flash_inline(_mst_msg)
+            
+    with t2:
+        st.markdown('<div class="info-card">帳合先や支店・店舗の一覧を編集できます。</div>', unsafe_allow_html=True)
+        ed_c = st.data_editor(cdf, num_rows="dynamic", use_container_width=True, hide_index=True)
+        _c_msg = st.empty()
+        if st.button("💾 顧客マスタを保存", type="primary"):
+            save_sync("customers", ed_c)
+            flash("success", "✅ 顧客マスタを更新しました。"); st.rerun()
+        show_flash_inline(_c_msg)
