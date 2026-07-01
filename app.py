@@ -1,4 +1,5 @@
 import os
+import unicodedata
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
 os.environ["STREAMLIT_THEME_BACKGROUND_COLOR"] = "#F8FAFC"
@@ -25,6 +26,12 @@ def to_int(v):
         if pd.isna(v) or str(v).strip() == "": return 0
         return int(float(v))
     except: return 0
+
+def nk(s):
+    """製品名の全角/半角・前後スペースなどの表記ゆれを吸収した照合用キー"""
+    try:
+        return unicodedata.normalize("NFKC", str(s)).strip()
+    except: return str(s).strip()
 
 def format_date_jp(d):
     if d is None: return ""
@@ -287,7 +294,7 @@ def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.c
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
 today = pd.Timestamp.today().normalize(); dates = pd.date_range(today, today + timedelta(days=60))
-cs = {}; fs = {}
+cs = {}; fs = {}; unmatched_products = []; nk2name = {}
 mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(
     columns=["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数",
              "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
@@ -307,14 +314,19 @@ for _ext_col, _ext_def in [
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
 if not mst_u.empty:
+    _mst_keys = set(mst_u["製品名"].apply(nk))
+    nk2name = {nk(p): p for p in mst_u["製品名"]}
     ev_o = odf[["納品予定日","製品名","ケース数"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
     ev_m = vm[["製造予定日","製品名","ケース数"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
-    pe = ae[ae["日付"] < today].groupby("製品名")["qty"].sum(); fe = ae[ae["日付"] >= today]
-    piv = fe.pivot_table(index="製品名", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
+    ae["製品名key"] = ae["製品名"].apply(nk)  # 全角/半角・空白ゆれを吸収した照合キー
+    # マスタに存在しない製品名（表記ゆれ・入力ミス等）を検出 → 画面側で警告表示するために保持
+    unmatched_products = sorted(set(ae.loc[~ae["製品名key"].isin(_mst_keys), "製品名"].dropna().unique().tolist()))
+    pe = ae[ae["日付"] < today].groupby("製品名key")["qty"].sum(); fe = ae[ae["日付"] >= today]
+    piv = fe.pivot_table(index="製品名key", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
     # 日付未定（出荷日未確定）の受注は、納品予定日がNaTのため上記の日付ベース集計から漏れる。
     # 特注・チャーター便などで先に受注だけ確定しているケースが多いため、
     # 「いずれ必ず出庫される確定引当数量」として現在庫～今後すべての予測日から差し引く。
@@ -322,11 +334,11 @@ if not mst_u.empty:
     if not odf.empty and "日付未定フラグ" in odf.columns:
         _pnd = odf[odf["日付未定フラグ"] == True]
         if not _pnd.empty:
-            pend = _pnd.groupby("製品名")["ケース数"].apply(lambda s: s.apply(to_int).sum())
+            pend = _pnd.assign(製品名key=_pnd["製品名"].apply(nk)).groupby("製品名key")["ケース数"].apply(lambda s: s.apply(to_int).sum())
     for _, r in mst_u.iterrows():
-        p = r["製品名"]
-        c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(p,0)) - to_int(pend.get(p,0)); cs[p] = c_s
-        pr = piv.loc[p] if p in piv.index else pd.Series(0, index=dates)
+        p = r["製品名"]; pk = nk(p)
+        c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(pk,0)) - to_int(pend.get(pk,0)); cs[p] = c_s
+        pr = piv.loc[pk] if pk in piv.index else pd.Series(0, index=dates)
         if isinstance(pr, pd.DataFrame): pr = pr.sum(axis=0)
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
@@ -1276,6 +1288,10 @@ elif pg == "📊 在庫・スケジュール":
         else:
             if 'pend' in dir() and isinstance(pend, pd.Series) and not pend.empty:
                 st.markdown(f'<div class="info-tip">💡 出荷日未定の受注 {int(pend.sum()):,} cs（{pend[pend>0].shape[0]}品目）を現在庫から引当済みです。</div>', unsafe_allow_html=True)
+            if unmatched_products:
+                with st.expander(f"⚠️ マスタと製品名が一致しないデータが {len(unmatched_products)} 件あります（在庫予測に反映されません）", expanded=False):
+                    st.warning("受注・製造データの製品名が「⚙️ マスタ・分析」の製品マスタと完全一致していないため、以下の製品名は在庫予測から除外されています。表記ゆれ（スペース・全角半角・記号違いなど）がないかご確認ください。")
+                    st.dataframe(pd.DataFrame({"未一致の製品名": unmatched_products}), hide_index=True, use_container_width=True)
             sd = pd.date_range(today, today+timedelta(days=30))
             iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_u.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
@@ -1553,9 +1569,44 @@ elif pg == "⭐ 特注・チャータースケジュール":
         if spo.empty: st.info("なし")
         else:
             spo["種別"] = spo["備考"].apply(lambda r: "特注+チャーター便" if "特注" in str(r) and "チャーター便" in str(r) else ("特注" if "特注" in str(r) else "チャーター便"))
-            spo["出荷予定日"] = spo["納品予定日"].apply(format_date_jp)
-            sc = [c for c in ["種別","顧客名","出荷予定日","製品名","ケース数","備考"] if c in spo.columns]
-            st.dataframe(spo[sc].style.apply(lambda r: ['background-color:#F3E8FF;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")) else (['background-color:#EDE9FE;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) else ['background-color:#E0F2FE;font-weight:bold;']*len(r)), axis=1), hide_index=True)
+            _dtcol = pd.to_datetime(spo["納品予定日"], errors="coerce")
+            _is_undet = (spo["日付未定フラグ"] == True) if "日付未定フラグ" in spo.columns else pd.Series(False, index=spo.index)
+            spo_future = spo[(_dtcol >= today) & (~_is_undet)].copy()
+            spo_past = spo[(_dtcol < today) & (~_is_undet)].copy()
+            spo_undet = spo[_is_undet | _dtcol.isna()].copy()
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("📅 今後の予定", f"{len(spo_future)} 件", f"{spo_future['ケース数'].apply(to_int).sum():,} cs" if not spo_future.empty else "0 cs")
+            m2.metric("🟡 日付未定", f"{len(spo_undet)} 件", f"{spo_undet['ケース数'].apply(to_int).sum():,} cs" if not spo_undet.empty else "0 cs")
+            m3.metric("📜 過去の履歴", f"{len(spo_past)} 件", f"{spo_past['ケース数'].apply(to_int).sum():,} cs" if not spo_past.empty else "0 cs")
+
+            def _style_spo(df):
+                return df.style.apply(lambda r: ['background-color:#F3E8FF;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")) else (['background-color:#EDE9FE;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) else ['background-color:#E0F2FE;font-weight:bold;']*len(r)), axis=1)
+
+            st.markdown('<div class="section-title">📅 今後の予定</div>', unsafe_allow_html=True)
+            if spo_future.empty: st.caption("なし")
+            else:
+                spo_future["出荷予定日"] = spo_future["納品予定日"].apply(format_date_jp)
+                spo_future["在庫状況"] = spo_future.apply(lambda r: ("❌ 欠品" if fs.get(nk2name.get(nk(r["製品名"]), r["製品名"]),{}).get(pd.to_datetime(r["納品予定日"]).normalize(), cs.get(nk2name.get(nk(r["製品名"]), r["製品名"]),0)) < 0 else "✅ OK"), axis=1)
+                spo_future = spo_future.sort_values("納品予定日")
+                _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","在庫状況","備考"] if c in spo_future.columns]
+                st.dataframe(_style_spo(spo_future[_sc]), hide_index=True, use_container_width=True)
+
+            st.markdown('<div class="section-title">🟡 日付未定</div>', unsafe_allow_html=True)
+            if spo_undet.empty: st.caption("なし")
+            else:
+                spo_undet["出荷予定日"] = "🟡 未定"
+                _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","備考"] if c in spo_undet.columns]
+                st.dataframe(_style_spo(spo_undet[_sc]), hide_index=True, use_container_width=True)
+                st.caption("💡 出荷日を確定するには「📋 受注登録」ページ下部の「🟡 日付未定受注を確定する」から対応してください。")
+
+            with st.expander(f"📜 過去の履歴を見る（{len(spo_past)}件）"):
+                if spo_past.empty: st.caption("なし")
+                else:
+                    spo_past["出荷予定日"] = spo_past["納品予定日"].apply(format_date_jp)
+                    spo_past = spo_past.sort_values("納品予定日", ascending=False)
+                    _sc = [c for c in ["種別","出荷予定日","顧客名","製品名","ケース数","備考"] if c in spo_past.columns]
+                    st.dataframe(_style_spo(spo_past[_sc]), hide_index=True, use_container_width=True)
     with ts2:
         if not spo.empty:
             pl = sorted(spo["製品名"].unique().tolist()); sl = st.selectbox("製品", ["（全製品）"]+pl)
