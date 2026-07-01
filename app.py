@@ -326,37 +326,35 @@ for _ext_col, _ext_def in [
 # ─────────────────────────────────────────────
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
-# 修正内容①, ②, ③, ⑤, ⑥, ⑦: 本日以降のみを在庫予測の加減算対象とするようロジックを全面刷新
 if not mst_u.empty:
     _mst_keys = set(mst_u["製品名"].apply(nk))
     nk2name = {nk(p): p for p in mst_u["製品名"]}
     
-    # 【出荷予定データの抽出】本日以降（今日を含む未来）の予定データのみに限定
+    # 修正内容①, ②, ③, ⑤, ⑥: 過去データを二重引きしないよう「今日以降」の未来予定のみを対象とする
     ev_o = odf[["納品予定日","製品名","ケース数"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_o.empty: 
         ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
-        # 日付フィルタリングを適用（今日より前の出荷は除外、未定フラグ付き＝NaTは一旦除外されるがpendで処理）
-        ev_o = ev_o[ev_o["日付"] >= today]
+        # ★ ここで「昨日以前」の過去受注を完全に除外（本日以降のみを抽出）
+        ev_o = ev_o[pd.to_datetime(ev_o["日付"], errors='coerce').dt.date >= today.date()]
         
-    # 【製造予定データの抽出】本日以降（今日を含む未来）の予定データのみに限定
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
     ev_m = vm[["製造予定日","製品名","ケース数"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty"])
     if not ev_m.empty: 
         ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
-        # 日付フィルタリングを適用（今日より前の製造は除外）
-        ev_m = ev_m[ev_m["日付"] >= today]
+        # ★ ここで「昨日以前」の過去製造を完全に除外（本日以降のみを抽出）
+        ev_m = ev_m[pd.to_datetime(ev_m["日付"], errors='coerce').dt.date >= today.date()]
         
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"]); ae["qty"] = ae["qty"].apply(to_int)
     ae["製品名key"] = ae["製品名"].apply(nk)  # 全角/半角・空白ゆれを吸収した照合キー
     
-    # 修正内容④: unmatched_productsの完全削除（不要コードおよび警告を一切排除）
+    # 修正内容④: 不要な警告(unmatched_products)の完全削除
     unmatched_products = []
     
-    # 過去データpeは一切考慮せず、ae（本日以降に絞り込み済み）の未来予測feのみで構成
+    # 過去データ(pe)の集計を廃止し、本日以降の未来予測(fe)のみを作成
     fe = ae
     piv = fe.pivot_table(index="製品名key", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
     
-    # 日付未定（出荷日未確定）の受注：確定引当数量として、現在庫からのみ安全に差し引く
+    # 日付未定（出荷日未確定）の受注：引当数量として現在庫から差し引くための準備
     pend = pd.Series(dtype=int)
     if not odf.empty and "日付未定フラグ" in odf.columns:
         _pnd = odf[odf["日付未定フラグ"] == True]
@@ -365,11 +363,14 @@ if not mst_u.empty:
             
     for _, r in mst_u.iterrows():
         p = r["製品名"]; pk = nk(p)
-        # 現在庫（初期在庫数）を開始起点とし、過去データpeの加減算を廃止。未確定引当のpendのみ差し引く
+        # 修正内容④, ⑥: 過去の累積(pe)を足し引きせず、現在庫(初期在庫数)をそのまま起点とする
         c_s = to_int(r.get("初期在庫数",0)) - to_int(pend.get(pk,0))
         cs[p] = c_s
+        
         pr = piv.loc[pk] if pk in piv.index else pd.Series(0, index=dates)
         if isinstance(pr, pd.DataFrame): pr = pr.sum(axis=0)
+        
+        # 今日以降の日付(dates)に対して、現在庫を起点とした累計推移を計算
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
 
