@@ -341,7 +341,7 @@ if not mst_u.empty:
         if not _pnd.empty:
             pend = _pnd.assign(製品名key=_pnd["製品名"].apply(nk)).groupby("製品名key")["ケース数"].apply(lambda s: s.apply(to_int).sum())
 
-    # 棚卸実績の判定（「実棚卸数=」のタグ、または古い「棚卸」の文字を含む全レコードのケース数を絶対値として自動判定）
+    # 棚卸実績の判定
     _anc_re = re.compile(r"実棚卸数[:=]\s*(-?\d+)")
     def get_inv_val(row):
         memo = row["備考"]
@@ -351,14 +351,14 @@ if not mst_u.empty:
             if m:
                 return abs(int(m.group(1)))
             else:
-                return abs(row["qty"]) # タグがない過去の棚卸調整データも、ケース数を実棚数量（絶対値）とする
+                return abs(row["qty"])
         return None
 
     ae["anchor_val"] = ae.apply(get_inv_val, axis=1)
     ae["is_inv"] = ae["anchor_val"].notna()
     ae = ae.sort_values(["日付", "is_inv"])
 
-    # グループ化し、高速にループを回すための製品別辞書作成 (pandasスライスを排除して読み込みを劇的に高速化)
+    # グループ化し、高速にループを回すための製品別辞書作成
     p_events_dict = {}
     for pk, group in ae.groupby("製品名key"):
         p_events_dict[pk] = group.to_dict("records")
@@ -374,7 +374,6 @@ if not mst_u.empty:
         inv_events = [e for e in past_events if e["is_inv"]]
         
         if inv_events:
-            # 最新の棚卸を基準（絶対値）にして、過去の無駄なマイナスをカット
             latest_inv = inv_events[-1]
             inv_date = latest_inv["日付"]
             base_qty = latest_inv["anchor_val"]
