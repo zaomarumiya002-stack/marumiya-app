@@ -1,5 +1,3 @@
-システム修復中です。志村からの連絡をおまちください。。。。
-
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
@@ -112,7 +110,7 @@ p, span, label, div { color: #0F172A !important; }
 # ─────────────────────────────────────────────
 if "password_correct" not in st.session_state: st.session_state.password_correct = False
 if not st.session_state.password_correct:
-    st.markdown("<div style='text-align:center;margin-top:60px;'><span style='font-size:72px;'>🏭</span><h2 style='color:#1E3A8A;'>入力ミス、転記ミスに注意！！！</h2></div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;margin-top:60px;'><span style='font-size:72px;'>🏭</span><h2 style='color:#1E3A8A;'>本日７月２日10時まで操作禁止、いじると壊れます！！！</h2></div>", unsafe_allow_html=True)
     _, c, _ = st.columns([1, 2, 1])
     with c:
         pwd = st.text_input("パスワードを入力", type="password")
