@@ -1672,7 +1672,7 @@ elif pg == "📈 経営・分析ダッシュボード":
 # ─────────────────────────────────────────────
 elif pg == "⚙️ マスタ・分析":
     page_header("⚙️ マスタ")
-    tm1,tm2,tm3,tm4 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社"])
+    tm1,tm2,tm3,tm4,tm5 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社",f"⚠️ マスタ未登録品 ({len(_orphan_names)})" if _orphan_names else "⚠️ マスタ未登録品"])
     with tm1:
         st.markdown('<div class="info-tip">💡 <b>製造登録区分</b>：製造・受注の登録単位とダンボール消費の計算をシンプルに設定できます。<br>・<b>ケース</b>：1登録で1枚消費<br>・<b>袋</b>：登録数 ÷ 入数 ＝ 消費枚数（例: 10袋登録 ÷ 入数10 = 1枚消費）<br>・<b>甲</b>：登録数 × 甲消費数 ＝ 消費枚数（例: 1甲登録 × 甲消費数4 = 4枚消費）</div>', unsafe_allow_html=True)
         em_base = mst.copy()
@@ -1753,6 +1753,56 @@ elif pg == "⚙️ マスタ・分析":
         _m4_msg = st.empty()
         if st.button("💾 運送会社保存", type="primary", key="btn_save_ship_mst"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
         show_flash_inline(_m4_msg)
+    with tm5:
+        st.markdown('<div class="info-tip">💡 受注・製造データに存在するが、製品マスタに未登録の製品名の一覧です（特注・チャーター品の反映漏れの原因になります）。<br>①<b>既存製品に統合</b>：この製品名の受注・製造履歴を、選んだ既存マスタ製品名へ一括で付け替えます。件数や数量は一切減りません、名前が揃うだけです。<br>②<b>新規にマスタ登録</b>：この製品名のまま、新しい製品としてマスタに追加します。</div>', unsafe_allow_html=True)
+        _m5_msg = st.empty(); show_flash_inline(_m5_msg)
+        if not _orphan_names:
+            st.success("✅ マスタ未登録の製品名はありません。")
+        else:
+            for _oname in _orphan_names:
+                _o_ord = odf[odf["製品名"]==_oname] if not odf.empty and "製品名" in odf.columns else pd.DataFrame()
+                _o_man = mdf[mdf["製品名"]==_oname] if not mdf.empty and "製品名" in mdf.columns else pd.DataFrame()
+                _o_cs = (_o_ord["ケース数"].apply(to_int).sum() if not _o_ord.empty else 0)
+                with st.expander(f"⚠️ {_oname} 　（受注{len(_o_ord)}件 / {_o_cs:,}cs）", expanded=False):
+                    if not _o_ord.empty:
+                        st.dataframe(_o_ord.assign(日付=_o_ord["納品予定日"].apply(format_date_jp))[[c for c in ["日付","顧客名","ケース数","備考"] if c in _o_ord.columns]].sort_values("日付",ascending=False).head(15), hide_index=True, use_container_width=True)
+                    else:
+                        st.caption("受注データはありません（製造登録のみに存在）。")
+                    _act = st.radio("対応方法", ["① 既存製品に統合する", "② 新規にマスタ登録する"], key=f"orphan_act_{_oname}", horizontal=True)
+                    if _act == "① 既存製品に統合する":
+                        _target = st.selectbox("統合先の既存製品", options=sorted(mst_u["製品名"].tolist()) if not mst_u.empty else [], index=None, placeholder="選択…", key=f"orphan_target_{_oname}", format_func=fn)
+                        if st.button(f"🔗「{_oname}」を統合する", key=f"orphan_merge_{_oname}", type="primary"):
+                            if not _target:
+                                st.error("統合先の製品を選択してください。")
+                            else:
+                                _did = False
+                                if not odf.empty and "製品名" in odf.columns and (odf["製品名"]==_oname).any():
+                                    _no = odf.copy(); _no.loc[_no["製品名"]==_oname, "製品名"] = _target
+                                    save_sync("orders", _no); _did = True
+                                if not mdf.empty and "製品名" in mdf.columns and (mdf["製品名"]==_oname).any():
+                                    _nm = mdf.copy(); _nm.loc[_nm["製品名"]==_oname, "製品名"] = _target
+                                    save_sync("manufactures", _nm); _did = True
+                                if not sp_s.empty and "製品名" in sp_s.columns and (sp_s["製品名"]==_oname).any():
+                                    _ns = sp_s.copy(); _ns.loc[_ns["製品名"]==_oname, "製品名"] = _target
+                                    save_sync("special_schedule", _ns); _did = True
+                                if _did:
+                                    flash("success", f"✅「{_oname}」の受注・製造履歴を「{_target}」に統合しました。")
+                                    st.rerun()
+                                else:
+                                    st.warning("統合対象のデータが見つかりませんでした。")
+                    else:
+                        _cat_new = st.selectbox("大カテゴリ", options=[c.split(" ",1)[1] for c in CATS], key=f"orphan_cat_{_oname}")
+                        _init_new = st.number_input("初期在庫数", min_value=0, step=1, value=0, key=f"orphan_init_{_oname}")
+                        _mat_new = st.selectbox("使用資材名", options=pk_m["資材名"].tolist() if not pk_m.empty else [], index=None, placeholder="（任意・後で製品マスタから編集も可）", key=f"orphan_mat_{_oname}")
+                        if st.button(f"➕「{_oname}」を新規マスタ登録する", key=f"orphan_add_{_oname}", type="primary"):
+                            _new_row = {c: "" for c in mst.columns} if not mst.empty else {}
+                            _new_row.update({"製品名": _oname, "大カテゴリ": _cat_new, "初期在庫数": to_int(_init_new), "使用資材名": _mat_new or ""})
+                            for _dc, _dv in [("製造登録区分","ケース"),("入数",10),("甲消費数",4),("時間あたり生産量",10),("歩留まり率",95),("リードタイム時間",0),("安全在庫数",0),("段取りグループ","")]:
+                                _new_row.setdefault(_dc, _dv)
+                            _nmst = pd.concat([mst, pd.DataFrame([_new_row])], ignore_index=True) if not mst.empty else pd.DataFrame([_new_row])
+                            save_sync("master", _nmst)
+                            flash("success", f"✅「{_oname}」を新規製品としてマスタに登録しました。")
+                            st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 🏗️ 製造スケジューラー v4 ― ASPROVA級 こんにゃく工場特化エンジン
