@@ -304,6 +304,29 @@ for _ext_col, _ext_def in [
         mst[_ext_col] = _ext_def
         mst_u = mst.drop_duplicates(subset=["製品名"])
 
+# ★修復：受注・製造データには存在するが製品マスタ（mst_u）には存在しない製品名を検出し、
+# 「1ヶ月在庫予測」等の予測系画面で取りこぼされないようにする（特注・チャーター品の反映漏れ対策）。
+# 顧客別スケジュールや特注・チャータースケジュールは odf を直接参照するため表示されるが、
+# 在庫予測は従来 mst_u のみを走査していたため、マスタに登録がない製品名の受注は
+# 予測計算から漏れていた。mst_u 自体（登録フォーム等が参照）は変更せず、
+# 予測計算専用の mst_fc を別途用意することで他機能への影響を避ける。
+_master_names = set(mst_u["製品名"].astype(str).tolist()) if not mst_u.empty else set()
+_order_names = set(odf["製品名"].dropna().astype(str).tolist()) if not odf.empty and "製品名" in odf.columns else set()
+_manu_names = set(mdf["製品名"].dropna().astype(str).tolist()) if not mdf.empty and "製品名" in mdf.columns else set()
+_orphan_names = sorted(n for n in (_order_names | _manu_names) - _master_names if n.strip())
+if _orphan_names:
+    _orphan_rows = pd.DataFrame({"製品名": _orphan_names})
+    _orphan_rows["大カテゴリ"] = "⚠️ マスタ未登録"
+    _orphan_rows["初期在庫数"] = 0
+    _fc_cols = mst_u.columns if not mst_u.empty else _orphan_rows.columns
+    mst_fc = pd.concat([mst_u, _orphan_rows], ignore_index=True).reindex(columns=_fc_cols)
+    if "大カテゴリ" not in mst_fc.columns: mst_fc["大カテゴリ"] = "⚠️ マスタ未登録"
+    if "初期在庫数" not in mst_fc.columns: mst_fc["初期在庫数"] = 0
+    mst_fc["大カテゴリ"] = mst_fc["大カテゴリ"].fillna("⚠️ マスタ未登録")
+    mst_fc["初期在庫数"] = mst_fc["初期在庫数"].fillna(0)
+else:
+    mst_fc = mst_u.copy()
+
 # ─────────────────────────────────────────────
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
@@ -320,7 +343,7 @@ def _after_checkpoint_mask(df, cp):
     ev_dt = df["登録日時"].fillna(pd.Timestamp.min)
     return (df["日付"] > cp["日付"]) | ((df["日付"] == cp["日付"]) & (ev_dt > cp_dt))
 
-if not mst_u.empty:
+if not mst_fc.empty:
     ev_o = odf[["納品予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
@@ -343,18 +366,34 @@ if not mst_u.empty:
             checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"])}
     ae = ae[~_tz_mask].copy()  # チェックポイント自体は実数へ統合済みなので、以後の流量計算からは除外
 
-    pe = ae[ae["日付"] < today].groupby("製品名")["qty"].sum(); fe = ae[ae["日付"] >= today]
+    def _floor_carry_balance(base_qty, ev_df):
+        """過去日を1日ずつ辿って残高を計算し、その日の合計収支を反映した結果
+        残高がマイナスになった場合はその時点で0にクリップしてから翌日へ繰り越す。
+        ★修復：出荷と製造の登録タイミングのズレ等で生じた『過去の一時的なマイナス』を
+        『現在庫』にいつまでも引きずらせないための処理。当日以降（欠品予測）には適用しない。
+        （同日中の入出庫はここで日別に合算されるため、単なる登録順の前後は影響しない。
+        　実際にその日の出庫が入庫を上回って赤字だった日のみクリップの対象になる。）"""
+        bal = to_int(base_qty)
+        if ev_df is None or ev_df.empty: return bal
+        daily = ev_df.groupby("日付")["qty"].sum().sort_index()
+        for _, q in daily.items():
+            bal += to_int(q)
+            if bal < 0: bal = 0
+        return bal
+
+    pe_ev = ae[ae["日付"] < today]; fe = ae[ae["日付"] >= today]
     piv = fe.pivot_table(index="製品名", columns="日付", values="qty", aggfunc="sum") if not fe.empty else pd.DataFrame()
-    for _, r in mst_u.iterrows():
+    for _, r in mst_fc.iterrows():
         p = r["製品名"]; cp = checkpoints.get(p)
         if cp:
             # 棚卸チェックポイントあり：その実数を基準に、棚卸登録より後の増減だけを積み上げる
             _pmask = ae["製品名"] == p
             _after = ae[_pmask & _after_checkpoint_mask(ae, cp) & (ae["日付"] < today)]
-            c_s = cp["実数"] + to_int(_after["qty"].sum())
+            c_s = _floor_carry_balance(cp["実数"], _after[["日付","qty"]])
         else:
-            # チェックポイントなし：従来通り初期在庫数からの積み上げ
-            c_s = to_int(r.get("初期在庫数",0)) + to_int(pe.get(p,0))
+            # チェックポイントなし：初期在庫数を基準に、過去の一時的なマイナスは日毎に0クリップしながら積み上げる
+            _pev = pe_ev[pe_ev["製品名"] == p]
+            c_s = _floor_carry_balance(r.get("初期在庫数",0), _pev[["日付","qty"]])
         cs[p] = c_s
         pr = piv.loc[p] if p in piv.index else pd.Series(0, index=dates)
         if isinstance(pr, pd.DataFrame): pr = pr.sum(axis=0)
@@ -1315,10 +1354,10 @@ elif pg == "📊 在庫・スケジュール":
         else: st.success("✅ 欠品予測なし")
 
     with t1:
-        if mst_u.empty: st.info("マスタ空")
+        if mst_fc.empty: st.info("マスタ空")
         else:
             sd = pd.date_range(today, today+timedelta(days=30))
-            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_u.iterrows()]
+            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
             c1, c2 = st.columns([3, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開</div>', unsafe_allow_html=True)
             if c2.button("🔄 閉じる"): st.session_state.drill_product = None; st.rerun()
