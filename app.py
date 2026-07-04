@@ -1765,7 +1765,7 @@ elif pg == "⚙️ マスタ・分析":
                 _o_cs = (_o_ord["ケース数"].apply(to_int).sum() if not _o_ord.empty else 0)
                 with st.expander(f"⚠️ {_oname} 　（受注{len(_o_ord)}件 / {_o_cs:,}cs）", expanded=False):
                     if not _o_ord.empty:
-                        st.dataframe(_o_ord.assign(日付=_o_ord["納品予定日"].apply(format_date_jp))[[c for c in ["日付","顧客名","ケース数","備考"] if c in _o_ord.columns]].sort_values("日付",ascending=False).head(15), hide_index=True, use_container_width=True)
+                        st.dataframe(_o_ord.sort_values("納品予定日",ascending=False).assign(日付=lambda d: d["納品予定日"].apply(format_date_jp))[["日付"] + [c for c in ["顧客名","ケース数","備考"] if c in _o_ord.columns]].head(15), hide_index=True, use_container_width=True)
                     else:
                         st.caption("受注データはありません（製造登録のみに存在）。")
                     _act = st.radio("対応方法", ["① 既存製品に統合する", "② 新規にマスタ登録する"], key=f"orphan_act_{_oname}", horizontal=True)
