@@ -306,6 +306,10 @@ for _ext_col, _ext_def in [
 
 # ★修復：受注・製造データには存在するが製品マスタ（mst_u）には存在しない製品名を検出し、
 # 「1ヶ月在庫予測」等の予測系画面で取りこぼされないようにする（特注・チャーター品の反映漏れ対策）。
+# 顧客別スケジュールや特注・チャータースケジュールは odf を直接参照するため表示されるが、
+# 在庫予測は従来 mst_u のみを走査していたため、マスタに登録がない製品名の受注は
+# 予測計算から漏れていた。mst_u 自体（登録フォーム等が参照）は変更せず、
+# 予測計算専用の mst_fc を別途用意することで他機能への影響を避ける。
 _master_names = set(mst_u["製品名"].astype(str).tolist()) if not mst_u.empty else set()
 _order_names = set(odf["製品名"].dropna().astype(str).tolist()) if not odf.empty and "製品名" in odf.columns else set()
 _manu_names = set(mdf["製品名"].dropna().astype(str).tolist()) if not mdf.empty and "製品名" in mdf.columns else set()
@@ -331,7 +335,8 @@ ae = pd.DataFrame(columns=["日付", "製品名", "qty", "備考", "登録日時
 checkpoints = {}  # 製品名 -> {"日付":棚卸日, "登録日時":登録時刻, "実数":その時点の実カウント数}
 
 def _after_checkpoint_mask(df, cp):
-    """同じ日でも「棚卸の登録より後に入力された取引」だけを True にする。"""
+    """同じ日でも「棚卸の登録より後に入力された取引」だけを True にする。
+    （＝棚卸カウント後に登録された製造・出荷は、正しく以後の在庫に加算される）"""
     if cp is None: return pd.Series(True, index=df.index)
     cp_dt = cp.get("登録日時")
     if pd.isna(cp_dt): cp_dt = pd.Timestamp.min
@@ -348,6 +353,9 @@ if not mst_fc.empty:
     ae["qty"] = ae["qty"].apply(to_int); ae["備考"] = ae["備考"].fillna("")
     ae["登録日時"] = pd.to_datetime(ae["登録日時"], errors="coerce")
 
+    # 📋 棚卸チェックポイント抽出：製品ごとに「最新の棚卸日時」とその時の実数を特定する。
+    # それより前の履歴（初期在庫数や過去の受注・製造）は、以後の在庫計算では一切参照しない
+    # ＝ 棚卸を入力した瞬間の実数を基準に、以後の在庫はそこからリセットして積み上げる。
     _tz_mask = ae["備考"].str.contains(TANAOSHI_TAG, regex=False)
     if _tz_mask.any():
         _tz = ae[_tz_mask].copy()
@@ -356,9 +364,15 @@ if not mst_fc.empty:
         for p, g in _tz.groupby("製品名"):
             last = g.iloc[-1]
             checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"])}
-    ae = ae[~_tz_mask].copy()
+    ae = ae[~_tz_mask].copy()  # チェックポイント自体は実数へ統合済みなので、以後の流量計算からは除外
 
     def _floor_carry_balance(base_qty, ev_df):
+        """過去日を1日ずつ辿って残高を計算し、その日の合計収支を反映した結果
+        残高がマイナスになった場合はその時点で0にクリップしてから翌日へ繰り越す。
+        ★修復：出荷と製造の登録タイミングのズレ等で生じた『過去の一時的なマイナス』を
+        『現在庫』にいつまでも引きずらせないための処理。当日以降（欠品予測）には適用しない。
+        （同日中の入出庫はここで日別に合算されるため、単なる登録順の前後は影響しない。
+        　実際にその日の出庫が入庫を上回って赤字だった日のみクリップの対象になる。）"""
         bal = to_int(base_qty)
         if ev_df is None or ev_df.empty: return bal
         daily = ev_df.groupby("日付")["qty"].sum().sort_index()
@@ -372,10 +386,12 @@ if not mst_fc.empty:
     for _, r in mst_fc.iterrows():
         p = r["製品名"]; cp = checkpoints.get(p)
         if cp:
+            # 棚卸チェックポイントあり：その実数を基準に、棚卸登録より後の増減だけを積み上げる
             _pmask = ae["製品名"] == p
             _after = ae[_pmask & _after_checkpoint_mask(ae, cp) & (ae["日付"] < today)]
             c_s = _floor_carry_balance(cp["実数"], _after[["日付","qty"]])
         else:
+            # チェックポイントなし：初期在庫数を基準に、過去の一時的なマイナスは日毎に0クリップしながら積み上げる
             _pev = pe_ev[pe_ev["製品名"] == p]
             c_s = _floor_carry_balance(r.get("初期在庫数",0), _pev[["日付","qty"]])
         cs[p] = c_s
@@ -385,6 +401,8 @@ if not mst_fc.empty:
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
 
 def stock_asof(p, asof_date):
+    """指定日の「開始時点」（その日の入出庫が反映される前）の計算上在庫を返す。
+    棚卸チェックポイントがあればそこを基準に、なければ初期在庫数を基準にする。"""
     asof_ts = pd.Timestamp(asof_date).normalize()
     cp = checkpoints.get(p)
     if cp and cp["日付"] <= asof_ts:
@@ -395,16 +413,14 @@ def stock_asof(p, asof_date):
     ev = ae[(ae["製品名"] == p) & (ae["日付"] < asof_ts) & _after_checkpoint_mask(ae, cp)]
     return base_qty + to_int(ev["qty"].sum())
 
-# ─────────────────────────────────────────────
-# 資材の予測・発注残・統計計算エンジン
-# ─────────────────────────────────────────────
+# ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
 fd = 90; pf = {}
 if not mst_u.empty and not odf.empty:
-    mpi = mst_u.set_index("製品名")[["using_material_placeholder" if "使用資材名" not in mst_u.columns else "使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
+    mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
     for _, r in odf.iterrows():
         p, q, dt = str(r.get("製品名","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日"),errors="coerce")
         if pd.isna(dt) or dt.date()<date.today() or dt>today+timedelta(days=fd) or p not in mpi: continue
-        pn = str(mpi[p].get("使用資材名" if "使用資材名" in mpi[p] else "using_material_placeholder",""))
+        pn = str(mpi[p].get("使用資材名",""))
         kbn = str(mpi[p].get("製造登録区分","ケース")).strip()
         nyu = max(1, to_int(mpi[p].get("入数",10)))
         kou = max(1, to_int(mpi[p].get("甲消費数",4)))
@@ -441,7 +457,7 @@ for pn in p_sum.keys(): pf.setdefault(pn, {})
 
 past_30_days = today - timedelta(days=30)
 daily_usage = {}
-net_change_by_day = {}
+net_change_by_day = {} # ★追加：グラフ逆算用の日別純増減
 
 if not pk_l.empty:
     for _, r in pk_l.iterrows():
@@ -454,6 +470,7 @@ if not pk_l.empty:
         pt = str(r.get("処理区分",""))
         
         if pn in p_sum:
+            # ★修復：mdfからの二重計上をやめ、純粋に履歴から入出庫を計算する
             if "入庫" in pt:
                 p_sum[pn]["入庫"] += q
                 net_chg = q
@@ -463,11 +480,13 @@ if not pk_l.empty:
             else:
                 net_chg = 0
                 
+            # 逆算グラフ用
             d_norm = dt.normalize().date()
             net_change_by_day.setdefault(pn, {})
             net_change_by_day[pn].setdefault(d_norm, 0)
             net_change_by_day[pn][d_norm] += net_chg
             
+            # 統計用
             if dt >= past_30_days:
                 if "出庫" in pt or "連動" in pt:
                     d_str = dt.normalize().strftime("%Y-%m-%d")
@@ -484,6 +503,8 @@ for pn, u in sorted_usage:
     if ratio <= 0.7: abc_rank[pn] = "A"
     elif ratio <= 0.95: abc_rank[pn] = "B"
     else: abc_rank[pn] = "C"
+
+# ★修復：mdfをループして出庫を足す処理（二重計上の元凶）を完全に削除しました。
 
 for pn, d in p_sum.items():
     d["現在庫"] = d.get("期首在庫", 0) + d.get("入庫", 0) - d.get("出庫", 0)
@@ -548,7 +569,7 @@ with st.sidebar:
             st.session_state.current_page = m; st.session_state.drill_product = None; st.rerun()
 
     st.markdown("<div style='height:1px; background:rgba(255,255,255,0.1); margin:14px 0 10px;'></div>", unsafe_allow_html=True)
-    if st.button("🔄 スプレッドシートを再読込", use_container_width=True):
+    if st.button("🔄 スプレッドシートを再読込", use_container_width=True, help="Googleスプレッドシートを直接編集した場合など、最新データを読み込み直します"):
         for _s in ["orders","manufactures","master","customers","packaging_master",
                    "packaging_logs","shipping_master","special_schedule","order_purchases"]:
             st.session_state.pop(f"{_s}_df", None)
@@ -596,10 +617,10 @@ if pg == "📋 受注登録":
     else:
         qty = st.number_input("📦 数量（ケース）", min_value=1, step=1, value=None)
 
-    r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄"); iadj = c3.checkbox("📊 在庫調整")
+    r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄"); iadj = c3.checkbox("📊 在庫調整", help="在庫ずれ修正用。チェック時は出荷ではなく在庫への加算として扱われます（マイナスを戻す場合など）")
     
     if iadj:
-        st.markdown('<div style="background:#EFF6FF;border:1.5px solid #2563EB;border-radius:8px;padding:8px 14px;font-size:13px;color:#1E40AF;margin:4px 0;">📊 <b>在庫調整モード</b></div>', unsafe_allow_html=True)
+        st.markdown('<div style="background:#EFF6FF;border:1.5px solid #2563EB;border-radius:8px;padding:8px 14px;font-size:13px;color:#1E40AF;margin:4px 0;">📊 <b>在庫調整モード</b>：この受注は「出荷」ではなく在庫を <b>増やす（＋）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     
     if prod and qty and to_int(qty)>0 and cs.get(prod,0) < to_int(qty):
         st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cs.get(prod,0)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cs.get(prod,0)}</span></div>', unsafe_allow_html=True)
@@ -625,7 +646,7 @@ if pg == "📋 受注登録":
                 _proj = fs.get(prod, {}).get(_d_key, _cur) if _d_key else _cur
                 _after = _proj - to_int(qty)
                 if idu:
-                    _stk_msg = f"📦 現在庫: {_cur:,}"
+                    _stk_msg = f"📦 現在庫: {_cur:,} （日付未定のため在庫影響は確定後に反映）"
                     _ftype = "info"
                 elif _after < 0:
                     _stk_msg = f"📦 現在庫: {_cur:,} ／ 出荷日予測在庫: {_proj:,} → 登録後: **{_after:,}** 🚨 在庫不足！"
@@ -768,17 +789,17 @@ elif pg == "🏭 製造登録":
     
     kbn, nyu, kou = pui(pm)
     if kbn == "袋":
-        mq = c2.number_input(f"📦 数量（袋）", min_value=1, step=1, value=None)
+        mq = c2.number_input(f"📦 数量（袋） ※{nyu}袋で1箱(ﾀﾞﾝﾎﾞｰﾙ)消費", min_value=1, step=1, value=None)
     elif kbn == "甲":
-        mq = c2.number_input(f"📦 数量（甲）", min_value=1, step=1, value=None)
+        mq = c2.number_input(f"📦 数量（甲） ※1甲で{kou}箱(ﾀﾞﾝﾎﾞｰﾙ)消費", min_value=1, step=1, value=None)
     else:
-        mq = c2.number_input("📦 数量（ケース）", min_value=1, step=1, value=None)
+        mq = c2.number_input("📦 数量（ケース） ※1ケースで1箱(ﾀﾞﾝﾎﾞｰﾙ)消費", min_value=1, step=1, value=None)
 
     mr = s2.text_input("📝 備考（製造）")
     irp = st.checkbox("🔄 リパック製造（在庫加算）")
-    iadj_m = st.checkbox("📊 在庫調整（－）")
+    iadj_m = st.checkbox("📊 在庫調整（－）", help="在庫ずれ修正用。チェック時は在庫を減らす（マイナス）処理として受注登録されます。製造ミス・廃棄・棚卸減など。")
     if iadj_m:
-        st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b></div>', unsafe_allow_html=True)
+        st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b>：この登録は在庫を <b>減らす（－）</b> 処理として出荷登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     ipl = st.checkbox("📦 紐づく資材の在庫も同時に減らす", value=True) if (irp and not iadj_m) else (True if not iadj_m else False)
 
     if pm and mq and ipl and not mst_u.empty and pm in mst_u["製品名"].values:
@@ -806,10 +827,11 @@ elif pg == "🏭 製造登録":
             📦 <b>資材自動減算プレビュー</b>：【{_mat_name}】<br>
             計算式: {_calc_desc}<br>
             現在庫 <b>{_cur_mat:,} 枚</b> → 減算後 <b style="color:{'#DC2626' if _after_mat<0 else '#059669'}">{_after_mat:,} 枚</b>
+            {"　⚠️ <b>資材不足！</b>" if _after_mat < 0 else "　✅ 充足"}
             </div>""", unsafe_allow_html=True)
 
     if pm and mq and cs.get(pm,0)<=0 and not iadj_m:
-        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)} cs</span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)} cs</span> → 製造後: <b>{cs.get(pm,0)+to_int(mq)} cs</b></div>", unsafe_allow_html=True)
     st.write("---")
     _mfg_reg_msg = st.empty()
     if st.button("➕ 製造データを記録", type="primary", use_container_width=True):
@@ -854,7 +876,7 @@ elif pg == "🏭 製造登録":
                             "関連製品名": pm, "理論在庫": p_sum.get(_pnn,{}).get("現在庫",0) - _deduct_qty,
                             "備考": f"自動記録 [{_calc_memo}]", "登録日時": datetime.now(JST).replace(tzinfo=None)
                         }]))
-                        _mfg_mat_msg = f"  ＋【{_pnn}】 {_deduct_qty:,}枚 自動減算"
+                        _mfg_mat_msg = f"  ＋【{_pnn}】 {_deduct_qty:,}枚 自動減算（{_calc_memo}）"
                 flash("success", f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}cs  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
                 st.rerun()
     show_flash_inline(_mfg_reg_msg)
@@ -943,17 +965,19 @@ elif pg == "📦 資材・入出庫":
             u_df = df_a[df_a["_s"]<=7] if not df_a.empty else pd.DataFrame()
             if not u_df.empty:
                 st.markdown("### 🚨 直近7日以内に発注手配が必要")
-                for _, r in u_df.iterrows(): st.markdown(f'<div style="background:{r["_c"]};border-left:6px solid {r["_b"]};border-radius:10px;padding:14px;margin-bottom:10px;"><b>📦 {r["資材名"]}</b> <span style="float:right;font-weight:900;">{r["緊急度"]}</span><br><span style="font-size:13px;">現在庫: {r["現在庫"]:,} | 設定/推奨: {r.get("設定点/推奨","")} | LT: {r["LT"]}日</span></div>', unsafe_allow_html=True)
+                for _, r in u_df.iterrows(): st.markdown(f'<div style="background:{r["_c"]};border-left:6px solid {r["_b"]};border-radius:10px;padding:14px;margin-bottom:10px;"><b>📦 {r["資材名"]}</b> <span style="float:right;font-weight:900;">{r["緊急度"]}</span><br><span style="font-size:13px;">現在庫: {r["現在庫"]:,} | 設定/推奨: {r.get("設定点/推奨","")} | LT: {r["LT"]}日<br>⏰ <b>発注点到達: {r["発注推奨日"]}</b><br>📉 <b>枯渇予測: {r["枯渇予測"]}</b></span></div>', unsafe_allow_html=True)
             
             st.dataframe(df_a[["資材名","現在庫","設定点/推奨","LT","在庫日数","発注推奨日","枯渇予測","緊急度"]].style.apply(lambda r: ['background-color:#FEE2E2;font-weight:bold;']*len(r) if "即手配" in str(r.get("緊急度","")) or "今すぐ" in str(r.get("緊急度","")) else (['background-color:#FFF7ED;']*len(r) if "🟠" in str(r.get("緊急度","")) else (['background-color:#FFFBEB;']*len(r) if "🟡" in str(r.get("緊急度","")) else (['background-color:#EFF6FF;']*len(r) if "🔵" in str(r.get("緊急度","")) else ['background-color:#F0FDF4;']*len(r)))), axis=1), use_container_width=True, hide_index=True, height=500)
 
             pack_mst_unique = pk_m.drop_duplicates(subset=["資材名"]) if not pk_m.empty else pd.DataFrame(columns=["資材名"])
             spg = st.selectbox("グラフ表示", options=[r["資材名"] for _, r in pack_mst_unique.iterrows() if r["資材名"]])
             if spg:
+                # ★修復：過去30日の実績〜未来90日の予測を繋げて描画する
                 ri = p_sum.get(spg,{}).get("現在庫",0)
                 ri_future = ri
                 gd, gs, gu = [], [], []
                 
+                # 未来予測（現在庫から順算）
                 for d_g in pd.date_range(today, today+timedelta(days=fd)):
                     ug = pf.get(spg,{}).get(d_g,0)
                     ri_future -= ug
@@ -961,6 +985,7 @@ elif pg == "📦 資材・入出庫":
                     gs.append(ri_future)
                     gu.append(-ug)
                 
+                # 過去30日実績（現在庫から逆算）
                 ri_past = ri
                 past_dates = pd.date_range(today-timedelta(days=30), today-timedelta(days=1))
                 past_gd, past_gs, past_gu = [], [], []
@@ -980,9 +1005,9 @@ elif pg == "📦 資材・入出庫":
                 fig.add_trace(go.Bar(x=full_gd, y=full_gu, name="日別出庫/消費", marker_color="#F43F5E", opacity=0.55))
                 fig.add_trace(go.Scatter(x=full_gd, y=full_gs, name="予測/実績在庫", mode="lines+markers", line=dict(color="#2563EB", width=2.5)))
                 fig.add_hline(y=p_sum.get(spg,{}).get("発注点",0), line_dash="dash", line_color="#F59E0B", annotation_text="発注点")
-                fig.add_hline(y=0, line_dash="dot", line_color="#DC2626")
-                fig.add_vline(x=today, line_dash="dash", line_color="#10B981")
-                fig.update_layout(title=f"【{spg}】 在庫推移", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380)
+                fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
+                fig.add_vline(x=today, line_dash="dash", line_color="#10B981", annotation_text="今日")
+                fig.update_layout(title=f"【{spg}】 過去30日実績〜未来予測 在庫推移", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380)
                 st.plotly_chart(fig, use_container_width=True)
 
     with tp2:
@@ -1003,7 +1028,7 @@ elif pg == "📦 資材・入出庫":
                 if item.get("管理区分") == "都度発注(受注連動)":
                     item["在庫日数表示"] = "連動"
                 else:
-                    item["在庫日数表示"] = f"{int(item.get('在庫日数', 999))}日" if item.get("在庫日数", 999) < 999 else "在庫あり"
+                    item["在庫日数表示"] = f"{int(item.get('在庫日数', 999))}日" if item.get("在庫日数", 999) < 999 else "潤沢"
                     
             _sum_df = pd.DataFrame([{"資材名":k, **v} for k,v in p_sum.items()])
             
@@ -1046,17 +1071,17 @@ elif pg == "📦 資材・入出庫":
                 if "棚卸" in pt:
                     diff = lq - p_sum.get(sl_pk,{}).get("現在庫",0)
                     if diff == 0:
-                        flash("info", f"ℹ️ 【{sl_pk}】 在庫数に変更なし")
+                        flash("info", f"ℹ️ 【{sl_pk}】 在庫数に変更なし（棚卸一致）")
                         st.rerun()
                     else:
                         fpt, lq = ("入庫", diff) if diff > 0 else ("出庫", abs(diff))
                         app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}]))
-                        flash("success", f"✅ 登録しました！")
+                        flash("success", f"✅ 登録しました！【{sl_pk}】 棚卸調整 {'+' if fpt=='入庫' else '-'}{lq} ({fpt})")
                         st.rerun()
                 elif lq > 0:
                     app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}]))
                     disp_type = "入庫" if "入庫" in pt else "出庫"
-                    flash("success", f"✅ 登録しました！")
+                    flash("success", f"✅ 登録しました！【{sl_pk}】 {disp_type} {lq:,} 枚 / {pr}")
                     st.rerun()
                 else:
                     _pk_msg.error("⚠️ 数量は1以上を入力してください")
@@ -1078,7 +1103,7 @@ elif pg == "📦 資材・入出庫":
             _dpk_show = dpk.head(_h_limit).reset_index(drop=True)
 
             if _del_mode:
-                st.markdown('<div style="background:#FEF2F2;border:1.5px solid #FCA5A5;border-radius:8px;padding:8px 14px;margin-bottom:8px;font-size:13px;color:#991B1B;">⚠️ <b>削除モード</b></div>', unsafe_allow_html=True)
+                st.markdown('<div style="background:#FEF2F2;border:1.5px solid #FCA5A5;border-radius:8px;padding:8px 14px;margin-bottom:8px;font-size:13px;color:#991B1B;">⚠️ <b>削除モード</b>：削除したい行にチェックを入れて「選択行を削除」ボタンを押してください。削除は取り消せません。</div>', unsafe_allow_html=True)
                 _del_df = _dpk_show[_tp4_cols].copy()
                 _del_df.insert(0, "削除", False)
                 _del_editor = st.data_editor(
@@ -1106,6 +1131,7 @@ elif pg == "📦 資材・入出庫":
                         st.rerun()
                 show_flash_inline(_del_msg)
             else:
+                # ★修復：エディタから返ってきたIDを信頼するように変更し、履歴消失バグを防止
                 edp = st.data_editor(
                     _dpk_show[_tp4_cols], hide_index=True,
                     use_container_width=True,
@@ -1132,6 +1158,7 @@ elif pg == "📦 資材・入出庫":
 
     with tp5:
         st.markdown('<div class="section-title">🛒 資材発注管理</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 発注登録 → 一覧管理 → 納入完了処理（在庫自動加算）の流れで管理できます。</div>', unsafe_allow_html=True)
         _PO_COLS = ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先","納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"]
         if "po_df_loaded" not in st.session_state:
             try:
@@ -1161,7 +1188,7 @@ elif pg == "📦 資材・入出庫":
 
         _alert_mats = [(pn, d) for pn,d in p_sum.items() if (d.get("管理区分")=="定期発注(自動)" and d.get("現在庫",0) < d.get("発注点",0)) or (d.get("管理区分")=="都度発注(受注連動)" and d.get("不足数",0)>0)]
         if _alert_mats:
-            st.markdown(f'<div class="danger-banner">🚨 手配が必要な資材が <b>{len(_alert_mats)}件</b> あります：{" / ".join(m for m,_ in _alert_mats[:5])}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="danger-banner">🚨 手配が必要な資材が <b>{len(_alert_mats)}件</b> あります：{" / ".join(m for m,_ in _alert_mats[:5])}{"…" if len(_alert_mats)>5 else ""}</div>', unsafe_allow_html=True)
 
         po_t1, po_t2, po_t3 = st.tabs(["➕ 新規発注登録", "📋 発注一覧", "✅ 納入完了処理"])
         with po_t1:
@@ -1178,7 +1205,7 @@ elif pg == "📦 資材・入出庫":
             po_r4, po_r5 = st.columns(2)
             _po_supplier = po_r4.text_input("🏢 仕入先", key="po_supplier", placeholder=p_sum.get(_po_mat,{}).get("仕入先","") if _po_mat else "")
             _lt_days = to_int(pk_m[pk_m["資材名"]==_po_mat]["発注リードタイム"].iloc[0]) if (not pk_m.empty and _po_mat and _po_mat in pk_m["資材名"].values) else 7
-            _po_eta = po_r5.date_input(f"📦 納入予定日", value=date.today() + timedelta(days=_lt_days), key="po_eta")
+            _po_eta = po_r5.date_input(f"📦 納入予定日（LT:{_lt_days}日から自動算出）", value=date.today() + timedelta(days=_lt_days), key="po_eta")
             _po_rem = st.text_input("📝 備考", key="po_rem")
             if _po_mat:
                 _d_info = p_sum.get(_po_mat,{})
@@ -1187,10 +1214,10 @@ elif pg == "📦 資材・入出庫":
                 if _d_info.get("管理区分") == "都度発注(受注連動)":
                     _req = _d_info.get("受注残", 0)
                     _col = "#FEE2E2" if _cur_inv + _d_info.get("発注残",0) < _req else "#D1FAE5"
-                    st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat} [受注連動]</b>  現在庫: <b>{_cur_inv:,} 枚</b>  必要量: {_req:,} 枚</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat} [受注連動]</b>  現在庫: <b>{_cur_inv:,} 枚</b>  必要量: {_req:,} 枚  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
                 else:
                     _col = "#FEE2E2" if _cur_inv < _order_pt else "#D1FAE5"
-                    st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat}</b>  現在庫: <b>{_cur_inv:,} 枚</b>  発注点: {_order_pt:,} 枚</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="background:{_col};border-radius:8px;padding:8px 14px;font-size:13px;margin:4px 0;">📊 <b>{_po_mat}</b>  現在庫: <b>{_cur_inv:,} 枚</b>  発注点: {_order_pt:,} 枚  {"⚠️ 発注点以下！" if _cur_inv < _order_pt else "✅ 在庫充足"}  → 発注後予定在庫: <b>{_cur_inv + _po_qty:,} 枚</b></div>', unsafe_allow_html=True)
             
             _po_reg_msg = st.empty()
             if st.button("✅ 発注を登録", type="primary", use_container_width=True, key="po_reg_btn"):
@@ -1214,13 +1241,15 @@ elif pg == "📦 資材・入出庫":
                     }])
                     merged_po = pd.concat([po_df, _new_po], ignore_index=True)
                     _save_po(merged_po)
-                    flash("success", f"✅ 発注を登録しました！")
+                    flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
                     st.rerun()
             show_flash_inline(_po_reg_msg)
 
         with po_t2:
             if po_df.empty: st.info("発注データがありません。")
             else:
+                st.markdown("💡 編集して「保存」ボタンを押してください。削除は行チェックボックスで行います。")
+                
                 po_edit = po_df.copy()
                 po_edit.insert(0, "🗑️ 削除", False)
                 
@@ -1243,10 +1272,11 @@ elif pg == "📦 資材・入出庫":
 
         with po_t3:
             st.markdown("**✅ 納入完了処理**")
+            st.markdown('<div class="info-tip">💡 納入された資材の実数量を入力し「納入完了」を押すと、資材在庫に自動加算されます。</div>', unsafe_allow_html=True)
             _open_po = po_df[po_df["ステータス"].isin(["発注済","一部納入"])].copy() if not po_df.empty else pd.DataFrame()
             if _open_po.empty: st.success("✅ 処理待ちの発注はありません。")
             else:
-                _open_po["表示"] = _open_po.apply(lambda r: f"[{r.get('発注ID','')}] {r.get('資材名','')}  発注{r.get('発注数','')}枚", axis=1)
+                _open_po["表示"] = _open_po.apply(lambda r: f"[{r.get('発注ID','')}] {r.get('資材名','')}  発注{r.get('発注数','')}枚  納入予定:{r.get('納入予定日','')}", axis=1)
                 _sel_po_label = st.selectbox("処理する発注を選択", options=_open_po["表示"].tolist(), key="po_sel_complete")
                 _sel_po_idx = _open_po[_open_po["表示"]==_sel_po_label].index[0] if _sel_po_label else None
                 if _sel_po_idx is not None:
@@ -1254,27 +1284,27 @@ elif pg == "📦 資材・入出庫":
                     _mat_nm = _sel_row.get("資材名","")
                     _ord_qty = to_int(_sel_row.get("発注数",0))
                     _already = to_int(_sel_row.get("実際納入数",0))
-                    st.markdown(f"""<div style="background:#EFF6FF;border-radius:8px;padding:10px 14px;margin:6px 0;font-size:13px;">📦 <b>{_mat_nm}</b>　発注数: {_ord_qty:,}枚　残: {max(0,_ord_qty-_already):,}枚</div>""", unsafe_allow_html=True)
+                    st.markdown(f"""<div style="background:#EFF6FF;border-radius:8px;padding:10px 14px;margin:6px 0;font-size:13px;">📦 <b>{_mat_nm}</b>　発注数: {_ord_qty:,}枚　既納入数: {_already:,}枚　残: {max(0,_ord_qty-_already):,}枚</div>""", unsafe_allow_html=True)
                     _del_c1, _del_c2, _del_c3 = st.columns(3)
                     _actual_date = _del_c1.date_input("📅 実際の納入日", value=date.today(), key="po_actual_date")
-                    _actual_qty  = _del_c2.number_input("📦 実際の納入数", min_value=1, step=100, value=max(1, _ord_qty - _already), key="po_actual_qty")
+                    _actual_qty  = _del_c2.number_input("📦 実際の納入数（枚）", min_value=1, step=100, value=max(1, _ord_qty - _already), key="po_actual_qty")
                     _po_comp_rem = _del_c3.text_input("備考", key="po_comp_rem")
                     _new_total = _already + _actual_qty
                     _new_status = "納入完了" if _new_total >= _ord_qty else "一部納入"
-                    st.caption(f"納入後合計: {_new_total:,}枚 / {_ord_qty:,}枚  → ステータス:「{_new_status}」")
+                    st.caption(f"納入後合計: {_new_total:,}枚 / {_ord_qty:,}枚  → ステータス:「{_new_status}」　現在庫: {p_sum.get(_mat_nm,{}).get('現在庫',0):,}枚 → {p_sum.get(_mat_nm,{}).get('現在庫',0)+_actual_qty:,}枚")
                     _comp_msg = st.empty()
                     if st.button("✅ 納入完了処理を実行", type="primary", use_container_width=True, key="po_comp_btn"):
                         app_sync("packaging_logs", pd.DataFrame([{
-                            "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(_actual_date), "資材名": _mat_nm, "処理区分": "入庫", "數量": _actual_qty,
+                            "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(_actual_date), "資材名": _mat_nm, "処理区分": "入庫", "数量": _actual_qty,
                             "理由": f"発注納入 [{_sel_row.get('発注ID','')}]", "関連製品名": "", "理論在庫": p_sum.get(_mat_nm,{}).get("現在庫",0) + _actual_qty,
-                            "備考": f"発注納入完了", "登録日時": datetime.now(JST).replace(tzinfo=None)
+                            "備考": f"発注納入完了 仕入先:{_sel_row.get('仕入先','')} {_po_comp_rem}", "登録日時": datetime.now(JST).replace(tzinfo=None)
                         }]))
                         _po_updated = po_df.copy()
                         _po_updated.loc[_po_updated["発注ID"]==_sel_row["発注ID"], "実際納入日"] = _actual_date.strftime("%Y-%m-%d")
                         _po_updated.loc[_po_updated["発注ID"]==_sel_row["発注ID"], "実際納入数"] = str(_new_total)
                         _po_updated.loc[_po_updated["発注ID"]==_sel_row["発注ID"], "ステータス"] = _new_status
                         _save_po(_po_updated)
-                        flash("success", f"✅ 納入完了！")
+                        flash("success", f"✅ 納入完了！【{_mat_nm}】 {_actual_qty:,}枚 入庫  現在庫: {p_sum.get(_mat_nm,{}).get('現在庫',0):,} → {p_sum.get(_mat_nm,{}).get('現在庫',0)+_actual_qty:,}枚  ステータス→「{_new_status}」")
                         st.rerun()
                     show_flash_inline(_comp_msg)
 
@@ -1327,43 +1357,12 @@ elif pg == "📊 在庫・スケジュール":
         if mst_fc.empty: st.info("マスタ空")
         else:
             sd = pd.date_range(today, today+timedelta(days=30))
-            
-            # ─────────────────────────────────────────────
-            # ★機能追加：マイナス発生品絞り込みフィルター
-            # ─────────────────────────────────────────────
-            show_only_negative = st.checkbox("🚨 在庫切れリスクあり（30日以内に予測在庫がマイナスになる製品のみ表示）", value=False, key="filter_negative_stock")
-            
             iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
-            
-            if show_only_negative:
-                date_cols = [format_date_jp(d) for d in sd]
-                mask = idf[date_cols].apply(lambda row: row.astype(float).lt(0).any(), axis=1)
-                idf = idf[mask].reset_index(drop=True)
-                
             c1, c2 = st.columns([3, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開</div>', unsafe_allow_html=True)
             if c2.button("🔄 閉じる"): st.session_state.drill_product = None; st.rerun()
-            
-            # ─────────────────────────────────────────────
-            # ★機能追加：列ピン留め設定 (カテゴリ, 製品名, 現在庫)
-            # ─────────────────────────────────────────────
-            se = st.dataframe(
-                idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else ''), 
-                use_container_width=True, 
-                hide_index=True, 
-                on_select="rerun", 
-                selection_mode="single-row",
-                column_config={
-                    "カテゴリ": st.column_config.TextColumn("カテゴリ", pinned="left"),
-                    "製品名": st.column_config.TextColumn("製品名", pinned="left"),
-                    "現在庫": st.column_config.NumberColumn("現在庫", pinned="left")
-                }
-            )
-            
-            if se.selection.get("rows"): 
-                selected_row_idx = se.selection.get("rows")[0]
-                if selected_row_idx < len(idf):
-                    st.session_state.drill_product = idf.iloc[selected_row_idx]["製品名"]
+            se = st.dataframe(idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else ''), use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
+            if se.selection.get("rows"): st.session_state.drill_product = idf.iloc[se.selection.get("rows")[0]]["製品名"]
 
             dp = st.session_state.drill_product
             if dp:
@@ -1387,15 +1386,14 @@ elif pg == "📊 在庫・スケジュール":
                 st.markdown('<div class="section-title">📅 今後60日間スケジュール</div>', unsafe_allow_html=True)
                 pof = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)] if not odf.empty else pd.DataFrame()
                 pmf = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=today)&(~mdf["備考"].fillna("").str.contains("【在庫非反映】"))] if not mdf.empty else pd.DataFrame()
-                dtl = []; ts += cs.get(dp,0) if "ts" in locals() else cs.get(dp,0)
-                _ts_run = cs.get(dp,0)
+                dtl = []; ts = cs.get(dp,0)
                 for d2 in pd.date_range(today, today+timedelta(days=59)):
                     do = pof[safe_dt_date(pof["納品予定日"])==d2.date()] if not pof.empty else pd.DataFrame()
                     oq = to_int(do["ケース数"].sum()) if not do.empty else 0
                     dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                     iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
-                    _ts_run += (iq-oq)
-                    if iq>0 or oq>0 or _ts_run<0: dtl.append({"日付":format_date_jp(d2),"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":_ts_run})
+                    ts += (iq-oq)
+                    if iq>0 or oq>0 or ts<0: dtl.append({"日付":format_date_jp(d2),"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
                 if dtl:
                     dfd = pd.DataFrame(dtl)
                     fig = go.Figure()
@@ -1484,7 +1482,7 @@ elif pg == "📊 在庫・スケジュール":
                     fig_dtf.add_trace(go.Bar(x=dfd["日付"],y=[r["製造(入)"] if r["製造(入)"]!="" else 0 for _,r in dfd.iterrows()],name="製造",marker_color="#10B981"))
                     fig_dtf.add_trace(go.Bar(x=dfd["日付"],y=[-(r["出荷(出)"] if r["出荷(出)"]!="" else 0) for _,r in dfd.iterrows()],name="出荷",marker_color="#F43F5E"))
                     fig_dtf.add_trace(go.Scatter(x=dfd["日付"],y=dfd["予定在庫"],name="予定在庫",mode="lines+markers",line=dict(color="#2563EB",width=2.5)))
-                    fig_dtf.add_hline(y=0,line_dash="dot",line_color="#DC2626")
+                    fig_dtf.add_hline(y=0,line_dash="dot",line_color="#DC2626",annotation_text="在庫ゼロ")
                     fig_dtf.update_layout(barmode="relative",hovermode="x unified",margin=dict(l=10,r=10,t=30,b=10),height=320,plot_bgcolor="white")
                     st.plotly_chart(fig_dtf, use_container_width=True)
                     st.dataframe(dfd.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予定在庫"]), hide_index=True, use_container_width=True)
@@ -1515,7 +1513,7 @@ elif pg == "📊 在庫・スケジュール":
                     for ym, g in fmm.groupby("年月"): gr.append({"年月": ym, "種別": "製造(予定)", "ケース数": g["ケース数"].apply(to_int).sum()})
                 if gr:
                     dg = pd.DataFrame(gr).sort_values("年月")
-                    fig = px.bar(dg, x="年月", y="ケース数", color="種別", barmode="group", color_discrete_map={"出荷(実績)":"#F43F5E","出荷(予定)":"#FCA5A5","製造(実績)":"#10B981","製造(予定)":"#6EE7B7"}, title=f"【{sp}】 製造・出荷推移")
+                    fig = px.bar(dg, x="年月", y="ケース数", color="種別", barmode="group", color_discrete_map={"出荷(実績)":"#F43F5E","出荷(予定)":"#FCA5A5","製造(実績)":"#10B981","製造(予定)":"#6EE7B7"}, title=f"【{sp}】 月次 製造・出荷量 / 今月: {today.strftime('%Y-%m')}")
                     st.plotly_chart(fig, use_container_width=True)
 
     with t4:
@@ -1532,6 +1530,7 @@ elif pg == "📊 在庫・スケジュール":
 
     with t5:
         st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
+        st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その瞬間の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。</div>""", unsafe_allow_html=True)
         inv_d = st.date_input("📅 棚卸日", value=date.today(), key="inv_date")
         inv_cat_full = st.pills("カテゴリ", CATS, default=CATS[0], label_visibility="collapsed", key="inv_cat")
         inv_cat = inv_cat_full.split(" ",1)[1] if inv_cat_full else CATS[0].split(" ",1)[1]
@@ -1547,7 +1546,7 @@ elif pg == "📊 在庫・スケジュール":
             if actual_q is not None:
                 _diff = to_int(actual_q) - _cur_cs
                 if _diff == 0:
-                    st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています（登録するとこの日を新しい基準点として確定します）</div>', unsafe_allow_html=True)
                 else:
                     _dcolor = "#059669" if _diff > 0 else "#DC2626"
                     st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_cur_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
@@ -1576,7 +1575,7 @@ elif pg == "📊 在庫・スケジュール":
                             "不良廃棄フラグ": False, "日付未定フラグ": False,
                             "登録日時": datetime.now(JST).replace(tzinfo=None),
                         }]))
-                    flash("success", f"✅ 在庫を確定しました。")
+                    flash("success", f"✅【{sel_p}】{format_date_jp(pd.Timestamp(inv_d))} 時点の在庫を {to_int(actual_q):,} cs で確定しました（{_cur_cs:,} → {to_int(actual_q):,}）。これより前の履歴は以後の計算に使われません。")
                     st.rerun()
             show_flash_inline(_inv_msg)
 
@@ -1675,6 +1674,7 @@ elif pg == "⚙️ マスタ・分析":
     page_header("⚙️ マスタ")
     tm1,tm2,tm3,tm4,tm5 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社",f"⚠️ マスタ未登録品 ({len(_orphan_names)})" if _orphan_names else "⚠️ マスタ未登録品"])
     with tm1:
+        st.markdown('<div class="info-tip">💡 <b>製造登録区分</b>：製造・受注の登録単位とダンボール消費の計算をシンプルに設定できます。<br>・<b>ケース</b>：1登録で1枚消費<br>・<b>袋</b>：登録数 ÷ 入数 ＝ 消費枚数（例: 10袋登録 ÷ 入数10 = 1枚消費）<br>・<b>甲</b>：登録数 × 甲消費数 ＝ 消費枚数（例: 1甲登録 × 甲消費数4 = 4枚消費）</div>', unsafe_allow_html=True)
         em_base = mst.copy()
         
         if "製造登録区分" not in em_base.columns: em_base["製造登録区分"] = em_base.get("資材消費単位", "ケース")
@@ -1691,8 +1691,8 @@ elif pg == "⚙️ マスタ・分析":
                 "大カテゴリ": st.column_config.SelectboxColumn(options=[c.split(" ",1)[1] for c in CATS]),
                 "使用資材名": st.column_config.SelectboxColumn(options=pk_m["資材名"].tolist() if not pk_m.empty else []),
                 "製造登録区分": st.column_config.SelectboxColumn("製造登録区分", options=["ケース","袋","甲"]),
-                "入数": st.column_config.NumberColumn("入数(袋)", min_value=1, step=1, format="%d"),
-                "甲消費数": st.column_config.NumberColumn("甲消費数(枚/甲)", min_value=1, step=1, format="%d"),
+                "入数": st.column_config.NumberColumn("入数(袋)", min_value=1, step=1, format="%d", help="区分が「袋」の場合：何袋でダンボール1箱になるか"),
+                "甲消費数": st.column_config.NumberColumn("甲消費数(枚/甲)", min_value=1, step=1, format="%d", help="区分が「甲」の場合：1甲でダンボールを何箱消費するか"),
                 "初期在庫数": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
                 "時間あたり生産量": st.column_config.NumberColumn("生産量(cs/h)", min_value=1, step=1, format="%d"),
                 "歩留まり率": st.column_config.NumberColumn("歩留まり(%)", min_value=1, max_value=100, step=1, format="%d"),
@@ -1754,6 +1754,7 @@ elif pg == "⚙️ マスタ・分析":
         if st.button("💾 運送会社保存", type="primary", key="btn_save_ship_mst"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
         show_flash_inline(_m4_msg)
     with tm5:
+        st.markdown('<div class="info-tip">💡 受注・製造データに存在するが、製品マスタに未登録の製品名の一覧です（特注・チャーター品の反映漏れの原因になります）。<br>①<b>既存製品に統合</b>：この製品名の受注・製造履歴を、選んだ既存マスタ製品名へ一括で付け替えます。件数や数量は一切減りません、名前が揃うだけです。<br>②<b>新規にマスタ登録</b>：この製品名のまま、新しい製品としてマスタに追加します。</div>', unsafe_allow_html=True)
         _m5_msg = st.empty(); show_flash_inline(_m5_msg)
         if not _orphan_names:
             st.success("✅ マスタ未登録の製品名はありません。")
@@ -1762,12 +1763,12 @@ elif pg == "⚙️ マスタ・分析":
                 _o_ord = odf[odf["製品名"]==_oname] if not odf.empty and "製品名" in odf.columns else pd.DataFrame()
                 _o_man = mdf[mdf["製品名"]==_oname] if not mdf.empty and "製品名" in mdf.columns else pd.DataFrame()
                 _o_cs = (_o_ord["ケース数"].apply(to_int).sum() if not _o_ord.empty else 0)
-                with st.expander(f"⚠️ {_oname} 　（受注{len(_o_ord)}件）", expanded=False):
+                with st.expander(f"⚠️ {_oname} 　（受注{len(_o_ord)}件 / {_o_cs:,}cs）", expanded=False):
                     if not _o_ord.empty:
                         st.dataframe(_o_ord.sort_values("納品予定日",ascending=False).assign(日付=lambda d: d["納品予定日"].apply(format_date_jp))[["日付"] + [c for c in ["顧客名","ケース数","備考"] if c in _o_ord.columns]].head(15), hide_index=True, use_container_width=True)
                     else:
-                        st.caption("受注データはありません。")
-                    _act = st.radio("対応方法", ["① 既存製品に統合する", "② 新規にマスタ登録する", "③ 何もしない" if "③ 何もしない" in ["① 既存製品に統合する", "② 新規にマスタ登録する"] else "② 新規にマスタ登録する"], key=f"orphan_act_{_oname}", index=0 if "③ 何もしない" in ["① 既存製品に統合する", "② 新規にマスタ登録する"] else 0)
+                        st.caption("受注データはありません（製造登録のみに存在）。")
+                    _act = st.radio("対応方法", ["① 既存製品に統合する", "② 新規にマスタ登録する"], key=f"orphan_act_{_oname}", horizontal=True)
                     if _act == "① 既存製品に統合する":
                         _target = st.selectbox("統合先の既存製品", options=sorted(mst_u["製品名"].tolist()) if not mst_u.empty else [], index=None, placeholder="選択…", key=f"orphan_target_{_oname}", format_func=fn)
                         if st.button(f"🔗「{_oname}」を統合する", key=f"orphan_merge_{_oname}", type="primary"):
@@ -1785,14 +1786,14 @@ elif pg == "⚙️ マスタ・分析":
                                     _ns = sp_s.copy(); _ns.loc[_ns["製品名"]==_oname, "製品名"] = _target
                                     save_sync("special_schedule", _ns); _did = True
                                 if _did:
-                                    flash("success", f"統合しました。")
+                                    flash("success", f"✅「{_oname}」の受注・製造履歴を「{_target}」に統合しました。")
                                     st.rerun()
                                 else:
                                     st.warning("統合対象のデータが見つかりませんでした。")
                     else:
                         _cat_new = st.selectbox("大カテゴリ", options=[c.split(" ",1)[1] for c in CATS], key=f"orphan_cat_{_oname}")
                         _init_new = st.number_input("初期在庫数", min_value=0, step=1, value=0, key=f"orphan_init_{_oname}")
-                        _mat_new = st.selectbox("使用資材名", options=pk_m["資材名"].tolist() if not pk_m.empty else [], index=None, key=f"orphan_mat_{_oname}")
+                        _mat_new = st.selectbox("使用資材名", options=pk_m["資材名"].tolist() if not pk_m.empty else [], index=None, placeholder="（任意・後で製品マスタから編集も可）", key=f"orphan_mat_{_oname}")
                         if st.button(f"➕「{_oname}」を新規マスタ登録する", key=f"orphan_add_{_oname}", type="primary"):
                             _new_row = {c: "" for c in mst.columns} if not mst.empty else {}
                             _new_row.update({"製品名": _oname, "大カテゴリ": _cat_new, "初期在庫数": to_int(_init_new), "使用資材名": _mat_new or ""})
@@ -1800,12 +1801,12 @@ elif pg == "⚙️ マスタ・分析":
                                 _new_row.setdefault(_dc, _dv)
                             _nmst = pd.concat([mst, pd.DataFrame([_new_row])], ignore_index=True) if not mst.empty else pd.DataFrame([_new_row])
                             save_sync("master", _nmst)
-                            flash("success", f"登録しました。")
+                            flash("success", f"✅「{_oname}」を新規製品としてマスタに登録しました。")
                             st.rerun()
 
-# ─────────────────────────────────────────────
-# 🏗️ 製造スケジューラー
-# ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 🏗️ 製造スケジューラー v4 ― ASPROVA級 こんにゃく工場特化エンジン
+# ══════════════════════════════════════════════════════════════════════════════
 elif pg == "🏗️ 製造スケジューラー":
     page_header("🏗️ 製造スケジューラー")
 
@@ -1862,7 +1863,7 @@ elif pg == "🏗️ 製造スケジューラー":
         ["KAM_01","1号釜（レトルト）","レトルト","0","TRUE","全製品","90","4"],
     ]
     _CO_INIT = [
-        ["黒","白","90","TRUE","全ライン","分解・徹底洗浄必須"],
+        ["黒","白","90","TRUE","全ライン","分解・徹底洗浄必須（コンタミ対策）"],
         ["黒","糸","90","TRUE","全ライン","分解・徹底洗浄必須"],
         ["黒","板","90","TRUE","全ライン","分解・徹底洗浄必須"],
         ["黒","玉","60","TRUE","全ライン","洗浄必須"],
@@ -1871,8 +1872,8 @@ elif pg == "🏗️ 製造スケジューラー":
         ["白","黒","30","FALSE","全ライン","通常洗浄"],
         ["白","糸","20","FALSE","全ライン","形状変更"],
         ["白","板","20","FALSE","全ライン","形状変更"],
-        ["糸","板","30","FALSE","全ライン","成形機パーツ交換"],
-        ["板","糸","30","FALSE","全ライン","成形機パーツ交換"],
+        ["糸","板","30","FALSE","全ライン","成形機パーツ交換（30分）"],
+        ["板","糸","30","FALSE","全ライン","成形機パーツ交換（30分）"],
         ["糸","白","30","FALSE","全ライン","通常洗浄"],
         ["板","白","30","FALSE","全ライン","通常洗浄"],
         ["冷凍","黒","45","TRUE","全ライン","温度対応+洗浄"],
@@ -1902,7 +1903,7 @@ elif pg == "🏗️ 製造スケジューラー":
             ws.update(values=[ds.columns.tolist()] + ds.values.tolist(), range_name="A1")
             st.cache_data.clear()
         except Exception as e:
-            st.error(f"保存エラー: {e}")
+            st.error(f"保存エラー ({name}): {e}")
 
     if "v3_initialized" not in st.session_state:
         st.session_state.v3_shift  = _load_sched_master("shift_master",    _SHIFT_COLS, _SHIFT_INIT)
@@ -2190,11 +2191,13 @@ elif pg == "🏗️ 製造スケジューラー":
         needed.sort(key=lambda t:(t["段取りG"] or "ZZZ",t["優先度"],t["出荷日"]))
         return needed+[t for t in tasks if t["製造必要量(cs)"]==0]
 
+    # --- ASPROVA型：ライン別の並行稼働エンジン ---
     def _engine_fcs(tasks_in, mode, start_dt, ws_h, we_h, co_matrix, shift_slots, break_slots, co_df, do_2opt=True):
         res = []
         if not tasks_in: return res
         pa_cache = {t["製品名"]: _gpp(t["製品名"]) for t in tasks_in}
         
+        # ラインごとにタスクを分割
         line_tasks = {}
         for t in tasks_in:
             line_id = pa_cache[t["製品名"]]["ラインID"]
@@ -2204,6 +2207,7 @@ elif pg == "🏗️ 製造スケジューラー":
         PROC_MIN = {"調合・練り":"最少人員_調合","成形・糊付け":"最少人員_成形","包装・充填":"最少人員_包装","レトルト・冷却":"最少人員_レトルト"}
         PROC_RATIO = {"調合・練り":"調合比率","成形・糊付け":"成形比率","包装・充填":"包装比率","レトルト・冷却":"レトルト比率"}
         
+        # ライン別に独立してスケジュール（FCS）
         for line, l_tasks in line_tasks.items():
             ordered = _tsp_2opt(l_tasks, co_matrix) if do_2opt else sorted(l_tasks, key=lambda t:(t.get("優先度",5), t["出荷日"] if isinstance(t["出荷日"],pd.Timestamp) else pd.Timestamp.today()))
             
@@ -2227,22 +2231,25 @@ elif pg == "🏗️ 製造スケジューラー":
                 lt = float(pa["リードタイム時間"])
                 ship = task.get("出荷日", pd.NaT)
 
+                # 段取り
                 com = _co_time(prev_pn, pn, co_matrix) if prev_pn else 0
                 coh = com / 60.
                 con = _is_contam(prev_pn, pn, co_df)
                 if coh > 0:
                     ce_, _segs_co = _advance(cursor, coh, ws_h, we_h, shift_slots, break_slots, 1)
                     res.append({"区分":"🔴 段取り・洗浄" if con else "🟠 段取り",
-                        "製品名":f"【洗浄】→{pn}" if con else f"【段取り】→{pn}",
+                        "製品名":f"【{com}分洗浄】{_ktype(prev_pn)}→{_ktype(pn)}" if con else f"【段取り{com}分】→{pn}",
                         "工程":"段取り・洗浄" if con else "段取り","ライン":line, "開始":cursor,"終了":ce_,"所要時間(h)":round(coh,2),"製造量(cs)":0,
-                        "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":com,"コンタミリスク":con, "優先度":task.get("優先度",5), "ステータス":"段取り", "最少人数":1,"キーマン必要":con,"_segs":[]})
+                        "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":com,"コンタミリスク":con, "優先度":task.get("優先度",5), "ステータス":"⚠️ 黒→白 要徹底洗浄" if con else "段取り", "最少人数":1,"キーマン必要":con,"_segs":[]})
                     cursor = ce_
 
+                # 準備
                 if lt > 0:
                     lt_e, lt_segs = _advance(cursor, lt, ws_h, we_h, shift_slots, break_slots, pa["最少人員_調合"])
                     res.append({"区分":"🟡 準備","製品名":pn,"工程":"準備","ライン":line, "開始":cursor,"終了":lt_e,"所要時間(h)":round(lt,2),"製造量(cs)":0, "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":0,"コンタミリスク":False, "優先度":task.get("優先度",5),"ステータス":task.get("ステータス",""), "最少人数":pa["最少人員_調合"],"キーマン必要":pa["キーマン必要"],"_segs":lt_segs})
                     cursor = lt_e
 
+                # 4工程展開
                 for proc in _PROCESSES:
                     ph = round(mh * pa[PROC_RATIO[proc]], 2)
                     ms = pa[PROC_MIN[proc]]
@@ -2255,6 +2262,7 @@ elif pg == "🏗️ 製造スケジューラー":
 
                 prev_pn = pn
         
+        # 全ライン分をマージして時間順ソート
         res.sort(key=lambda x: (x["開始"] if isinstance(x["開始"], pd.Timestamp) else pd.Timestamp.min))
         return res
 
@@ -2263,32 +2271,34 @@ elif pg == "🏗️ 製造スケジューラー":
         hd         = r1c1.slider("📅 対象期間（日）",7,60,30,7)
         sched_mode = r1c2.radio("🔄 モード",["フォワード（前詰め）","バックワード（後詰め）"])
         show_ok    = r1c3.checkbox("✅ 充足品も表示",False)
-        do_2opt    = r1c4.checkbox("🔧 2-opt最適化",True)
+        do_2opt    = r1c4.checkbox("🔧 2-opt最適化",True,help="段取り順序をさらに2-opt法で改善（少し重くなります）")
         r2c1,r2c2,r2c3,r2c4 = st.columns(4)
         start_date  = r2c1.date_input("📅 製造開始日",value=date.today(),key="v3_start")
-        ws_h        = r2c2.number_input("🌅 稼働開始",4,12,8,1,key="v3_ws")
-        we_h        = r2c3.number_input("🌆 稼働終了",12,24,17,1,key="v3_we")
+        ws_h        = r2c2.number_input("🌅 稼働開始(時)",4,12,8,1,key="v3_ws")
+        we_h        = r2c3.number_input("🌆 稼働終了(時)",12,24,17,1,key="v3_we")
         if we_h<=ws_h: we_h=ws_h+1
         conf_user   = r2c4.text_input("👤 確定者名",value="",placeholder="確定時に記録",key="v3_user")
 
     with st.expander("👷 シフト・人員マスタ"):
+        st.markdown('<div class="info-tip">💡 時間帯ごとに行を分けて登録可能（例: 早番8〜12は5人、13〜17は8人）。スプレッドシートへ保存されます。</div>',unsafe_allow_html=True)
         _sh_ed = st.data_editor(_sdf.copy(),num_rows="dynamic",hide_index=True, use_container_width=True,height=min(280,len(_sdf)*38+60),
             column_config={"曜日区分":st.column_config.SelectboxColumn(options=["平日","土曜","日曜","全日"]),"出勤人数":st.column_config.NumberColumn(min_value=0,max_value=50,step=1),"うちキーマン数":st.column_config.NumberColumn(min_value=0,step=1)},key="v3_sh_ed")
         _sh_msg=st.empty()
         if st.button("💾 シフトマスタ保存",key="v3_save_sh"):
             _save_sched_master("shift_master",_sh_ed)
             st.session_state.v3_shift=_sh_ed.copy(); _sdf=_sh_ed.copy()
-            flash("success","保存しました。"); st.rerun()
+            flash("success","✅ シフトマスタを保存しました。"); st.rerun()
         show_flash_inline(_sh_msg)
 
     with st.expander("☕ 休憩・停止ルール"):
+        st.markdown('<div class="info-tip">💡 登録した時間帯はスケジューラーが自動スキップします（昼休憩・清掃・メンテ）。</div>',unsafe_allow_html=True)
         _br_ed = st.data_editor(_bdf.copy(),num_rows="dynamic",hide_index=True, use_container_width=True,height=min(240,len(_bdf)*38+60),
             column_config={"種別":st.column_config.SelectboxColumn(options=["昼休憩","清掃","メンテ","朝礼","その他"]),"適用曜日":st.column_config.SelectboxColumn(options=["平日","土曜","日曜","全日"])},key="v3_br_ed")
         _br_msg=st.empty()
         if st.button("💾 休憩ルール保存",key="v3_save_br"):
             _save_sched_master("break_master",_br_ed)
             st.session_state.v3_break=_br_ed.copy(); _bdf=_br_ed.copy()
-            flash("success","保存しました。"); st.rerun()
+            flash("success","✅ 休憩ルールを保存しました。"); st.rerun()
         show_flash_inline(_br_msg)
 
     with st.expander("🏭 製造ラインマスタ"):
@@ -2298,17 +2308,18 @@ elif pg == "🏗️ 製造スケジューラー":
         if st.button("💾 ラインマスタ保存",key="v3_save_fa"):
             _save_sched_master("facility_master",_fa_ed)
             st.session_state.v3_facil=_fa_ed.copy()
-            flash("success","保存しました。"); st.rerun()
+            flash("success","✅ 製造ラインマスタを保存しました。"); st.rerun()
         show_flash_inline(_fa_msg)
 
-    with st.expander("🧩 段取りマトリクス"):
+    with st.expander("🧩 段取りマトリクス（分）"):
+        st.markdown('<div class="info-tip">🚨 <b>黒→白切り替えは90分の徹底洗浄が必要です（コンタミ対策）。</b>変更はスプレッドシートへ保存されます。</div>',unsafe_allow_html=True)
         _co_ed = st.data_editor(_cdf.copy(),num_rows="dynamic",hide_index=True, use_container_width=True,height=min(420,len(_cdf)*38+60),
             column_config={"前工程タイプ":st.column_config.SelectboxColumn(options=_KONJAC_TYPES),"後工程タイプ":st.column_config.SelectboxColumn(options=_KONJAC_TYPES),"段取り時間(分)":st.column_config.NumberColumn(min_value=0,max_value=300,step=5),"コンタミリスク":st.column_config.SelectboxColumn(options=["TRUE","FALSE"])},key="v3_co_ed")
         _co_msg=st.empty()
         if st.button("💾 段取りマトリクス保存",key="v3_save_co"):
             _save_sched_master("changeover_matrix",_co_ed)
             st.session_state.v3_co=_co_ed.copy(); _cdf=_co_ed.copy()
-            flash("success","保存しました。"); st.rerun()
+            flash("success","✅ 段取りマトリクスを保存しました。"); st.rerun()
         show_flash_inline(_co_msg)
 
     _co_matrix   = _build_co(st.session_state.v3_co)
@@ -2347,7 +2358,7 @@ elif pg == "🏗️ 製造スケジューラー":
         _needs_recalc = True
 
     if _needs_recalc and _tasks_for_engine:
-        with st.spinner("⚙️ 計算中…"):
+        with st.spinner(f"⚙️ 計算中… {len(_tasks_for_engine)}品目{'・2-opt最適化' if do_2opt else '（高速モード）'}"):
             _sched = _engine_fcs(
                 _tasks_for_engine, mode="forward" if "フォワード" in sched_mode else "backward",
                 start_dt=datetime.combine(start_date, datetime.min.time()),
@@ -2355,14 +2366,14 @@ elif pg == "🏗️ 製造スケジューラー":
             )
         st.session_state.v3_sched_result = _sched
         st.session_state.v3_sched_key    = _cache_key
-        _info_col.success("✅ 計算完了")
+        _info_col.success(f"✅ 計算完了（{len(_sched)}工程）")
     elif not _tasks_for_engine:
         _sched = []
         st.session_state.v3_sched_result = []
         st.session_state.v3_sched_key    = _cache_key
     else:
         _sched = _cached_sched
-        _info_col.caption("計画を更新する場合は「計算・更新」を押してください")
+        _info_col.caption(f"📋 前回計算済みの結果を表示中（{len(_sched)}工程）  設定を変更したら「🔄 計算・更新」を押してください")
 
     cnt_urg = sum(1 for t in needed_tasks if t["優先度"]<=2)
     cnt_cau = sum(1 for t in needed_tasks if t["優先度"]==3)
@@ -2386,18 +2397,18 @@ elif pg == "🏗️ 製造スケジューラー":
 
     k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
     k1.markdown(f'<div class="sched-kpi"><div class="val" style="color:#DC2626;">{cnt_urg}</div><div class="lbl">🔴 緊急・要注意</div></div>',unsafe_allow_html=True)
-    k2.markdown(f'<div class="sched-kpi"><div class="val" style="color:#D97706;">{cnt_cau}</div><div class="lbl">🟡 注意</div></div>',unsafe_allow_html=True)
+    k2.markdown(f'<div class="sched-kpi"><div class="val" style="color:#D97706;">{cnt_cau}</div><div class="lbl">🟡 注意（7日以内）</div></div>',unsafe_allow_html=True)
     k3.markdown(f'<div class="sched-kpi"><div class="val" style="color:#2563EB;">{cnt_pln}</div><div class="lbl">🟢 計画内</div></div>',unsafe_allow_html=True)
-    k4.markdown(f'<div class="sched-kpi"><div class="val" style="color:#7C3AED;">{tot_cs:,}</div><div class="lbl">📦 製造必要量</div></div>',unsafe_allow_html=True)
-    k5.markdown(f'<div class="sched-kpi"><div class="val" style="color:#0891B2;">{util_rate}%</div><div class="lbl">⚙️ 稼働率</div></div>',unsafe_allow_html=True)
-    k6.markdown(f'<div class="sched-kpi"><div class="val" style="color:#EA580C;">{co_loss_rate}%</div><div class="lbl">🔄 ロス率</div></div>',unsafe_allow_html=True)
-    k7.markdown(f'<div class="sched-kpi"><div class="val" style="color:{"#059669" if ddr>=95 else "#DC2626"}">{ddr}%</div><div class="lbl">📅 遵守率</div></div>',unsafe_allow_html=True)
+    k4.markdown(f'<div class="sched-kpi"><div class="val" style="color:#7C3AED;">{tot_cs:,}</div><div class="lbl">📦 製造必要量(cs)</div></div>',unsafe_allow_html=True)
+    k5.markdown(f'<div class="sched-kpi"><div class="val" style="color:#0891B2;">{util_rate}%</div><div class="lbl">⚙️ 製造稼働率</div></div>',unsafe_allow_html=True)
+    k6.markdown(f'<div class="sched-kpi"><div class="val" style="color:#EA580C;">{co_loss_rate}%</div><div class="lbl">🔄 段取りロス率</div></div>',unsafe_allow_html=True)
+    k7.markdown(f'<div class="sched-kpi"><div class="val" style="color:{"#059669" if ddr>=95 else "#DC2626"}">{ddr}%</div><div class="lbl">📅 納期遵守率</div></div>',unsafe_allow_html=True)
     st.markdown("<div style='margin-top:6px;'></div>",unsafe_allow_html=True)
 
-    if cnt_urg>0: st.markdown(f'<div class="danger-banner">🚨 要注意案件があります。</div>',unsafe_allow_html=True)
-    if _late_items: st.markdown(f'<div class="warn-banner">⚠️ 納期遅れリスクを検出しました。</div>',unsafe_allow_html=True)
-    if _conts: st.markdown(f'<div class="danger-banner">🦠 コンタミリスクを検出しました。</div>',unsafe_allow_html=True)
-    if not needed_tasks: st.markdown('<div class="ok-banner">✅ 製造が必要な品目はありません。</div>',unsafe_allow_html=True)
+    if cnt_urg>0: st.markdown(f'<div class="danger-banner">🚨 緊急・要注意 <b>{cnt_urg}件</b> あります。今すぐ製造計画を確認してください。</div>',unsafe_allow_html=True)
+    if _late_items: st.markdown(f'<div class="warn-banner">⚠️ 納期遅れリスク：{"、".join(_late_items[:5])}{"…" if len(_late_items)>5 else ""} — 人員増強または順序見直しを検討してください。</div>',unsafe_allow_html=True)
+    if _conts: st.markdown(f'<div class="danger-banner">🦠 黒→白 コンタミリスク：{len(_conts)}件の徹底洗浄工程が自動挿入されています。必ず実施してください。</div>',unsafe_allow_html=True)
+    if not needed_tasks: st.markdown('<div class="ok-banner">✅ 直近の製造必要品目はありません。全品目在庫充足です。</div>',unsafe_allow_html=True)
 
     T1,T2,T3,T4,T5,T6,T7,T8,T9,T10 = st.tabs(["📋 製造指示一覧", "📅 日別タイムライン", "📊 ガントチャート", "🔧 段取り最適化", "👷 人員配置", "📈 負荷グラフ", "📦 在庫推移", "🔍 ドリルダウン", "💾 スケジュール確定・比較", "⚙️ パラメータ設定"])
 
@@ -2420,6 +2431,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 column_config={"優先度":st.column_config.NumberColumn(width="small"), "製造時間(h)":st.column_config.NumberColumn(format="%.1f"), "歩留まり率":st.column_config.NumberColumn("歩留まり(%)",format="%d")}, height=min(700,max(280,len(dft)*38+60)))
 
             with st.expander("🔀 製造順序を手動で変更"):
+                st.markdown('<div class="info-tip">💡 製品を並び替えると、段取りマトリクスを考慮した上でその順序でスケジュールを再計算します。</div>',unsafe_allow_html=True)
                 _pns=[t["製品名"] for t in needed_tasks]
                 if _pns:
                     _ord_df=pd.DataFrame({"順序":list(range(1,len(_pns)+1)),"製品名":_pns})
@@ -2431,11 +2443,11 @@ elif pg == "🏗️ 製造スケジューラー":
                     if st.session_state.v3_manual_order:
                         if st.button("↩️ 自動最適化に戻す",key="v3_reset_order"):
                             st.session_state.v3_manual_order=[]; st.rerun()
-            st.download_button("📥 製造指示CSVダウンロード", data=make_csv_bytes(dft[sc]), file_name=f"製造指示.csv",mime="text/csv",use_container_width=True)
+            st.download_button("📥 製造指示CSVダウンロード", data=make_csv_bytes(dft[sc]), file_name=f"製造指示_{date.today()}.csv",mime="text/csv",use_container_width=True)
 
     with T2:
-        st.markdown('<div class="section-title">📅 日別タイムライン</div>',unsafe_allow_html=True)
-        if not _sched: st.info("スケジュールがありません。")
+        st.markdown('<div class="section-title">📅 日別タイムライン（1日ビュー）</div>',unsafe_allow_html=True)
+        if not _sched: st.info("スケジュールがありません。受注データを登録してください。")
         else:
             _dates=sorted(set(r["開始"].normalize().date() for r in _sched if isinstance(r["開始"],pd.Timestamp) and pd.notnull(r["開始"])))
             if not _dates: st.warning("スケジュール日付が生成できませんでした。")
@@ -2446,7 +2458,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 sel_ts=pd.Timestamp(sel_day)
                 day_tasks=[r for r in _sched if isinstance(r["開始"],pd.Timestamp) and r["開始"].normalize().date()==sel_day]
 
-                if not day_tasks: st.info(f"📅 予定なし。")
+                if not day_tasks: st.info(f"📅 {sel_day.strftime('%Y/%m/%d')} は製造タスクなし（休日・休憩のみ）。")
                 else:
                     sh_summ=[]
                     for h_slot in range(int(ws_h),int(we_h)):
@@ -2454,7 +2466,7 @@ elif pg == "🏗️ 製造スケジューラー":
                         sv,km=_staff_at(dt_check,st.session_state.v3_shift)
                         sh_summ.append({"時間帯":f"{h_slot:02d}:00〜{h_slot+1:02d}:00","出勤人数":sv,"うちキーマン":km})
                     if sh_summ:
-                        with st.expander(f"👷 シフト人員"):
+                        with st.expander(f"👷 {sel_day.strftime('%m/%d')} のシフト人員"):
                             st.dataframe(pd.DataFrame(sh_summ),hide_index=True,use_container_width=True)
 
                     if view_mode=="タイムライン":
@@ -2465,7 +2477,7 @@ elif pg == "🏗️ 製造スケジューラー":
                             if e<=s: e=s+timedelta(minutes=15)
                             ship_s=(r["出荷日"].strftime("%m/%d") if isinstance(r["出荷日"],pd.Timestamp) and pd.notnull(r["出荷日"]) else "―")
                             tl.append({"タスク":r["製品名"][:16],"工程":r["工程"], "ライン":r.get("ライン",""), "Start":s,"Finish":e,"出荷日":ship_s, "製造量":r.get("製造量(cs)",0), "コンタミ":"🚨" if r.get("コンタミリスク") else ""})
-                        fig_tl=px.timeline(pd.DataFrame(tl),x_start="Start",x_end="Finish", y="ライン",color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","出荷日","製造量","コンタミ"])
+                        fig_tl=px.timeline(pd.DataFrame(tl),x_start="Start",x_end="Finish", y="ライン",color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","出荷日","製造量","コンタミ"], title=f"{sel_day.strftime('%Y/%m/%d(%a)')} 資源ガントチャート  稼働:{int(ws_h):02d}:00〜{int(we_h):02d}:00")
                         fig_tl.update_yaxes(autorange="reversed",title="")
                         fig_tl.update_xaxes(tickformat="%H:%M", range=[sel_ts+timedelta(hours=ws_h-0.3), sel_ts+timedelta(hours=we_h+0.3)])
                         wd=sel_day.weekday()
@@ -2477,26 +2489,27 @@ elif pg == "🏗️ 製造スケジューラー":
                                 bs2=str(br["開始時刻"]); be2=str(br["終了時刻"])
                                 bs_dt=sel_ts+timedelta(hours=int(bs2[:2]),minutes=int(bs2[3:5]))
                                 be_dt=sel_ts+timedelta(hours=int(be2[:2]),minutes=int(be2[3:5]))
-                                fig_tl.add_vrect(x0=bs_dt,x1=be_dt,fillcolor="#CBD5E1", opacity=0.35,line_width=0)
+                                fig_tl.add_vrect(x0=bs_dt,x1=be_dt,fillcolor="#CBD5E1", opacity=0.35,line_width=0, annotation_text=str(br.get("種別","休憩")), annotation_position="top left")
                             except: pass
                         if pd.Timestamp.today().date()==sel_day:
-                            fig_tl.add_vline(x=datetime.now(),line_dash="dash", line_color="#DC2626")
+                            fig_tl.add_vline(x=datetime.now(),line_dash="dash", line_color="#DC2626",annotation_text="現在")
                         fig_tl.update_layout(margin=dict(l=10,r=10,t=50,b=10), height=max(320,len(set(r["ライン"] for r in tl))*46+80), legend=dict(orientation="h",yanchor="bottom",y=1.02,x=0), plot_bgcolor="white")
                         st.plotly_chart(fig_tl,use_container_width=True)
 
-                    st.markdown('<div class="section-title">✏️ 手動調整</div>',unsafe_allow_html=True)
+                    st.markdown('<div class="section-title">✏️ 手動調整（配置人数・工程）</div>',unsafe_allow_html=True)
                     adj=[]
                     for r in day_tasks:
                         s=r["開始"]; e=r["終了"]
                         adj.append({"工程区分":r["区分"],"製品名":r["製品名"][:20], "ライン":r.get("ライン",""), "工程":r["工程"], "開始":s.strftime("%H:%M") if isinstance(s,pd.Timestamp) else "", "終了":e.strftime("%H:%M") if isinstance(e,pd.Timestamp) else "", "時間(h)":r.get("所要時間(h)",0),"製造量(cs)":r.get("製造量(cs)",0), "配置人数":r.get("最少人数",1), "🚨":r.get("ステータス","")})
                     adj_df=pd.DataFrame(adj)
                     ea=st.data_editor(adj_df,hide_index=True,use_container_width=True, height=min(500,len(adj_df)*38+60),
-                        column_config={"工程区分":st.column_config.TextColumn(disabled=True,width="small"), "製品名":st.column_config.TextColumn(disabled=True), "ライン":st.column_config.TextColumn(disabled=True), "工程":st.column_config.SelectboxColumn(options=list(_PCOLOR.keys())), "開始":st.column_config.TextColumn("開始"), "終了":st.column_config.TextColumn(disabled=True), "時間(h)":st.column_config.NumberColumn(format="%.2f",disabled=True), "製造量(cs)":st.column_config.NumberColumn(disabled=True), "配置人数":st.column_config.NumberColumn(min_value=0,max_value=20,step=1), },key=f"v3_adj_{sel_day}")
+                        column_config={"工程区分":st.column_config.TextColumn(disabled=True,width="small"), "製品名":st.column_config.TextColumn(disabled=True), "ライン":st.column_config.TextColumn(disabled=True), "工程":st.column_config.SelectboxColumn(options=list(_PCOLOR.keys())), "開始":st.column_config.TextColumn("開始(HH:MM)"), "終了":st.column_config.TextColumn(disabled=True), "時間(h)":st.column_config.NumberColumn(format="%.2f",disabled=True), "製造量(cs)":st.column_config.NumberColumn(disabled=True), "配置人数":st.column_config.NumberColumn(min_value=0,max_value=20,step=1), },key=f"v3_adj_{sel_day}")
                     ref_dt=sel_ts+timedelta(hours=ws_h)
                     sv0,_=_staff_at(ref_dt,st.session_state.v3_shift)
                     ov=ea[ea["配置人数"].apply(to_int)>sv0]
-                    if not ov.empty: st.markdown(f'<div class="danger-banner">🚨 人数超過があります。</div>',unsafe_allow_html=True)
-                    st.download_button(f"📥 計画CSV", data=make_csv_bytes(ea), file_name=f"計画_{sel_day}.csv",mime="text/csv")
+                    if not ov.empty: st.markdown(f'<div class="danger-banner">🚨 配置人数がシフト人数({sv0}人)を超える工程が{len(ov)}件あります。</div>',unsafe_allow_html=True)
+                    else: st.markdown(f'<div class="ok-banner">✅ 全工程でシフト人数({sv0}人)以内です。</div>',unsafe_allow_html=True)
+                    st.download_button(f"📥 {sel_day} 計画CSV", data=make_csv_bytes(ea), file_name=f"日別計画_{sel_day}.csv",mime="text/csv")
 
     with T3:
         if not _sched: st.info("スケジュールがありません。")
@@ -2513,14 +2526,16 @@ elif pg == "🏗️ 製造スケジューラー":
                 except: continue
             if gr:
                 gdf=pd.DataFrame(gr)
+                st.markdown('<div class="info-tip">💡 <b>資源ガント（ライン別）</b> と <b>オーダガント（製品別）</b> を切り替えて表示できます。</div>',unsafe_allow_html=True)
                 g_axis=st.radio("📊 表示形式",["資源ガント（ライン別）","オーダガント（製品別）"],horizontal=True,key="v3_gaxis")
                 y_col="ライン" if "資源" in g_axis else "タスク"
-                fig_g=px.timeline(gdf,x_start="Start",x_end="Finish",y=y_col, color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","ライン","製造量","出荷日","コンタミ","ステータス"])
+                fig_g=px.timeline(gdf,x_start="Start",x_end="Finish",y=y_col, color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","ライン","製造量","出荷日","コンタミ","ステータス"], title=f"全体スケジュール（{g_axis}）")
                 fig_g.update_yaxes(autorange="reversed",title="")
                 fig_g.update_xaxes(tickformat="%m/%d %H:%M")
-                fig_g.add_vline(x=datetime.now(),line_dash="dash", line_color="#94A3B8")
+                fig_g.add_vline(x=datetime.now(),line_dash="dash", line_color="#94A3B8",annotation_text="今日")
                 fig_g.update_layout(margin=dict(l=10,r=10,t=50,b=10), height=max(420,len(set(r[y_col] for r in gr))*46+100), legend=dict(orientation="h",yanchor="bottom",y=1.01,xanchor="right",x=1), plot_bgcolor="white")
                 st.plotly_chart(fig_g,use_container_width=True)
+                st.markdown("""<div style="display:flex;gap:8px;flex-wrap:wrap;"><span style="background:#7C3AED;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">調合・練り</span> <span style="background:#2563EB;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">成形・糊付け</span> <span style="background:#059669;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">包装・充填</span> <span style="background:#0891B2;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">レトルト・冷却</span> <span style="background:#DC2626;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">🚨 段取り・洗浄</span> <span style="background:#D97706;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">準備</span></div>""",unsafe_allow_html=True)
 
     with T4:
         if not needed_tasks: st.info("製造が必要な品目がありません。")
@@ -2533,14 +2548,15 @@ elif pg == "🏗️ 製造スケジューラー":
             c1,c2,c3,c4,c5=st.columns(5)
             c1.metric("製造時間 合計",f"{tot_mf2:.1f} h")
             c2.metric("段取り時間 合計",f"{tot_co2:.1f} h")
-            c3.metric("🚨 徹底洗浄",f"{c_cnt} 回")
+            c3.metric("🚨 コンタミ洗浄",f"{c_cnt} 回")
             c4.metric("実働時間 合計",f"{tot_mf2+tot_co2:.1f} h")
-            c5.metric("計画稼働率",f"{round(tot_mf2/max(tot_mf2+tot_co2,0.01)*100,1)}%")
+            c5.metric("稼働率",f"{round(tot_mf2/max(tot_mf2+tot_co2,0.01)*100,1)}%")
+            st.markdown('<div class="info-tip">🔧 TSP貪欲法+2-opt最適化により、ラインごとの段取り切り替え回数（特に黒→白のコンタミリスク回数）を最小化しています。</div>',unsafe_allow_html=True)
 
             seq=[]
             for r in _sched:
                 s=r["開始"]; e=r["終了"]
-                seq.append({"ライン":r.get("ライン",""), "工程区分":r["区分"],"品目":r["製品名"][:20],"工程":r["工程"], "開始":s.strftime("%m/%d %H:%M") if isinstance(s,pd.Timestamp) and pd.notnull(s) else "", "終了":e.strftime("%m/%d %H:%M") if isinstance(e,pd.Timestamp) and pd.notnull(e) else "", "時間(h)":r["所要時間(h)"], "🚨洗浄":"🚨 要洗浄" if r.get("コンタミリスク") else "", "出荷日":r["出荷日"].strftime("%m/%d") if isinstance(r["出荷日"],pd.Timestamp) and pd.notnull(r["出荷日"]) else ""})
+                seq.append({"ライン":r.get("ライン",""), "工程区分":r["区分"],"品目":r["製品名"][:20],"工程":r["工程"], "開始":s.strftime("%m/%d %H:%M") if isinstance(s,pd.Timestamp) and pd.notnull(s) else "", "終了":e.strftime("%m/%d %H:%M") if isinstance(e,pd.Timestamp) and pd.notnull(e) else "", "時間(h)":r["所要時間(h)"], "🚨洗浄":"🚨 要徹底洗浄" if r.get("コンタミリスク") else "", "出荷日":r["出荷日"].strftime("%m/%d") if isinstance(r["出荷日"],pd.Timestamp) and pd.notnull(r["出荷日"]) else ""})
             sq_df=pd.DataFrame(seq)
             def _sq_s(r):
                 if "段取り・洗浄" in str(r.get("工程","")) and r.get("🚨洗浄",""): return ['background-color:#FEE2E2;font-weight:bold;color:#991B1B;']*len(r)
@@ -2548,10 +2564,11 @@ elif pg == "🏗️ 製造スケジューラー":
                 if "準備" in str(r.get("工程","")): return ['background-color:#FEF3C7;']*len(r)
                 return ['']*len(r)
             st.dataframe(sq_df.style.apply(_sq_s,axis=1),hide_index=True, use_container_width=True,height=min(700,len(sq_df)*38+60))
-            st.download_button("📥 段取り計画CSV",data=make_csv_bytes(sq_df), file_name=f"段取り計画.csv",mime="text/csv")
+            st.download_button("📥 段取り計画CSV",data=make_csv_bytes(sq_df), file_name=f"段取り計画_{date.today()}.csv",mime="text/csv")
 
     with T5:
-        st.markdown('<div class="section-title">👷 人員配置計画</div>',unsafe_allow_html=True)
+        st.markdown('<div class="section-title">👷 工程別・時間帯別 人員配置計画</div>',unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">シフトマスタの人員と比較。赤=人員不足、⭐=キーマン必要工程。</div>',unsafe_allow_html=True)
         if not _sched: st.info("スケジュールデータがありません。")
         else:
             asgn=[]
@@ -2575,13 +2592,17 @@ elif pg == "🏗️ 製造スケジューラー":
                 adf["配置人数"]=adf["最少人数"]
                 ea2=st.data_editor(adf,hide_index=True,use_container_width=True, height=min(600,len(adf)*38+60), column_config={"配置人数":st.column_config.NumberColumn("配置人数",min_value=0,max_value=20,step=1), "工程":st.column_config.SelectboxColumn(options=_PROCESSES), }, key="v3_ea2")
                 _und=ea2[ea2["配置人数"].apply(to_int)>ea2["シフト人数"].apply(to_int)]
-                if not _und.empty: st.markdown(f'<div class="danger-banner">🚨 超過配置を検出しました。</div>',unsafe_allow_html=True)
+                if not _und.empty: st.markdown(f'<div class="danger-banner">🚨 {len(_und)}工程で配置人数がシフト人数を超過しています！</div>',unsafe_allow_html=True)
+                else: st.markdown('<div class="ok-banner">✅ 全工程で人員配置に問題ありません。</div>',unsafe_allow_html=True)
                 st.markdown('<div class="section-title">📊 日別 工程サマリ</div>',unsafe_allow_html=True)
                 day_summ=adf.groupby(["日付","工程"]).agg(工程数=("製品名","count"),最大必要人数=("最少人数","max"), 最大シフト人数=("シフト人数","max")).reset_index()
                 st.dataframe(day_summ,hide_index=True,use_container_width=True)
+                if not _sdf.empty:
+                    with st.expander("📋 シフトマスタ（参照）"):
+                        st.dataframe(_sdf[["シフト名","曜日区分","開始時刻","終了時刻","出勤人数","うちキーマン数"]], hide_index=True,use_container_width=True)
 
     with T6:
-        st.markdown('<div class="section-title">📈 負荷グラフ</div>',unsafe_allow_html=True)
+        st.markdown('<div class="section-title">📈 日別製造負荷 ＆ 人員山積みグラフ</div>',unsafe_allow_html=True)
         if not _sched: st.info("スケジュールデータがありません。")
         else:
             load_map={}; staff_map={}
@@ -2607,8 +2628,8 @@ elif pg == "🏗️ 製造スケジューラー":
                     for line_id,h in load_map[d].items():
                         lr.append({"日付":d,"ライン":line_id,"稼働時間(h)":round(h,2)})
                 ldf=pd.DataFrame(lr)
-                fig_l=px.bar(ldf,x="日付",y="稼働時間(h)",color="ライン",barmode="stack", title="日別 稼働時間")
-                fig_l.add_hline(y=wh_day,line_dash="dash",line_color="#DC2626")
+                fig_l=px.bar(ldf,x="日付",y="稼働時間(h)",color="ライン",barmode="stack", title="日別 ライン別稼働時間（リソース負荷）")
+                fig_l.add_hline(y=wh_day,line_dash="dash",line_color="#DC2626", annotation_text=f"稼働上限 {wh_day}h")
                 fig_l.update_layout(margin=dict(l=10,r=10,t=50,b=10),height=350,plot_bgcolor="white")
                 st.plotly_chart(fig_l,use_container_width=True)
 
@@ -2618,11 +2639,11 @@ elif pg == "🏗️ 製造スケジューラー":
                     cum_h+=sum(load_map[d].values())
                     cum_rows.append({"日付":d,"累積製造時間(h)":round(cum_h,2)})
                 cum_df=pd.DataFrame(cum_rows)
-                fig_c=px.area(cum_df,x="日付",y="累積製造時間(h)", color_discrete_sequence=["#2563EB"])
+                fig_c=px.area(cum_df,x="日付",y="累積製造時間(h)", title="累積製造時間（計画の進捗見通し）", color_discrete_sequence=["#2563EB"])
                 fig_c.update_layout(margin=dict(l=10,r=10,t=50,b=10),height=280,plot_bgcolor="white")
                 st.plotly_chart(fig_c,use_container_width=True)
 
-                st.markdown('<div class="section-title">👷 人員山積み</div>',unsafe_allow_html=True)
+                st.markdown('<div class="section-title">👷 人員山積みグラフ</div>',unsafe_allow_html=True)
                 sr_list=[]
                 for d in sorted(staff_map.keys()):
                     tot_n=sum(staff_map[d].values())
@@ -2635,13 +2656,22 @@ elif pg == "🏗️ 製造スケジューラー":
                 fig_s=go.Figure()
                 fig_s.add_trace(go.Bar(x=sdf2["日付"],y=sdf2["出勤人数"],name="出勤人数",marker_color="#93C5FD"))
                 fig_s.add_trace(go.Scatter(x=sdf2["日付"],y=sdf2["必要人数"],name="必要人数", mode="lines+markers",line=dict(color="#DC2626",width=2.5)))
-                fig_s.update_layout(barmode="overlay",margin=dict(l=10,r=10,t=50,b=10),height=320,plot_bgcolor="white")
+                for _,sr2 in sdf2[sdf2["超過"]>0].iterrows():
+                    fig_s.add_vrect(x0=sr2["日付"],x1=sr2["日付"],fillcolor="red",opacity=0.15,line_width=0)
+                fig_s.update_layout(title="人員山積みグラフ（赤ハイライト=人員不足）", barmode="overlay",margin=dict(l=10,r=10,t=50,b=10),height=320,plot_bgcolor="white")
                 st.plotly_chart(fig_s,use_container_width=True)
+
+                bn_proc=sorted(load_map.items(),key=lambda x:-sum(x[1].values()))
+                if bn_proc:
+                    bn_day,bn_loads=bn_proc[0]
+                    bn_p=max(bn_loads,key=bn_loads.get)
+                    st.markdown(f'<div class="warn-banner">⚠️ ボトルネック検出：<b>{bn_day}</b>  最高負荷ライン → <b>{bn_p}</b> ({bn_loads[bn_p]:.1f}h)</div>',unsafe_allow_html=True)
 
                 ol=[d for d in load_map if sum(load_map[d].values())>wh_day]
                 sl=[r["日付"] for _,r in sdf2.iterrows() if r["超過"]>0]
-                if ol: st.markdown(f'<div class="warn-banner">⚠️ 稼働超過日程あり</div>',unsafe_allow_html=True)
-                if sl: st.markdown(f'<div class="danger-banner">🚨 人員不足を検出しました。</div>',unsafe_allow_html=True)
+                if ol: st.markdown(f'<div class="warn-banner">⚠️ 稼働時間超過：{", ".join(ol[:6])}{"…" if len(ol)>6 else ""}</div>',unsafe_allow_html=True)
+                if sl: st.markdown(f'<div class="danger-banner">🚨 人員不足：{", ".join(sl[:6])}{"…" if len(sl)>6 else ""}</div>',unsafe_allow_html=True)
+                if not ol and not sl: st.markdown('<div class="ok-banner">✅ 全日程で稼働・人員が上限内です。</div>',unsafe_allow_html=True)
 
     with T7:
         st.markdown('<div class="section-title">📦 製品別 在庫推移プレビュー</div>',unsafe_allow_html=True)
@@ -2658,9 +2688,9 @@ elif pg == "🏗️ 製造スケジューラー":
                 safe_s=_gpp(sp)["安全在庫数"]
                 fig_i=go.Figure()
                 fig_i.add_trace(go.Scatter(x=inv_df["日付"],y=inv_df["予測在庫(cs)"], mode="lines+markers",name="予測在庫", line=dict(color="#2563EB",width=2.5), fill="tozeroy",fillcolor="rgba(37,99,235,0.08)"))
-                fig_i.add_hline(y=safe_s,line_dash="dash",line_color="#F59E0B")
-                fig_i.add_hline(y=0,line_dash="dot",line_color="#DC2626")
-                fig_i.update_layout(margin=dict(l=10,r=10,t=50,b=10),height=300, plot_bgcolor="white",hovermode="x unified")
+                fig_i.add_hline(y=safe_s,line_dash="dash",line_color="#F59E0B", annotation_text=f"安全在庫 {safe_s}cs")
+                fig_i.add_hline(y=0,line_dash="dot",line_color="#DC2626",annotation_text="ゼロ在庫")
+                fig_i.update_layout(title=f"【{sp}】 在庫推移（{hd}日間）", margin=dict(l=10,r=10,t=50,b=10),height=300, plot_bgcolor="white",hovermode="x unified")
                 st.plotly_chart(fig_i,use_container_width=True)
 
             st.markdown('<div class="section-title">全製品 在庫ステータス一覧</div>',unsafe_allow_html=True)
@@ -2669,7 +2699,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 c_n=cs.get(pn,0); sf=_gpp(pn)["安全在庫数"]
                 mn=min((fs.get(pn,{}).get(d,c_n) for d in pd.date_range(today,today+timedelta(days=30))),default=c_n)
                 inv_sum.append({"製品名":pn,"現在庫(cs)":c_n,"安全在庫(cs)":sf,"30日内最低在庫":mn, "状態":"🔴 欠品リスク" if mn<0 else ("🟡 安全在庫割れ" if mn<sf else "🟢 充足")})
-            idf = pd.DataFrame(inv_sum)
+            idf=pd.DataFrame(inv_sum)
             def _isy(r):
                 if "欠品" in str(r.get("状態","")): return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
                 if "割れ" in str(r.get("状態","")): return ['background-color:#FFFBEB;']*len(r)
@@ -2731,6 +2761,7 @@ elif pg == "🏗️ 製造スケジューラー":
 
     with T9:
         st.markdown('<div class="section-title">💾 スケジュール確定・保存 ＆ 版比較</div>',unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 確定ボタンを押すと現在のスケジュールが「schedule_confirmed」シートへ保存されます。版IDで過去版との比較が可能です。</div>',unsafe_allow_html=True)
 
         c9a,c9b=st.columns([2,2])
         with c9a:
@@ -2806,11 +2837,12 @@ elif pg == "🏗️ 製造スケジューラー":
                     st.dataframe(diff_df.style.apply(_dfs,axis=1),hide_index=True,use_container_width=True)
                     st.caption(f"追加:{len(added)}件  削除:{len(removed)}件  変更:{len([r for r in diff_rows if '変更' in r['変更区分']])}件")
                 else: st.markdown('<div class="ok-banner">✅ 選択した確定版と現在のスケジュールに差分はありません。</div>',unsafe_allow_html=True)
-        else: st.info("確定済みスケジュールがないため比較できません。")
+        else: st.info("確定済みスケジュールがないため比較できません。まずスケジュールを確定保存してください。")
 
     with T10:
         st.markdown('<div class="section-title">⚙️ 製品別 製造パラメータ設定</div>',unsafe_allow_html=True)
-        if mst.empty: st.warning("製品マスタが未登録です。")
+        st.markdown("""<div class="info-tip">💡 <b>入力ガイド：</b>生産量=cs/h。歩留まり=90〜98%程度。LT=調合・仕込み前処理時間(h)。段取りタイプ=段取りマトリクスとの照合キー（空欄=製品名から自動判定）。工程比率は合計が100%になるよう設定（空欄=自動按分）。最小製造ロット=ロット単位cs数。</div>""",unsafe_allow_html=True)
+        if mst.empty: st.warning("製品マスタが未登録です。「⚙️ マスタ・分析」から登録してください。")
         else:
             base_c=["製品名","大カテゴリ","時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]
             ext_c=["段取りタイプ","ラインID","最小製造ロット", "調合比率","成形比率","包装比率","レトルト比率", "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"]
@@ -2850,9 +2882,10 @@ elif pg == "🏗️ 製造スケジューラー":
                 flash("success","✅ 製造パラメータを保存しました。"); st.rerun()
             show_flash_inline(_pm_msg)
 
-            st.markdown('<div class="section-title">🧩 現在の段取りマトリクス</div>',unsafe_allow_html=True)
+            st.markdown('<div class="section-title">🧩 現在の段取りマトリクス（参照）</div>',unsafe_allow_html=True)
             if not _cdf.empty:
                 def _co_sty(r):
                     if str(r.get("コンタミリスク","")).upper()=="TRUE": return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
                     return ['']*len(r)
                 st.dataframe(_cdf.style.apply(_co_sty,axis=1),hide_index=True,use_container_width=True)
+            else: st.info("段取りマトリクスは上部「🧩 段取りマトリクス設定」エクスパンダーから登録してください。")
