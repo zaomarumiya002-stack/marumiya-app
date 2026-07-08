@@ -440,6 +440,7 @@ if "order_purchases_df" in st.session_state and not st.session_state.order_purch
         open_po[pn] = open_po.get(pn, 0) + max(0, o_qty - a_qty)
 
 p_sum = {}
+pk_m = pk_m.copy()  # ★修復：session_state上の元DataFrameを直接書き換えない（SettingWithCopy対策）
 if "管理区分" not in pk_m.columns: pk_m["管理区分"] = "定期発注(自動)"
 if not pk_m.empty:
     for _, r in pk_m.drop_duplicates(subset=["資材名"]).iterrows():
@@ -1190,8 +1191,15 @@ elif pg == "📦 資材・入出庫":
         if _alert_mats:
             st.markdown(f'<div class="danger-banner">🚨 手配が必要な資材が <b>{len(_alert_mats)}件</b> あります：{" / ".join(m for m,_ in _alert_mats[:5])}{"…" if len(_alert_mats)>5 else ""}</div>', unsafe_allow_html=True)
 
-        po_t1, po_t2, po_t3 = st.tabs(["➕ 新規発注登録", "📋 発注一覧", "✅ 納入完了処理"])
-        with po_t1:
+        # ★修復：st.tabs()のネスト（タブの中にタブ）はStreamlit未サポートのため、
+        # 「発注予測」タブの下に「発注管理」の内容が重なって表示されるUI崩れの原因になっていた。
+        # タブのネストをやめ、ラジオボタン（横並び）によるサブ切替に変更して解消。
+        _po_nav = st.radio(
+            "発注管理メニュー", ["➕ 新規発注登録", "📋 発注一覧", "✅ 納入完了処理"],
+            horizontal=True, key="po_nav_radio", label_visibility="collapsed"
+        )
+        st.write("")
+        if _po_nav == "➕ 新規発注登録":
             st.markdown("**📝 新発注を登録**")
             pack_names = [pn for pn in p_sum.keys()] if p_sum else []
             po_c1, po_c2 = st.columns([1.5, 2.5])
@@ -1245,7 +1253,7 @@ elif pg == "📦 資材・入出庫":
                     st.rerun()
             show_flash_inline(_po_reg_msg)
 
-        with po_t2:
+        elif _po_nav == "📋 発注一覧":
             if po_df.empty: st.info("発注データがありません。")
             else:
                 st.markdown("💡 編集して「保存」ボタンを押してください。削除は行チェックボックスで行います。")
@@ -1257,7 +1265,14 @@ elif pg == "📦 資材・入出庫":
                     po_edit, 
                     use_container_width=True, 
                     hide_index=True,
-                    column_config={"🗑️ 削除": st.column_config.CheckboxColumn(width="small")},
+                    column_config={
+                        "🗑️ 削除": st.column_config.CheckboxColumn(width="small"),
+                        # ★修復：ステータスを自由入力にすると誤字で発注残計算（open_po）が正しく反映されなくなるため、
+                        # 選択式に限定して「発注済／一部納入／納入完了／キャンセル」の4状態を保証する。
+                        "ステータス": st.column_config.SelectboxColumn(
+                            options=["発注済", "一部納入", "納入完了", "キャンセル"]
+                        ),
+                    },
                     key="po_edit_editor"
                 )
                 
@@ -1270,7 +1285,7 @@ elif pg == "📦 資材・入出庫":
                 
                 show_flash_inline() 
 
-        with po_t3:
+        elif _po_nav == "✅ 納入完了処理":
             st.markdown("**✅ 納入完了処理**")
             st.markdown('<div class="info-tip">💡 納入された資材の実数量を入力し「納入完了」を押すと、資材在庫に自動加算されます。</div>', unsafe_allow_html=True)
             _open_po = po_df[po_df["ステータス"].isin(["発注済","一部納入"])].copy() if not po_df.empty else pd.DataFrame()
