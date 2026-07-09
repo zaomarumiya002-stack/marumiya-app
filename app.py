@@ -134,7 +134,7 @@ def load_data(name):
         "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
         "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
         "master":       ["大カテゴリ","製品名","初期在庫数",
-                         "使用資材名","製造登録区分","入数","甲消費数",
+                         "使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日",
                          "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ",
                          "段取りタイプ","ラインID","最小製造ロット",
                          "調合比率","成形比率","包装比率","レトルト比率",
@@ -164,7 +164,7 @@ def load_data(name):
         for c in ["ケース数","初期在庫数","初期在庫","発注点","数量","理論在庫",
                   "入数","甲消費数","最小製造ロット","最少人員_調合","最少人員_成形",
                   "最少人員_包装","最少人員_レトルト","調合比率","成形比率","包装比率","レトルト比率",
-                  "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム"]:
+                  "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","発注リードタイム","製造リードタイム日"]:
             if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             
         if "入数" in df.columns: df["入数"] = df["入数"].apply(lambda x: 10 if x <= 0 else x)
@@ -294,7 +294,7 @@ mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataF
              "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
 
 for _ext_col, _ext_def in [
-    ("製造登録区分", "ケース"), ("入数", 10), ("甲消費数", 4),
+    ("製造登録区分", "ケース"), ("入数", 10), ("甲消費数", 4), ("製造リードタイム日", 1),
     ("段取りタイプ", ""), ("ラインID", ""), ("最小製造ロット", 1),
     ("調合比率", 15), ("成形比率", 35), ("包装比率", 35), ("レトルト比率", 15),
     ("最少人員_調合", 1), ("最少人員_成形", 2), ("最少人員_包装", 2), ("最少人員_レトルト", 1),
@@ -414,9 +414,15 @@ def stock_asof(p, asof_date):
     return base_qty + to_int(ev["qty"].sum())
 
 # ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
+# ★修復：以前は資材の消費予定日を「受注の納品予定日（＝出荷日）」でそのまま計上していたが、
+# 実際に資材（段ボール等）が消費されるのは製造のタイミングであり、出荷当日に製造するとは限らない
+# （数日前に製造して在庫しておくケースがある）。出荷日を消費日として扱うと、実際の消費（＝在庫減少）
+# より遅い日付で「まだ大丈夫」と判定してしまい、発注点到達に気づかず欠品するリスクがあった。
+# 製品マスタの「製造リードタイム日」（出荷の何日前に製造するか）の分だけ消費予定日を前倒しして、
+# 実際の製造タイミングに合わせることでこのズレを解消する。
 fd = 90; pf = {}
 if not mst_u.empty and not odf.empty:
-    mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数"]].to_dict('index')
+    mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日"]].to_dict('index')
     for _, r in odf.iterrows():
         p, q, dt = str(r.get("製品名","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日"),errors="coerce")
         if pd.isna(dt) or dt.date()<date.today() or dt>today+timedelta(days=fd) or p not in mpi: continue
@@ -424,11 +430,15 @@ if not mst_u.empty and not odf.empty:
         kbn = str(mpi[p].get("製造登録区分","ケース")).strip()
         nyu = max(1, to_int(mpi[p].get("入数",10)))
         kou = max(1, to_int(mpi[p].get("甲消費数",4)))
+        mfg_lt = max(0, to_int(mpi[p].get("製造リードタイム日",0)))
+        # 出荷日から製造リードタイム分を前倒しした「実際に資材が減る想定日」。
+        # 前倒しした結果が今日より前になる場合は、今日時点で既に消費される必要があるとみなし今日に丸める。
+        use_dt = max(today, (dt - timedelta(days=mfg_lt)).normalize())
         if pn:
             if kbn == "袋": use_qty = to_int(q / nyu)
             elif kbn == "甲": use_qty = to_int(q * kou)
             else: use_qty = q
-            pf.setdefault(pn, {})[dt.normalize()] = pf.get(pn,{}).get(dt.normalize(),0) + use_qty
+            pf.setdefault(pn, {})[use_dt] = pf.get(pn,{}).get(use_dt,0) + use_qty
 
 open_po = {}
 if "order_purchases_df" in st.session_state and not st.session_state.order_purchases_df.empty:
@@ -1456,8 +1466,16 @@ elif pg == "📊 在庫・スケジュール":
             poa = odf[(odf["製品名"]==sp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)] if not odf.empty else pd.DataFrame()
             pma = mdf[(mdf["製品名"]==sp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)] if not mdf.empty else pd.DataFrame()
             k1,k2,k3,k4 = st.columns(4); k1.metric("現在庫",f"{cs.get(sp,0):,} cs"); k2.metric("過去1年 出荷",f"{poa['ケース数'].apply(to_int).sum() if not poa.empty else 0:,} cs"); k3.metric("過去1年 製造",f"{pma['ケース数'].apply(to_int).sum() if not pma.empty else 0:,} cs"); k4.metric("7日以内 欠品日数",f"{sum(1 for d in pd.date_range(today,today+timedelta(days=7)) if fs.get(sp,{}).get(d,0)<0)} 日")
-            dth, dtf, dtg = st.tabs(["📜 履歴", "📅 予定", "📈 月次グラフ"])
-            with dth:
+            # ★修復：st.tabs()のネスト（外側の📊在庫・スケジュールのタブの中に
+            # さらにタブを作る）はStreamlit未サポートで、タブ表示が崩れて
+            # 全タブが一枚に重なって見えたり操作不能になったりする原因だったため、
+            # ラジオボタン（横並び）によるサブ切替に変更して解消。
+            _dv_nav = st.radio(
+                "詳細表示メニュー", ["📜 履歴", "📅 予定", "📈 月次グラフ"],
+                horizontal=True, key="dv_nav_radio", label_visibility="collapsed"
+            )
+            st.write("")
+            if _dv_nav == "📜 履歴":
                 with st.expander("➕ 過去の製造実績を登録（在庫非反映）", expanded=False):
                     h1,h2,h3 = st.columns([1,1,2]); hd = h1.date_input("日", value=today-timedelta(days=1)); hq = h2.number_input("数", min_value=1, step=1); hr = h3.text_input("備考", placeholder="過去実績")
                     if st.button("💾 登録（非反映）"): app_sync("manufactures", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"製造予定日":pd.to_datetime(hd),"大カテゴリ":c_det,"製品名":sp,"ケース数":to_int(hq),"リパックフラグ":False,"備考":f"【在庫非反映】 {hr}".strip(),"登録日時":datetime.now()}])); st.rerun()
@@ -1469,7 +1487,7 @@ elif pg == "📊 在庫・スケジュール":
                     st.markdown('<div style="font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
                     if not pma.empty: st.dataframe(pma.assign(日付=pma["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
 
-            with dtf:
+            elif _dv_nav == "📅 予定":
                 st.markdown('<div class="section-title">📅 今後60日間スケジュール</div>', unsafe_allow_html=True)
                 pof = odf[(odf["製品名"]==sp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=pd.Timestamp(today))&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
                 vm3 = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
@@ -1509,7 +1527,7 @@ elif pg == "📊 在庫・スケジュール":
                     pof_disp["納品予定日"] = pof_disp["納品予定日"].apply(format_date_jp)
                     pof_disp["在庫状況"] = pof_disp.apply(lambda r: (f"❌ 欠品 ({fs.get(sp,{}).get(pd.Timestamp(str(r.get('納品予定日',''))).normalize() if pd.notnull(r.get('納品予定日')) else pd.Timestamp(today), 0)})" if fs.get(sp,{}).get(pd.Timestamp(today),0) < 0 else "✅ OK"), axis=1)
                     st.dataframe(pof_disp[["納品予定日","顧客名","ケース数","在庫状況","備考"]].sort_values("納品予定日"), hide_index=True, use_container_width=True)
-            with dtg:
+            elif _dv_nav == "📈 月次グラフ":
                 gr = []
                 if not poa.empty:
                     po_m = poa.copy(); po_m["年月"] = pd.to_datetime(po_m["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
@@ -1695,9 +1713,10 @@ elif pg == "⚙️ マスタ・分析":
         if "製造登録区分" not in em_base.columns: em_base["製造登録区分"] = em_base.get("資材消費単位", "ケース")
         if "入数" not in em_base.columns: em_base["入数"] = em_base.get("入数(袋/cs)", 10)
         if "甲消費数" not in em_base.columns: em_base["甲消費数"] = em_base.get("甲入数", 4)
+        if "製造リードタイム日" not in em_base.columns: em_base["製造リードタイム日"] = 1
         
         _mst_active = ["大カテゴリ","製品名","初期在庫数",
-                       "使用資材名","製造登録区分","入数","甲消費数",
+                       "使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日",
                        "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]
         
         em_show = em_base[[c for c in _mst_active if c in em_base.columns]]
@@ -1708,6 +1727,7 @@ elif pg == "⚙️ マスタ・分析":
                 "製造登録区分": st.column_config.SelectboxColumn("製造登録区分", options=["ケース","袋","甲"]),
                 "入数": st.column_config.NumberColumn("入数(袋)", min_value=1, step=1, format="%d", help="区分が「袋」の場合：何袋でダンボール1箱になるか"),
                 "甲消費数": st.column_config.NumberColumn("甲消費数(枚/甲)", min_value=1, step=1, format="%d", help="区分が「甲」の場合：1甲でダンボールを何箱消費するか"),
+                "製造リードタイム日": st.column_config.NumberColumn("製造LT(日)", min_value=0, step=1, format="%d", help="出荷予定日の何日前に製造するか。資材の消費予定日をこの日数分前倒しして発注アラートを計算します。"),
                 "初期在庫数": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
                 "時間あたり生産量": st.column_config.NumberColumn("生産量(cs/h)", min_value=1, step=1, format="%d"),
                 "歩留まり率": st.column_config.NumberColumn("歩留まり(%)", min_value=1, max_value=100, step=1, format="%d"),
@@ -1727,7 +1747,7 @@ elif pg == "⚙️ マスタ・分析":
                     if c not in save_target.columns:
                         save_target[c] = ""
 
-                numeric_cols = ["初期在庫数", "時間あたり生産量", "歩留まり率", "リードタイム時間", "安全在庫数", "入数", "甲消費数", "最小製造ロット"]
+                numeric_cols = ["初期在庫数", "時間あたり生産量", "歩留まり率", "リードタイム時間", "安全在庫数", "入数", "甲消費数", "最小製造ロット", "製造リードタイム日"]
                 for col in numeric_cols:
                     if col in save_target.columns:
                         save_target[col] = pd.to_numeric(save_target[col], errors='coerce').fillna(0).astype(int)
