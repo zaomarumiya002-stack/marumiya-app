@@ -1415,10 +1415,12 @@ elif pg == "📊 在庫・スケジュール":
                 for d2 in pd.date_range(today, today+timedelta(days=59)):
                     do = pof[safe_dt_date(pof["納品予定日"])==d2.date()] if not pof.empty else pd.DataFrame()
                     oq = to_int(do["ケース数"].sum()) if not do.empty else 0
+                    # ★修復：出荷予定が数量だけで出荷先が分からなかったため、その日の顧客名を合わせて表示する
+                    cust = " / ".join(do["顧客名"].dropna().astype(str).unique()) if not do.empty else ""
                     dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                     iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
                     ts += (iq-oq)
-                    if iq>0 or oq>0 or ts<0: dtl.append({"日付":format_date_jp(d2),"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
+                    if iq>0 or oq>0 or ts<0: dtl.append({"日付":format_date_jp(d2),"出荷先":cust if cust else "―","製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
                 if dtl:
                     dfd = pd.DataFrame(dtl)
                     fig = go.Figure()
