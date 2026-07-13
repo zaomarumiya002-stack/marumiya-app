@@ -20,6 +20,18 @@ import numpy as np
 # ─────────────────────────────────────────────
 # 共通関数
 # ─────────────────────────────────────────────
+def add_today_vline(fig, x, color="#10B981", text="今日", dash="dash"):
+    """
+    ★修復：fig.add_vline(x=日付, annotation_text=...) はplotly側の既知の不具合で、
+    x に日付（pandas.Timestamp / datetime）を渡すと注釈の位置計算内部で
+    「Timestamp同士の加算」を試みてTypeErrorになりアプリごとクラッシュする。
+    add_shape + add_annotation で同じ見た目（縦の点線＋ラベル）を安全に描画する。
+    """
+    fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
+                  line=dict(dash=dash, color=color, width=1.5))
+    fig.add_annotation(x=x, y=1, yref="paper", yshift=10, text=text,
+                        showarrow=False, font=dict(color=color, size=11))
+
 def to_int(v):
     try:
         if isinstance(v, pd.Series): v = v.sum()
@@ -1017,7 +1029,7 @@ elif pg == "📦 資材・入出庫":
                 fig.add_trace(go.Scatter(x=full_gd, y=full_gs, name="予測/実績在庫", mode="lines+markers", line=dict(color="#2563EB", width=2.5)))
                 fig.add_hline(y=p_sum.get(spg,{}).get("発注点",0), line_dash="dash", line_color="#F59E0B", annotation_text="発注点")
                 fig.add_hline(y=0, line_dash="dot", line_color="#DC2626", annotation_text="ゼロ")
-                fig.add_vline(x=today, line_dash="dash", line_color="#10B981", annotation_text="今日")
+                add_today_vline(fig, today, color="#10B981", text="今日")
                 fig.update_layout(title=f"【{spg}】 過去30日実績〜未来予測 在庫推移", hovermode="x unified", barmode="relative", margin=dict(l=10,r=10,t=55,b=10), height=380)
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -2529,7 +2541,7 @@ elif pg == "🏗️ 製造スケジューラー":
                                 fig_tl.add_vrect(x0=bs_dt,x1=be_dt,fillcolor="#CBD5E1", opacity=0.35,line_width=0, annotation_text=str(br.get("種別","休憩")), annotation_position="top left")
                             except: pass
                         if pd.Timestamp.today().date()==sel_day:
-                            fig_tl.add_vline(x=datetime.now(),line_dash="dash", line_color="#DC2626",annotation_text="現在")
+                            add_today_vline(fig_tl, datetime.now(), color="#DC2626", text="現在")
                         fig_tl.update_layout(margin=dict(l=10,r=10,t=50,b=10), height=max(320,len(set(r["ライン"] for r in tl))*46+80), legend=dict(orientation="h",yanchor="bottom",y=1.02,x=0), plot_bgcolor="white")
                         st.plotly_chart(fig_tl,use_container_width=True)
 
@@ -2569,7 +2581,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 fig_g=px.timeline(gdf,x_start="Start",x_end="Finish",y=y_col, color="工程",color_discrete_map=_PCOLOR, hover_data=["タスク","ライン","製造量","出荷日","コンタミ","ステータス"], title=f"全体スケジュール（{g_axis}）")
                 fig_g.update_yaxes(autorange="reversed",title="")
                 fig_g.update_xaxes(tickformat="%m/%d %H:%M")
-                fig_g.add_vline(x=datetime.now(),line_dash="dash", line_color="#94A3B8",annotation_text="今日")
+                add_today_vline(fig_g, datetime.now(), color="#94A3B8", text="今日")
                 fig_g.update_layout(margin=dict(l=10,r=10,t=50,b=10), height=max(420,len(set(r[y_col] for r in gr))*46+100), legend=dict(orientation="h",yanchor="bottom",y=1.01,xanchor="right",x=1), plot_bgcolor="white")
                 st.plotly_chart(fig_g,use_container_width=True)
                 st.markdown("""<div style="display:flex;gap:8px;flex-wrap:wrap;"><span style="background:#7C3AED;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">調合・練り</span> <span style="background:#2563EB;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">成形・糊付け</span> <span style="background:#059669;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">包装・充填</span> <span style="background:#0891B2;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">レトルト・冷却</span> <span style="background:#DC2626;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">🚨 段取り・洗浄</span> <span style="background:#D97706;color:white;padding:2px 10px;border-radius:99px;font-size:12px;">準備</span></div>""",unsafe_allow_html=True)
