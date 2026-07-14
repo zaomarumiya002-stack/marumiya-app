@@ -1048,12 +1048,23 @@ elif pg == "📦 資材・入出庫":
         else:
             c_btn1, c_btn2 = st.columns([2, 3])
             if c_btn1.button("✨ 推奨発注点をマスタに一括反映して保存", type="primary", key="btn_apply_rec_pt"):
+                # ★修復：直近30日間の使用実績が無い資材は「推奨発注点」が0になり、
+                # そのまま反映すると既存の発注点が意図せず0に上書き（実質、発注点の消失）されてしまっていた。
+                # 実績に基づく意味のある推奨値（>0）がある資材のみ更新し、実績が無い資材は既存値を維持する。
                 upd = pk_m.copy()
+                _n_applied, _n_skipped = 0, 0
                 for pn, d_info in p_sum.items():
                     if d_info.get("管理区分") == "定期発注(自動)":
-                        upd.loc[upd["資材名"] == pn, "発注点"] = d_info.get("推奨発注点", 0)
+                        _rec = d_info.get("推奨発注点", 0)
+                        if _rec > 0:
+                            upd.loc[upd["資材名"] == pn, "発注点"] = _rec
+                            _n_applied += 1
+                        else:
+                            _n_skipped += 1
                 save_sync("packaging_master", upd)
-                flash("success", "✅ 推奨発注点をマスタに反映しました。")
+                _msg = f"✅ {_n_applied}件の発注点をマスタに反映しました。"
+                if _n_skipped: _msg += f"（直近30日の使用実績が無い{_n_skipped}件は、既存の発注点を維持し変更していません）"
+                flash("success", _msg)
                 st.rerun()
 
             for item in p_sum.values():
@@ -1263,41 +1274,98 @@ elif pg == "📦 資材・入出庫":
                 if not _po_mat:
                     _po_reg_msg.error("⚠️ 資材名は必須です")
                 else:
-                    _new_po = pd.DataFrame([{
-                        "発注ID": f"PO-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                        "発注日": _po_date.strftime("%Y-%m-%d"),
-                        "資材名": _po_mat,
-                        "発注時在庫": p_sum.get(_po_mat, {}).get("現在庫", 0),
-                        "発注数": _po_qty,
-                        "発注単価": _po_price,
-                        "仕入先": _po_supplier,
-                        "納入予定日": _po_eta.strftime("%Y-%m-%d"),
-                        "実際納入日": "",
-                        "実際納入数": 0,
-                        "ステータス": "発注済",
-                        "備考": _po_rem,
-                        "登録日時": datetime.now(JST).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-                    }])
-                    merged_po = pd.concat([po_df, _new_po], ignore_index=True)
-                    _save_po(merged_po)
-                    flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
-                    st.rerun()
+                    # ★修復：発注登録一覧の「二重登録」対策。
+                    # 以前は発注IDを秒単位のタイムスタンプから生成していたため、
+                    # 通信が遅い時の連打やリロードのタイミングによっては同一内容が2行登録される
+                    # ことがあった（IDも重複しうる）。ID生成をUUIDベースに変更し、さらに
+                    # 「直前と全く同じ内容の発注」が数秒以内に再送された場合は登録をスキップして警告する。
+                    _submit_key = f"{_po_mat}|{_po_qty}|{_po_price}|{_po_date}|{_po_supplier}|{_po_eta}"
+                    _now_ts = datetime.now(JST).replace(tzinfo=None)
+                    _last_key = st.session_state.get("_last_po_submit_key")
+                    _last_ts = st.session_state.get("_last_po_submit_ts")
+                    if _last_key == _submit_key and _last_ts is not None and (_now_ts - _last_ts).total_seconds() < 10:
+                        _po_reg_msg.warning("⚠️ 直前と同じ内容の発注が数秒以内に送信されたため、二重登録を防止してスキップしました。既に登録済みか「📋 発注一覧」でご確認ください。")
+                    else:
+                        _new_po = pd.DataFrame([{
+                            "発注ID": f"PO-{str(uuid.uuid4())[:8].upper()}",
+                            "発注日": _po_date.strftime("%Y-%m-%d"),
+                            "資材名": _po_mat,
+                            "発注時在庫": p_sum.get(_po_mat, {}).get("現在庫", 0),
+                            "発注数": _po_qty,
+                            "発注単価": _po_price,
+                            "仕入先": _po_supplier,
+                            "納入予定日": _po_eta.strftime("%Y-%m-%d"),
+                            "実際納入日": "",
+                            "実際納入数": 0,
+                            "ステータス": "発注済",
+                            "備考": _po_rem,
+                            "登録日時": _now_ts.strftime("%Y-%m-%d %H:%M:%S")
+                        }])
+                        merged_po = pd.concat([po_df, _new_po], ignore_index=True)
+                        _save_po(merged_po)
+                        st.session_state._last_po_submit_key = _submit_key
+                        st.session_state._last_po_submit_ts = _now_ts
+                        flash("success", f"✅ 発注を登録しました！【{_po_mat}】 {_po_qty:,}枚  納入予定: {_po_eta.strftime('%Y/%m/%d')}")
+                        st.rerun()
             show_flash_inline(_po_reg_msg)
 
         elif _po_nav == "📋 発注一覧":
             if po_df.empty: st.info("発注データがありません。")
             else:
-                st.markdown("💡 編集して「保存」ボタンを押してください。削除は行チェックボックスで行います。")
-                
-                po_edit = po_df.copy()
+                # ★追加：発注登録一覧の「二重登録」確認。
+                # 同じ資材・同じ発注日・同じ発注数・同じ仕入先の行が複数あれば、誤って二重登録された
+                # 可能性が高いため自動検出して警告する（削除するかはユーザー判断のため自動削除はしない）。
+                _dup_key_cols = ["資材名","発注日","発注数","仕入先"]
+                if all(c in po_df.columns for c in _dup_key_cols):
+                    _dup_counts = po_df.groupby(_dup_key_cols).size().reset_index(name="件数")
+                    _dups = _dup_counts[_dup_counts["件数"] > 1]
+                    if not _dups.empty:
+                        st.markdown(f'<div class="danger-banner">🚨 内容が完全に一致する発注が {len(_dups)} 組見つかりました。二重登録の可能性があります。下の一覧で確認し、不要な行は🗑️削除にチェックして保存してください。</div>', unsafe_allow_html=True)
+                        for _, _d in _dups.iterrows():
+                            st.markdown(f"- 【{_d['資材名']}】 {_d['発注日']}　{_d['発注数']}枚　仕入先:{_d['仕入先'] or '（空欄）'}　→ {_d['件数']}件重複")
+
+                # ★追加：今から納品されるもの／すでに納品されたものを一目で分かるように、
+                # 状態列（アイコン＋残り日数）と件数サマリーを表示し、納品待ちを上に並べ替える。
+                _po_disp = po_df.copy()
+                _po_disp["_eta"] = pd.to_datetime(_po_disp["納入予定日"], errors="coerce")
+                def _po_status_label(r):
+                    if r.get("ステータス") == "キャンセル": return "🚫 キャンセル"
+                    if r.get("ステータス") == "納入完了": return f"✅ 納品済み ({r.get('実際納入日','')})"
+                    d_eta = r.get("_eta")
+                    if pd.isna(d_eta): return "📦 納品待ち"
+                    _days = (d_eta.normalize() - today).days
+                    if _days < 0: return f"🔴 納品待ち（予定日超過 {-_days}日）"
+                    elif _days == 0: return "🟠 納品待ち（本日納品予定）"
+                    else: return f"📦 納品待ち（あと{_days}日）"
+                _po_disp["🚦状態"] = _po_disp.apply(_po_status_label, axis=1)
+                _n_pending = (_po_disp["ステータス"].isin(["発注済","一部納入"])).sum()
+                _n_done = (_po_disp["ステータス"]=="納入完了").sum()
+                _n_cancel = (_po_disp["ステータス"]=="キャンセル").sum()
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("📦 納品待ち", f"{_n_pending} 件")
+                mc2.metric("✅ 納品済み", f"{_n_done} 件")
+                mc3.metric("🚫 キャンセル", f"{_n_cancel} 件")
+
+                # 状態でソート（納品待ちを先に、その中では納入予定日が近い順）→ 完了 → キャンセル
+                _status_order = {"発注済":0, "一部納入":0, "納入完了":1, "キャンセル":2}
+                _po_disp["_sort1"] = _po_disp["ステータス"].map(_status_order).fillna(0)
+                _po_disp = _po_disp.sort_values(["_sort1","_eta"], na_position="last").drop(columns=["_eta","_sort1"])
+
+                st.markdown("💡 編集して「保存」ボタンを押してください。削除は行チェックボックスで行います。（📦納品待ちが上、✅納品済みが下に並びます）")
+
+                po_edit = _po_disp.copy()
                 po_edit.insert(0, "🗑️ 削除", False)
-                
+                # 表示列の並び：状態を先頭近くに出して一目で分かるようにする（保存時は元の列構成に戻すため直後にdrop）
+                _po_edit_cols = ["🗑️ 削除","🚦状態"] + [c for c in _PO_COLS if c in po_edit.columns]
+                po_edit = po_edit[_po_edit_cols]
+
                 edited_df = st.data_editor(
                     po_edit, 
                     use_container_width=True, 
                     hide_index=True,
                     column_config={
                         "🗑️ 削除": st.column_config.CheckboxColumn(width="small"),
+                        "🚦状態": st.column_config.TextColumn("🚦状態", disabled=True),
                         # ★修復：ステータスを自由入力にすると誤字で発注残計算（open_po）が正しく反映されなくなるため、
                         # 選択式に限定して「発注済／一部納入／納入完了／キャンセル」の4状態を保証する。
                         "ステータス": st.column_config.SelectboxColumn(
@@ -1309,7 +1377,7 @@ elif pg == "📦 資材・入出庫":
                 
                 c1, c2 = st.columns(2)
                 if c1.button("💾 変更を保存"):
-                    to_keep = edited_df[edited_df["🗑️ 削除"] == False].drop(columns=["🗑️ 削除"])
+                    to_keep = edited_df[edited_df["🗑️ 削除"] == False].drop(columns=["🗑️ 削除","🚦状態"])
                     _save_po(to_keep)
                     flash("success", "✅ 発注データを更新しました。")
                     st.rerun()
