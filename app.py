@@ -420,6 +420,16 @@ if not mst_fc.empty:
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
 
+def cur_stock(p):
+    """「現在庫」として画面表示するための値。cs[p]は"本日の営業開始時点"（本日の出荷・製造は未反映）の
+    在庫なので、これをそのまま「現在庫」として見せると、同じ画面の"本日"の予測欄（fs[p][today]、
+    本日すでに登録された出荷・製造を反映済み）と数字が食い違って見え、分かりにくかった。
+    （例：本日分の製造が未登録のまま出荷だけ登録されていると、現在庫は変わらないのに
+    　本日の予測欄だけ大きくマイナスになり、ロジックが壊れているように見えていた）
+    ここでは常にfs[p][today]（＝本日すでに登録済みの分まで反映した"今この瞬間"の在庫）を返し、
+    画面のどこで見ても同じ「現在庫」の値になるようにする。"""
+    return fs.get(p, {}).get(today, cs.get(p, 0))
+
 
 def stock_asof(p, asof_date):
     """指定日の「開始時点」（その日の入出庫が反映される前）の計算上在庫を返す。
@@ -654,8 +664,8 @@ if pg == "📋 受注登録":
     if iadj:
         st.markdown('<div style="background:#EFF6FF;border:1.5px solid #2563EB;border-radius:8px;padding:8px 14px;font-size:13px;color:#1E40AF;margin:4px 0;">📊 <b>在庫調整モード</b>：この受注は「出荷」ではなく在庫を <b>増やす（＋）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     
-    if prod and qty and to_int(qty)>0 and cs.get(prod,0) < to_int(qty):
-        st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cs.get(prod,0)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cs.get(prod,0)}</span></div>', unsafe_allow_html=True)
+    if prod and qty and to_int(qty)>0 and cur_stock(prod) < to_int(qty):
+        st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cur_stock(prod)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cur_stock(prod)}</span></div>', unsafe_allow_html=True)
     
     m_add = st.empty()
     if st.button("✅ 受注を登録", type="primary", use_container_width=True):
@@ -667,13 +677,13 @@ if pg == "📋 受注登録":
             nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
             if iadj:
                 app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"リパックフラグ":False,"備考":f"【在庫調整+】{frem}","登録日時": datetime.now(JST).replace(tzinfo=None)}]))
-                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(prod)}】 ＋{to_int(qty):,}  現在庫: {cs.get(prod,0):,} → {cs.get(prod,0)+to_int(qty):,}")
+                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(prod)}】 ＋{to_int(qty):,}  現在庫: {cur_stock(prod):,} → {cur_stock(prod)+to_int(qty):,}")
                 st.rerun()
             else:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 if ("特注" in stype or "チャーター" in stype) and od:
                     app_sync("special_schedule", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
-                _cur = cs.get(prod, 0)
+                _cur = cur_stock(prod)
                 _d_key = pd.Timestamp(od).normalize() if od else None
                 _proj = fs.get(prod, {}).get(_d_key, _cur) if _d_key else _cur
                 _after = _proj - to_int(qty)
@@ -862,8 +872,8 @@ elif pg == "🏭 製造登録":
             {"　⚠️ <b>資材不足！</b>" if _after_mat < 0 else "　✅ 充足"}
             </div>""", unsafe_allow_html=True)
 
-    if pm and mq and cs.get(pm,0)<=0 and not iadj_m:
-        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cs.get(pm,0)} cs</span> → 製造後: <b>{cs.get(pm,0)+to_int(mq)} cs</b></div>", unsafe_allow_html=True)
+    if pm and mq and cur_stock(pm)<=0 and not iadj_m:
+        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cur_stock(pm)} cs</span> → 製造後: <b>{cur_stock(pm)+to_int(mq)} cs</b></div>", unsafe_allow_html=True)
     st.write("---")
     _mfg_reg_msg = st.empty()
     if st.button("➕ 製造データを記録", type="primary", use_container_width=True):
@@ -880,7 +890,7 @@ elif pg == "🏭 製造登録":
                     "不良廃棄フラグ": False, "日付未定フラグ": False,
                     "登録日時": datetime.now(JST).replace(tzinfo=None)
                 }]))
-                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(pm)}】 -{to_int(mq):,} cs  現在庫: {cs.get(pm,0):,} → {cs.get(pm,0)-to_int(mq):,} cs")
+                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(pm)}】 -{to_int(mq):,} cs  現在庫: {cur_stock(pm):,} → {cur_stock(pm)-to_int(mq):,} cs")
                 st.rerun()
             else:
                 rt = f"{'【リパック】' if irp else ''} {'【資材非連動】' if irp and not ipl else ''} {mr}".strip()
@@ -1461,7 +1471,7 @@ elif pg == "📊 在庫・スケジュール":
             for d in pd.date_range(today, today+timedelta(days=7)):
                 if d_fs.get(d,0)<0:
                     do = odf[(odf["製品名"]==p)&(safe_dt_date(odf["納品予定日"])==d.date())&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
-                    al.append({"日付":format_date_jp(d),"製品名":p,"予測在庫":d_fs.get(d,0),"現在庫":cs.get(p,0),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
+                    al.append({"日付":format_date_jp(d),"製品名":p,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
         if al:
             da = pd.DataFrame(al).drop_duplicates()
             st.dataframe(da.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予測在庫"]), use_container_width=True, hide_index=True)
@@ -1471,9 +1481,15 @@ elif pg == "📊 在庫・スケジュール":
         if mst_fc.empty: st.info("マスタ空")
         else:
             sd = pd.date_range(today, today+timedelta(days=30))
-            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cs.get(r["製品名"],0), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
+            # ★修復：「現在庫」列（本日の営業開始時点＝本日の出荷・製造が未反映）と、
+            # 日付列の「本日」（本日すでに登録された出荷・製造を反映済み）が別の数字になっており、
+            # 同じ画面内で矛盾しているように見えていた（例：出荷だけ登録され製造がまだ未登録の日は、
+            # 現在庫は変わらないのに本日欄だけ大きくマイナスになり、ロジックが壊れて見えた）。
+            # 「現在庫」を cur_stock（＝本日登録済み分まで反映した"今この瞬間"の在庫）に統一し、
+            # 本日の日付列と同じ数字になるようにする（本日欄はそのまま残すので情報は失われない）。
+            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cur_stock(r["製品名"]), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
-            c1, c2 = st.columns([3, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns([3, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開　／　当日分はまだ製造登録前だと一時的にマイナス表示になることがあります（当日夜に製造登録すると自動的に正しい数字に更新されます）</div>', unsafe_allow_html=True)
             if c2.button("🔄 閉じる"): st.session_state.drill_product = None; st.rerun()
             se = st.dataframe(idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else ''), use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
             if se.selection.get("rows"): st.session_state.drill_product = idf.iloc[se.selection.get("rows")[0]]["製品名"]
@@ -1535,7 +1551,7 @@ elif pg == "📊 在庫・スケジュール":
                     k1,k2,k3,k4 = st.columns(4)
                     k1.metric("出荷合計(実出荷・過去1年)",f"{tho:,} cs"); k2.metric("製造合計(実製造・過去1年)",f"{thm:,} cs")
                     k3.metric(_diff_lbl, _diff_val, help="製造合計－出荷合計の差です。マイナス(出荷超過)は期首在庫を取り崩して出荷した分や棚卸補正を含む場合があり、欠品や未出荷を意味するものではありません。")
-                    k4.metric("現在庫",f"{cs.get(dp,0):,} cs")
+                    k4.metric("現在庫",f"{cur_stock(dp):,} cs", help="本日すでに登録済みの出荷・製造分まで反映した、今この瞬間の在庫です。")
                     if _n_adj > 0:
                         st.caption(f"ℹ️ 上の合計には棚卸・在庫調整・不良廃棄などの補正（計{int(_n_adj)}件）は含めていません。下の一覧には区分を付けて含めて表示しています。")
 
@@ -1561,6 +1577,9 @@ elif pg == "📊 在庫・スケジュール":
                         _daym = mh[safe_dt_date(mh["製造予定日"])==d3.date()] if not mh.empty else pd.DataFrame()
                         _g_flow.append(to_int(_daym["ケース数"].apply(to_int).sum() if not _daym.empty else 0) - to_int(_dayo["ケース数"].apply(to_int).sum() if not _dayo.empty else 0))
                     _dtl30 = [d for d in dtl if d["_dt"] <= today + timedelta(days=30)]
+                    # 今日の実績（cur_stock）を必ずグラフに含め、過去と未来の線がつながって見えるようにする
+                    if not (_dtl30 and _dtl30[0]["_dt"] == today):
+                        _g_dates.append(format_date_jp(today)); _g_bal_vals.append(cur_stock(dp)); _g_flow.append(0)
                     for d in _dtl30:
                         _g_dates.append(d["日付"]); _g_bal_vals.append(d["予定在庫"]); _g_flow.append((d["製造(入)"] or 0) - (d["出荷(出)"] or 0))
 
@@ -1599,8 +1618,11 @@ elif pg == "📊 在庫・スケジュール":
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
                                           "数量(±)": _diff_q, "実績在庫": _bal_map.get(r["製造予定日"].normalize(), "")})
                     _rows.sort(key=lambda x: x["_dt"])
-                    _today_marker = [{"_dt": today, "日付": f"── 本日 {format_date_jp(today)} ──", "区分": "", "出荷先/備考": "", "数量(±)": "", "実績在庫": f"{cs.get(dp,0):,}"}]
-                    _future_rows = [{"_dt": d["_dt"], "日付": d["日付"], "区分": "📅 予定", "出荷先/備考": d["出荷先"], "数量(±)": (d["製造(入)"] or 0) - (d["出荷(出)"] or 0), "実績在庫": d["予定在庫"]} for d in dtl]
+                    _today_dtl = next((d for d in dtl if d["_dt"] == today), None)
+                    _today_note = f'本日出荷先: {_today_dtl["出荷先"]}' if (_today_dtl and _today_dtl["出荷先"] not in ("", "―")) else ""
+                    _today_qty = ((_today_dtl["製造(入)"] or 0) - (_today_dtl["出荷(出)"] or 0)) if _today_dtl else ""
+                    _today_marker = [{"_dt": today, "日付": f"── 本日 {format_date_jp(today)} ──", "区分": "", "出荷先/備考": _today_note, "数量(±)": _today_qty, "実績在庫": f"{cur_stock(dp):,}"}]
+                    _future_rows = [{"_dt": d["_dt"], "日付": d["日付"], "区分": "📅 予定", "出荷先/備考": d["出荷先"], "数量(±)": (d["製造(入)"] or 0) - (d["出荷(出)"] or 0), "実績在庫": d["予定在庫"]} for d in dtl if d["_dt"] > today]
                     _combined = _rows + _today_marker + _future_rows
                     if _combined:
                         cdf = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","実績在庫"]]
@@ -1653,7 +1675,7 @@ elif pg == "📊 在庫・スケジュール":
             oy = today-timedelta(days=365)
             poa = odf[(odf["製品名"]==sp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)] if not odf.empty else pd.DataFrame()
             pma = mdf[(mdf["製品名"]==sp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)] if not mdf.empty else pd.DataFrame()
-            k1,k2,k3,k4 = st.columns(4); k1.metric("現在庫",f"{cs.get(sp,0):,} cs"); k2.metric("過去1年 出荷",f"{poa['ケース数'].apply(to_int).sum() if not poa.empty else 0:,} cs"); k3.metric("過去1年 製造",f"{pma['ケース数'].apply(to_int).sum() if not pma.empty else 0:,} cs"); k4.metric("7日以内 欠品日数",f"{sum(1 for d in pd.date_range(today,today+timedelta(days=7)) if fs.get(sp,{}).get(d,0)<0)} 日")
+            k1,k2,k3,k4 = st.columns(4); k1.metric("現在庫",f"{cur_stock(sp):,} cs", help="本日すでに登録済みの出荷・製造分まで反映した、今この瞬間の在庫です。"); k2.metric("過去1年 出荷",f"{poa['ケース数'].apply(to_int).sum() if not poa.empty else 0:,} cs"); k3.metric("過去1年 製造",f"{pma['ケース数'].apply(to_int).sum() if not pma.empty else 0:,} cs"); k4.metric("7日以内 欠品日数",f"{sum(1 for d in pd.date_range(today,today+timedelta(days=7)) if fs.get(sp,{}).get(d,0)<0)} 日")
             # ★修復：st.tabs()のネスト（外側の📊在庫・スケジュールのタブの中に
             # さらにタブを作る）はStreamlit未サポートで、タブ表示が崩れて
             # 全タブが一枚に重なって見えたり操作不能になったりする原因だったため、
@@ -1681,7 +1703,7 @@ elif pg == "📊 在庫・スケジュール":
                 vm3 = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
                 pmf = vm3[(vm3["製品名"]==sp)&(pd.to_datetime(vm3["製造予定日"],errors='coerce')>=pd.Timestamp(today))] if not vm3.empty else pd.DataFrame()
                 fk1,fk2,fk3,fk4 = st.columns(4)
-                fk1.metric("現在庫", f"{cs.get(sp,0):,} cs")
+                fk1.metric("現在庫", f"{cur_stock(sp):,} cs", help="本日すでに登録済みの出荷・製造分まで反映した、今この瞬間の在庫です。")
                 fk2.metric("今後60日 出荷予定", f"{pof['ケース数'].apply(to_int).sum() if not pof.empty else 0:,} cs")
                 fk3.metric("今後60日 製造予定", f"{pmf['ケース数'].apply(to_int).sum() if not pmf.empty else 0:,} cs")
                 fk4.metric("7日以内欠品", f"{sum(1 for d in pd.date_range(today,today+timedelta(days=7)) if fs.get(sp,{}).get(d,0)<0)} 日", delta_color="inverse")
@@ -2946,7 +2968,7 @@ elif pg == "🏗️ 製造スケジューラー":
             st.markdown('<div class="section-title">全製品 在庫ステータス一覧</div>',unsafe_allow_html=True)
             inv_sum=[]
             for pn in prods_n:
-                c_n=cs.get(pn,0); sf=_gpp(pn)["安全在庫数"]
+                c_n=cur_stock(pn); sf=_gpp(pn)["安全在庫数"]
                 mn=min((fs.get(pn,{}).get(d,c_n) for d in pd.date_range(today,today+timedelta(days=30))),default=c_n)
                 inv_sum.append({"製品名":pn,"現在庫(cs)":c_n,"安全在庫(cs)":sf,"30日内最低在庫":mn, "状態":"🔴 欠品リスク" if mn<0 else ("🟡 安全在庫割れ" if mn<sf else "🟢 充足")})
             idf=pd.DataFrame(inv_sum)
