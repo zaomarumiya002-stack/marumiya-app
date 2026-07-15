@@ -355,6 +355,24 @@ def _after_checkpoint_mask(df, cp):
     ev_dt = df["登録日時"].fillna(pd.Timestamp.min)
     return (df["日付"] > cp["日付"]) | ((df["日付"] == cp["日付"]) & (ev_dt > cp_dt))
 
+def _floor_carry_balance(base_qty, ev_df):
+    """過去日を1日ずつ辿って残高を計算し、その日の合計収支を反映した結果
+    残高がマイナスになった場合はその時点で0にクリップしてから翌日へ繰り越す。
+    ★修復：出荷と製造の登録タイミングのズレ等で生じた『過去の一時的なマイナス』を
+    『現在庫』にいつまでも引きずらせないための処理。当日以降（欠品予測）には適用しない。
+    （同日中の入出庫はここで日別に合算されるため、単なる登録順の前後は影響しない。
+    　実際にその日の出庫が入庫を上回って赤字だった日のみクリップの対象になる。）
+    ★修復：以前はこの関数がif not mst_fc.empty:のブロック内でのみ定義されており、
+    製品マスタが空の場合にstock_asof等から参照するとNameErrorになりうる構造だったため、
+    常に定義される場所（モジュールトップレベル）に移動した。"""
+    bal = to_int(base_qty)
+    if ev_df is None or ev_df.empty: return bal
+    daily = ev_df.groupby("日付")["qty"].sum().sort_index()
+    for _, q in daily.items():
+        bal += to_int(q)
+        if bal < 0: bal = 0
+    return bal
+
 if not mst_fc.empty:
     ev_o = odf[["納品予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
@@ -377,21 +395,6 @@ if not mst_fc.empty:
             last = g.iloc[-1]
             checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"])}
     ae = ae[~_tz_mask].copy()  # チェックポイント自体は実数へ統合済みなので、以後の流量計算からは除外
-
-    def _floor_carry_balance(base_qty, ev_df):
-        """過去日を1日ずつ辿って残高を計算し、その日の合計収支を反映した結果
-        残高がマイナスになった場合はその時点で0にクリップしてから翌日へ繰り越す。
-        ★修復：出荷と製造の登録タイミングのズレ等で生じた『過去の一時的なマイナス』を
-        『現在庫』にいつまでも引きずらせないための処理。当日以降（欠品予測）には適用しない。
-        （同日中の入出庫はここで日別に合算されるため、単なる登録順の前後は影響しない。
-        　実際にその日の出庫が入庫を上回って赤字だった日のみクリップの対象になる。）"""
-        bal = to_int(base_qty)
-        if ev_df is None or ev_df.empty: return bal
-        daily = ev_df.groupby("日付")["qty"].sum().sort_index()
-        for _, q in daily.items():
-            bal += to_int(q)
-            if bal < 0: bal = 0
-        return bal
 
     pe_ev = ae[ae["日付"] < today]
     for _, r in mst_fc.iterrows():
@@ -433,7 +436,13 @@ def cur_stock(p):
 
 def stock_asof(p, asof_date):
     """指定日の「開始時点」（その日の入出庫が反映される前）の計算上在庫を返す。
-    棚卸チェックポイントがあればそこを基準に、なければ初期在庫数を基準にする。"""
+    棚卸チェックポイントがあればそこを基準に、なければ初期在庫数を基準にする。
+    ★修復：以前はここだけ「単純な合計」で残高を出していたため、本来の在庫計算エンジン
+    （cs/fs、_floor_carry_balance＝日毎に一時的なマイナスを0に丸めながら積み上げる方式）と
+    計算方法が異なっていた。過去に一時的なマイナス（例：出荷は登録済みだがその日の製造登録が
+    まだ、というタイミングのズレ）が一度でもあると、この関数だけ実際より大きくマイナス／プラスに
+    ズレた値を返してしまい、「過去の実績推移」と「現在庫・本日の予測」が食い違って見える原因になっていた。
+    以後は必ず_floor_carry_balanceと同じ計算方法を使い、アプリ内のどの画面で見ても同じ値になるようにする。"""
     asof_ts = pd.Timestamp(asof_date).normalize()
     cp = checkpoints.get(p)
     if cp and cp["日付"] <= asof_ts:
@@ -442,7 +451,7 @@ def stock_asof(p, asof_date):
         base_qty = to_int(mst_u[mst_u["製品名"] == p]["初期在庫数"].iloc[0]) if (not mst_u.empty and p in mst_u["製品名"].values) else 0
         cp = None
     ev = ae[(ae["製品名"] == p) & (ae["日付"] < asof_ts) & _after_checkpoint_mask(ae, cp)]
-    return base_qty + to_int(ev["qty"].sum())
+    return _floor_carry_balance(base_qty, ev[["日付","qty"]])
 
 # ▼▼▼ 資材の予測・発注残・統計計算エンジン ▼▼▼
 # ★修復：以前は資材の消費予定日を「受注の納品予定日（＝出荷日）」でそのまま計上していたが、
