@@ -1495,11 +1495,47 @@ elif pg == "📊 在庫・スケジュール":
                 mh_real = mh[~mh["備考"].apply(_is_adjustment)] if not mh.empty else mh
                 _n_adj = (ph["備考"].apply(_is_adjustment).sum() if not ph.empty else 0) + (mh["備考"].apply(_is_adjustment).sum() if not mh.empty else 0)
 
-                with st.expander("📜 過去1年実績 ＋ 📅 今後60日間の予定（まとめて確認）", expanded=True):
+                # ★追加：棚卸・在庫調整の行は「数量(±)」だけ見ても実数との関係が分かりにくかったため
+                # （例：実数34枚で登録しても、システム計算と一致していれば差分は0枚と表示され「34枚と0枚」の
+                # 因果関係が読み取れなかった）、実数と差分の関係が一目で分かる文言に組み立て直す。
+                def _adjustment_note(note, diff):
+                    m = re.search(r"棚卸確定:(-?\d+)", str(note))
+                    if m:
+                        jissu = int(m.group(1))
+                        if diff == 0: return f"📋 棚卸確認：実数{jissu:,}枚（システム計算と一致・補正なし）"
+                        return f"📋 棚卸補正：実数{jissu:,}枚（システム計算との差分 {diff:+,}枚を補正）"
+                    if "【不良廃棄】" in str(note): return f"🗑️ 不良廃棄：{note}"
+                    if "【在庫調整" in str(note): return f"🔧 手動在庫調整：{note}"
+                    return str(note)
+
+                # ★追加：過去の在庫推移（実績在庫）を、棚卸チェックポイントを正しく踏まえて日次で算出する
+                def _daily_balance_walk(p, start_d, end_d):
+                    bal = stock_asof(p, start_d)
+                    cp = checkpoints.get(p)
+                    _pmask = ae["製品名"] == p
+                    out = {}
+                    for d in pd.date_range(start_d, end_d):
+                        day_ev = ae[_pmask & (ae["日付"] == d)]
+                        if cp and cp["日付"] == d:
+                            after = day_ev[_after_checkpoint_mask(day_ev, cp)]
+                            bal = cp["実数"] + to_int(after["qty"].sum())
+                        else:
+                            bal += to_int(day_ev["qty"].sum())
+                            if d < today and bal < 0: bal = 0
+                        out[d.normalize()] = bal
+                    return out
+
+                with st.expander("📜 実績（過去）＋ 📅 予定（今後）をまとめて確認", expanded=True):
                     tho = ph_real["ケース数"].apply(to_int).sum() if not ph_real.empty else 0
                     thm = mh_real["ケース数"].apply(to_int).sum() if not mh_real.empty else 0
+                    _diff = thm - tho
+                    if _diff > 0: _diff_lbl, _diff_val = "📈 製造超過(実績)", f"+{_diff:,} cs"
+                    elif _diff < 0: _diff_lbl, _diff_val = "📉 出荷超過(実績)", f"{_diff:,} cs"
+                    else: _diff_lbl, _diff_val = "⚖️ 均衡(実績)", "0 cs"
                     k1,k2,k3,k4 = st.columns(4)
-                    k1.metric("出荷合計(実出荷)",f"{tho:,} cs"); k2.metric("製造合計(実製造)",f"{thm:,} cs"); k3.metric("差引(実績)",f"{thm-tho:+,} cs"); k4.metric("現在庫",f"{cs.get(dp,0):,} cs")
+                    k1.metric("出荷合計(実出荷・過去1年)",f"{tho:,} cs"); k2.metric("製造合計(実製造・過去1年)",f"{thm:,} cs")
+                    k3.metric(_diff_lbl, _diff_val, help="製造合計－出荷合計の差です。マイナス(出荷超過)は期首在庫を取り崩して出荷した分や棚卸補正を含む場合があり、欠品や未出荷を意味するものではありません。")
+                    k4.metric("現在庫",f"{cs.get(dp,0):,} cs")
                     if _n_adj > 0:
                         st.caption(f"ℹ️ 上の合計には棚卸・在庫調整・不良廃棄などの補正（計{int(_n_adj)}件）は含めていません。下の一覧には区分を付けて含めて表示しています。")
 
@@ -1513,42 +1549,71 @@ elif pg == "📊 在庫・スケジュール":
                         dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                         iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
                         ts += (iq-oq)
-                        if iq>0 or oq>0 or ts<0: dtl.append({"日付":format_date_jp(d2),"出荷先":cust if cust else "―","製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
+                        if iq>0 or oq>0 or ts<0: dtl.append({"_dt":d2,"日付":format_date_jp(d2),"出荷先":cust if cust else "―","製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
 
-                    if dtl:
-                        dfd = pd.DataFrame(dtl)
+                    # ★修復：グラフは過去30日の実績推移＋今後30日の予定推移を表示（以前は予定のみだった）
+                    _g_past_start = today - timedelta(days=30)
+                    _g_bal = _daily_balance_walk(dp, _g_past_start, today - timedelta(days=1))
+                    _g_dates, _g_bal_vals, _g_flow = [], [], []
+                    for d3 in pd.date_range(_g_past_start, today - timedelta(days=1)):
+                        _g_dates.append(format_date_jp(d3)); _g_bal_vals.append(_g_bal.get(d3.normalize(),0))
+                        _dayo = ph[safe_dt_date(ph["納品予定日"])==d3.date()] if not ph.empty else pd.DataFrame()
+                        _daym = mh[safe_dt_date(mh["製造予定日"])==d3.date()] if not mh.empty else pd.DataFrame()
+                        _g_flow.append(to_int(_daym["ケース数"].apply(to_int).sum() if not _daym.empty else 0) - to_int(_dayo["ケース数"].apply(to_int).sum() if not _dayo.empty else 0))
+                    _dtl30 = [d for d in dtl if d["_dt"] <= today + timedelta(days=30)]
+                    for d in _dtl30:
+                        _g_dates.append(d["日付"]); _g_bal_vals.append(d["予定在庫"]); _g_flow.append((d["製造(入)"] or 0) - (d["出荷(出)"] or 0))
+
+                    if _g_dates:
                         fig = go.Figure()
-                        fig.add_trace(go.Bar(x=dfd["日付"],y=[r["製造(入)"] if r["製造(入)"]!="" else 0 for _,r in dfd.iterrows()],name="製造",marker_color="#10B981"))
-                        fig.add_trace(go.Bar(x=dfd["日付"],y=[-(r["出荷(出)"] if r["出荷(出)"]!="" else 0) for _,r in dfd.iterrows()],name="出荷",marker_color="#F43F5E"))
-                        fig.add_trace(go.Scatter(x=dfd["日付"],y=dfd["予定在庫"],name="予定在庫",mode="lines+markers",line=dict(color="#2563EB",width=2.5)))
-                        fig.update_layout(title="今後60日間の予定推移",barmode="relative",hovermode="x unified",margin=dict(l=10,r=10,t=30,b=10),height=280); st.plotly_chart(fig, use_container_width=True)
+                        fig.add_trace(go.Bar(x=_g_dates, y=_g_flow, name="製造(入)/出荷(出)", marker_color=["#10B981" if v>=0 else "#F43F5E" for v in _g_flow]))
+                        fig.add_trace(go.Scatter(x=_g_dates, y=_g_bal_vals, name="在庫(実績/予定)", mode="lines+markers", line=dict(color="#2563EB",width=2.5)))
+                        add_today_vline(fig, format_date_jp(today), color="#94A3B8", text="今日")
+                        fig.update_layout(title="過去30日実績 〜 今後30日予定 在庫推移",barmode="relative",hovermode="x unified",margin=dict(l=10,r=10,t=30,b=10),height=280); st.plotly_chart(fig, use_container_width=True)
 
                     # ★修復：過去の出荷履歴／製造履歴／今後のスケジュールが別々の場所に分かれていて
                     # 過去と未来を一緒に見比べにくかったため、1つの時系列表にまとめる。
+                    # ★追加：表の初期表示位置が毎回「1年前」になりスクロールが大変だったため、
+                    # 表示する過去期間を選べるようにし、初期値は直近30日（＝本日がすぐ見える範囲）にする。
+                    _period_opt = st.radio("表示する過去期間", ["過去30日","過去90日","過去1年"], horizontal=True, key=f"drill_period_{dp}", index=0)
+                    _period_days = {"過去30日":30, "過去90日":90, "過去1年":365}[_period_opt]
+                    _win_start = today - timedelta(days=_period_days)
+                    ph_win = ph[pd.to_datetime(ph["納品予定日"],errors='coerce')>=_win_start] if not ph.empty else ph
+                    mh_win = mh[pd.to_datetime(mh["製造予定日"],errors='coerce')>=_win_start] if not mh.empty else mh
+                    _bal_map = _daily_balance_walk(dp, _win_start, today - timedelta(days=1)) if _win_start < today else {}
+
                     _rows = []
-                    if not ph.empty:
-                        for _, r in ph.sort_values("納品予定日").iterrows():
+                    if not ph_win.empty:
+                        for _, r in ph_win.sort_values("納品予定日").iterrows():
                             _note = str(r.get("備考",""))
+                            _diff_q = -to_int(r.get("ケース数",0))
                             _rows.append({"_dt": r["納品予定日"], "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else "🚚 出荷(実績)",
-                                          "出荷先/備考": f'{r.get("顧客名","")} {_note}'.strip(), "数量(±)": -to_int(r.get("ケース数",0))})
-                    if not mh.empty:
-                        for _, r in mh.sort_values("製造予定日").iterrows():
+                                          "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else f'{r.get("顧客名","")} {_note}'.strip(),
+                                          "数量(±)": _diff_q, "実績在庫": _bal_map.get(r["納品予定日"].normalize(), "")})
+                    if not mh_win.empty:
+                        for _, r in mh_win.sort_values("製造予定日").iterrows():
                             _note = str(r.get("備考",""))
+                            _diff_q = to_int(r.get("ケース数",0))
                             _kubun = "📊 補正" if _is_adjustment(_note) else ("🏭 製造(在庫非反映)" if "【在庫非反映】" in _note else "🏭 製造(実績)")
                             _rows.append({"_dt": r["製造予定日"], "日付": format_date_jp(r["製造予定日"]), "区分": _kubun,
-                                          "出荷先/備考": _note, "数量(±)": to_int(r.get("ケース数",0))})
+                                          "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
+                                          "数量(±)": _diff_q, "実績在庫": _bal_map.get(r["製造予定日"].normalize(), "")})
                     _rows.sort(key=lambda x: x["_dt"])
-                    _today_marker = [{"_dt": today, "日付": f"── 本日 {format_date_jp(today)} ──", "区分": "", "出荷先/備考": "", "数量(±)": "", "予定在庫": f"{cs.get(dp,0):,}"}]
-                    _future_rows = [{"_dt": None, "日付": d["日付"], "区分": "📅 予定", "出荷先/備考": d["出荷先"], "数量(±)": (d["製造(入)"] or 0) - (d["出荷(出)"] or 0), "予定在庫": d["予定在庫"]} for d in dtl]
-                    _combined = [{**r, "予定在庫": ""} for r in _rows] + _today_marker + _future_rows
+                    _today_marker = [{"_dt": today, "日付": f"── 本日 {format_date_jp(today)} ──", "区分": "", "出荷先/備考": "", "数量(±)": "", "実績在庫": f"{cs.get(dp,0):,}"}]
+                    _future_rows = [{"_dt": d["_dt"], "日付": d["日付"], "区分": "📅 予定", "出荷先/備考": d["出荷先"], "数量(±)": (d["製造(入)"] or 0) - (d["出荷(出)"] or 0), "実績在庫": d["予定在庫"]} for d in dtl]
+                    _combined = _rows + _today_marker + _future_rows
                     if _combined:
-                        cdf = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","予定在庫"]]
+                        cdf = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","実績在庫"]]
                         def _row_style(r):
                             if str(r["日付"]).startswith("── 本日"): return ['background-color:#EFF6FF;font-weight:900;color:#1E40AF;']*len(r)
                             if "補正" in str(r["区分"]): return ['background-color:#F8FAFC;color:#64748B;']*len(r)
-                            if isinstance(r.get("予定在庫"),(int,float)) and r.get("予定在庫")!="" and r.get("予定在庫")<0: return ['color:#DC2626;font-weight:bold;']*len(r)
+                            if isinstance(r.get("実績在庫"),(int,float)) and r.get("実績在庫")!="" and r.get("実績在庫")<0: return ['color:#DC2626;font-weight:bold;']*len(r)
                             return ['']*len(r)
-                        st.dataframe(cdf.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=450)
+                        # ★修復：本日の行が初期表示位置になるよう、表の高さを「本日行が最初の画面内に収まる」目安に調整
+                        _today_row_idx = len(_rows)
+                        _h = min(600, max(320, (_today_row_idx + 12) * 36))
+                        st.dataframe(cdf.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=_h)
+                        st.caption("💡「表示する過去期間」を短くすると、本日の行までのスクロール量が少なくなります（初期値：過去30日）。")
                     else:
                         st.info("履歴・予定なし")
                 st.markdown('</div>', unsafe_allow_html=True)
