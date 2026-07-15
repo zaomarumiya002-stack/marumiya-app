@@ -402,17 +402,25 @@ if not mst_fc.empty:
         _pmask = ae["製品名"] == p
         if cp:
             # 棚卸チェックポイントあり：その実数を基準に、棚卸登録より後の増減を積み上げる。
-            # ★修復：以前は「日付 < today」で絞っていたため、棚卸を"今日"登録した場合
+            # ★修復（1）：以前は「日付 < today」で絞っていたため、棚卸を"今日"登録した場合
             # （最もよくあるケース）に条件が自己矛盾して常に空集合になり、
             #   ①今日中に棚卸登録より後に入った出荷・製造が現在庫に反映されない
             #   ②それでいて下の「今後の予測」側は棚卸を考慮せず今日の増減を全部足すため、
             #     棚卸登録より前に済んでいた今日分の出荷・製造が二重計上される
             # という2つの不整合が生じ、「棚卸で合わせた直後にまたずれる」原因になっていた。
-            # 今回、棚卸以降の増減は当日分も含めて"今この瞬間の実在庫"として積み上げ、
-            # 今後の予測（fs）側では同じ当日分を二重に足さないよう「今日より後」だけを使う。
-            _after_all = ae[_pmask & _after_checkpoint_mask(ae, cp)]
-            c_s = _floor_carry_balance(cp["実数"], _after_all[_after_all["日付"] <= today][["日付","qty"]])
-            _future_ev = _after_all[_after_all["日付"] > today]
+            # ★修復（2）：（1）の直し方が「今日まで」を含めてクリップする形だったため、今度は
+            # 当日の一時的なマイナス（出荷は登録済みだがその日の製造登録がまだ、というだけの状態）まで
+            # 0に丸められてしまい、さらに下の「今後60日間スケジュール」側は別ロジックで独立に
+            # cs（＝本日開始時点の在庫）から歩き出す実装だったため、丸められた当日分がもう一度
+            # 加算されて翌日以降の在庫がどんどん本来よりズレていく不具合になっていた
+            # （例：本日-139の一時マイナスが0に丸められた後、翌日の-25がそこにさらに乗って-164に
+            # なるなど、本来の-31から大きく外れる）。
+            # 「クリップは過去日(today未満)のみ・当日以降はそのまま積む」という、チェックポイント無しの
+            # 場合と全く同じ方針に統一し、cs（現在庫の起点）を常に"本日開始時点"の値にする。
+            after_mask = _after_checkpoint_mask(ae, cp)
+            _after_all = ae[_pmask & after_mask]
+            c_s = _floor_carry_balance(cp["実数"], _after_all[_after_all["日付"] < today][["日付","qty"]])
+            _future_ev = _after_all[_after_all["日付"] >= today]
         else:
             # チェックポイントなし：初期在庫数を基準に、過去の一時的なマイナスは日毎に0クリップしながら積み上げる
             _pev = pe_ev[_pmask]
@@ -1573,7 +1581,11 @@ elif pg == "📊 在庫・スケジュール":
                         cust = " / ".join(do["顧客名"].dropna().astype(str).unique()) if not do.empty else ""
                         dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                         iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
-                        ts += (iq-oq)
+                        # ★修復：当日分は棚卸チェックポイントを正しく踏まえたcur_stock()をそのまま使う。
+                        # （ここで独自にts+=(iq-oq)してしまうと、棚卸のタイミング次第で当日分が二重に
+                        # 計算され、翌日以降の「予定在庫」がズレていく問題があった）
+                        if d2.normalize() == today: ts = cur_stock(dp)
+                        else: ts += (iq-oq)
                         if iq>0 or oq>0 or ts<0: dtl.append({"_dt":d2,"日付":format_date_jp(d2),"出荷先":cust if cust else "―","製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
 
                     # ★修復：グラフは過去30日の実績推移＋今後30日の予定推移を表示（以前は予定のみだった）
@@ -1723,7 +1735,9 @@ elif pg == "📊 在庫・スケジュール":
                     oq2 = to_int(do2["ケース数"].sum()) if not do2.empty else 0
                     dm2 = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                     iq2 = to_int(dm2["ケース数"].sum()) if not dm2.empty else 0
-                    ts2_ += (iq2 - oq2)
+                    # ★修復：当日分は棚卸チェックポイントを正しく踏まえたcur_stock()をそのまま使う（二重計算防止）
+                    if d2.normalize() == today: ts2_ = cur_stock(sp)
+                    else: ts2_ += (iq2 - oq2)
                     if iq2>0 or oq2>0 or ts2_<0:
                         cust = " / ".join(do2["顧客名"].dropna().astype(str).unique()) if not do2.empty else ""
                         dtl.append({"日付":format_date_jp(d2),"顧客":cust,"製造(入)":iq2 or "","出荷(出)":oq2 or "","予定在庫":ts2_})
