@@ -1498,143 +1498,18 @@ elif pg == "📊 在庫・スケジュール":
         if mst_fc.empty: st.info("マスタ空")
         else:
             sd = pd.date_range(today, today+timedelta(days=30))
-            # ============================================================================
-            # ★UI改善（在庫計算ロジック・データ構造は一切変更なし。表示のための追加集計のみ）
-            #   ①今日・今週の危険商品ダッシュボード　②危険度による色分け　③今日列の強調
-            #   ④在庫日数列の追加　⑤フィルター機能
-            # 以下はすべて既存の cur_stock() / fs / cs / mst_fc（在庫計算エンジン）を「参照」するだけで、
-            # これらの計算そのものには一切手を加えていない。
-            # ============================================================================
-            _ui_adj_tags = ["【棚卸確定", "【不良廃棄】", "【在庫調整+】", "【在庫調整-】"]
-            def _ui_is_adj(note): return any(t in str(note) for t in _ui_adj_tags)
-
-            # --- 改善④用：平均日販（過去30日の実出荷実績、棚卸・在庫調整・不良廃棄は除く）---
-            _avg_start = today - timedelta(days=30)
-            _avg_daily_map = {}
-            if not odf.empty:
-                _recent_o = odf[(pd.to_datetime(odf["納品予定日"],errors='coerce')>=_avg_start) & (pd.to_datetime(odf["納品予定日"],errors='coerce')<today)]
-                if not _recent_o.empty:
-                    _recent_o = _recent_o[~_recent_o["備考"].apply(_ui_is_adj)]
-                    if not _recent_o.empty:
-                        _avg_daily_map = (_recent_o["ケース数"].apply(to_int).groupby(_recent_o["製品名"]).sum() / 30.0).to_dict()
-
-            def _stock_days(stock, avg):
-                if stock <= 0: return 0
-                if avg and avg > 0: return int(stock // avg)
-                return "－"
-
-            # --- ①②③⑤共通：製品ごとの「在庫切れまでの日数」「本日出荷有無」「製造予定有無」---
-            _safety_map = mst_fc.set_index("製品名")["安全在庫数"].apply(to_int).to_dict() if "安全在庫数" in mst_fc.columns else {}
-            _days_to_out = {}
-            for _, r in mst_fc.iterrows():
-                _p = r["製品名"]; _dto = None
-                for _i, _d in enumerate(sd):
-                    if fs.get(_p,{}).get(_d,0) < 0: _dto = _i; break
-                _days_to_out[_p] = _dto
-            _o_today = odf[(pd.to_datetime(odf["納品予定日"],errors='coerce')==today)] if not odf.empty else pd.DataFrame()
-            _o_today_real = _o_today[~_o_today["備考"].apply(_ui_is_adj)] if not _o_today.empty else _o_today
-            _has_ship_today = set(_o_today_real["製品名"].astype(str)) if not _o_today_real.empty else set()
-            _m_future = mdf[(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=today)] if not mdf.empty else pd.DataFrame()
-            _m_future_real = _m_future[~_m_future["備考"].fillna("").str.contains("【在庫非反映】")] if not _m_future.empty else _m_future
-            _has_mfg_future = set(_m_future_real["製品名"].astype(str)) if not _m_future_real.empty else set()
-            _m_today_real = _m_future_real[pd.to_datetime(_m_future_real["製造予定日"],errors='coerce')==today] if not _m_future_real.empty else _m_future_real
-
-            n_today_out = sum(1 for p in mst_fc["製品名"] if cur_stock(p) <= 0)
-            n_week_out = sum(1 for d in _days_to_out.values() if d is not None and d <= 7)
-            n_ship_today = len(_o_today_real)
-            n_mfg_today = len(_m_today_real)
-            n_need_restock = sum(1 for p in mst_fc["製品名"] if cur_stock(p) <= max(0, _safety_map.get(p,0)))
-
-            # --- ①今日・今週の危険商品ダッシュボード ---
-            st.markdown("""<style>
-            .ivcard{border-radius:14px;padding:16px 14px;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,0.06);}
-            .ivcard .ivl{font-size:14px;font-weight:700;margin-bottom:6px;}
-            .ivcard .ivn{font-size:28px;font-weight:900;line-height:1.15;}
-            </style>""", unsafe_allow_html=True)
-            dc1,dc2,dc3,dc4,dc5 = st.columns(5)
-            for _col,_lbl,_val,_bg,_fg in [
-                (dc1, "🚨 今日不足", f"{n_today_out}商品", "#FEF2F2", "#DC2626"),
-                (dc2, "⚠️ 今週不足予定", f"{n_week_out}商品", "#FFFBEB", "#D97706"),
-                (dc3, "🚚 今日出荷", f"{n_ship_today}件", "#EFF6FF", "#2563EB"),
-                (dc4, "🏭 今日製造", f"{n_mfg_today}件", "#F0FDF4", "#059669"),
-                (dc5, "📦 要補充", f"{n_need_restock}商品", "#FFF7ED", "#EA580C"),
-            ]:
-                _col.markdown(f'<div class="ivcard" style="background:{_bg};border:1.5px solid {_fg}33;"><div class="ivl" style="color:{_fg};">{_lbl}</div><div class="ivn" style="color:{_fg};">{_val}</div></div>', unsafe_allow_html=True)
-            st.write("")
-
-            # --- ⑤フィルター機能（複数選択可・組み合わせ可）---
-            st.markdown('<div style="font-size:14px;font-weight:700;color:#334155;margin:4px 0;">🔍 フィルター（複数選択可）</div>', unsafe_allow_html=True)
-            fc1,fc2,fc3,fc4,fc5 = st.columns(5)
-            f_out = fc1.checkbox("🚨 不足商品のみ", key="ui_f_out")
-            f_ship = fc2.checkbox("🚚 今日出荷あり", key="ui_f_ship")
-            f_week = fc3.checkbox("⚠️ 今週不足", key="ui_f_week")
-            f_mfg = fc4.checkbox("🏭 製造予定あり", key="ui_f_mfg")
-            f_low = fc5.checkbox("📉 在庫100以下", key="ui_f_low")
-            st.write("")
-
             # ★修復：「現在庫」列（本日の営業開始時点＝本日の出荷・製造が未反映）と、
             # 日付列の「本日」（本日すでに登録された出荷・製造を反映済み）が別の数字になっており、
             # 同じ画面内で矛盾しているように見えていた（例：出荷だけ登録され製造がまだ未登録の日は、
             # 現在庫は変わらないのに本日欄だけ大きくマイナスになり、ロジックが壊れて見えた）。
             # 「現在庫」を cur_stock（＝本日登録済み分まで反映した"今この瞬間"の在庫）に統一し、
             # 本日の日付列と同じ数字になるようにする（本日欄はそのまま残すので情報は失われない）。
-            # ★改善④：現在庫の右隣に「在庫日数」列を追加（現在庫÷平均日販、小数点切り捨て）。
-            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cur_stock(r["製品名"]),
-                   "在庫日数":_stock_days(cur_stock(r["製品名"]), _avg_daily_map.get(r["製品名"],0)),
-                   **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
+            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cur_stock(r["製品名"]), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
-
-            # フィルター適用（表示専用のコピーに対してのみ行う。idf自体・在庫計算には一切影響しない）
-            idf_disp = idf.copy()
-            if f_out: idf_disp = idf_disp[idf_disp["現在庫"] <= 0]
-            if f_ship: idf_disp = idf_disp[idf_disp["製品名"].isin(_has_ship_today)]
-            if f_week: idf_disp = idf_disp[idf_disp["製品名"].map(lambda p: (_days_to_out.get(p) is not None) and _days_to_out.get(p) <= 7)]
-            if f_mfg: idf_disp = idf_disp[idf_disp["製品名"].isin(_has_mfg_future)]
-            if f_low: idf_disp = idf_disp[idf_disp["現在庫"] <= 100]
-            idf_disp = idf_disp.reset_index(drop=True)
-
-            c1, c2 = st.columns([3, 1]); c1.markdown(f'<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開　／　当日分はまだ製造登録前だと一時的にマイナス表示になることがあります（当日夜に製造登録すると自動的に正しい数字に更新されます）　／　表示中 {len(idf_disp)}/{len(idf)} 商品</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns([3, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開　／　当日分はまだ製造登録前だと一時的にマイナス表示になることがあります（当日夜に製造登録すると自動的に正しい数字に更新されます）</div>', unsafe_allow_html=True)
             if c2.button("🔄 閉じる"): st.session_state.drill_product = None; st.rerun()
-
-            # --- ②危険度による色分け（在庫十分=白／5日以内=薄黄／3日以内=薄オレンジ／0以下=赤／製造で回復する日=薄青）---
-            # --- ④在庫日数セルの色分け（5日以下=黄／3日以下=オレンジ／0日以下=赤）も同じ関数内で適用 ---
-            _today_col = format_date_jp(today)
-            _date_cols = [format_date_jp(d) for d in sd]
-            _mfg_days_map = {}
-            if not mdf.empty:
-                _vm2 = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")]
-                for _p, _g in _vm2.groupby("製品名"):
-                    _mfg_days_map[_p] = set(pd.to_datetime(_g["製造予定日"], errors='coerce').dt.normalize().dropna())
-
-            def _cell_style(row):
-                styles = pd.Series('', index=row.index)
-                p = row["製品名"]; dto = _days_to_out.get(p)
-                if dto is not None and dto <= 3: base = 'background-color:#FFEDD5;'   # 薄オレンジ（3日以内に不足予定）
-                elif dto is not None and dto <= 5: base = 'background-color:#FEF9C3;' # 薄黄色（5日以内に不足予定）
-                else: base = ''                                                        # 在庫十分＝白
-                for col in row.index: styles[col] = base
-                mfg_dates = _mfg_days_map.get(p, set())
-                for i, d in enumerate(sd):
-                    col = _date_cols[i]; v = row.get(col)
-                    if not isinstance(v, (int, float, np.integer, np.floating)): continue
-                    if v <= 0: styles[col] = 'background-color:#DC2626;color:white;font-weight:900;'      # 在庫0以下
-                    elif d.normalize() in mfg_dates: styles[col] = 'background-color:#DBEAFE;'             # 製造予定で回復する日
-                if isinstance(row.get("現在庫"), (int, float, np.integer, np.floating)) and row.get("現在庫") <= 0:
-                    styles["現在庫"] = 'background-color:#DC2626;color:white;font-weight:900;'
-                sday = row.get("在庫日数")
-                if isinstance(sday, (int, float, np.integer, np.floating)):
-                    if sday <= 0: styles["在庫日数"] = 'background-color:#DC2626;color:white;font-weight:900;'
-                    elif sday <= 3: styles["在庫日数"] = 'background-color:#FED7AA;font-weight:700;'
-                    elif sday <= 5: styles["在庫日数"] = 'background-color:#FEF08A;font-weight:700;'
-                return styles
-
-            sty = idf_disp.style.apply(_cell_style, axis=1)
-            # --- ③今日の列を強調（背景ではなく枠線にすることで、上の危険度色分けと衝突・打ち消し合わない）---
-            if _today_col in idf_disp.columns:
-                sty = sty.set_properties(subset=[_today_col], **{'border-left': '3px solid #0EA5E9', 'border-right': '3px solid #0EA5E9'})
-
-            se = st.dataframe(sty, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
-            if se.selection.get("rows"): st.session_state.drill_product = idf_disp.iloc[se.selection.get("rows")[0]]["製品名"]
+            se = st.dataframe(idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else ''), use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
+            if se.selection.get("rows"): st.session_state.drill_product = idf.iloc[se.selection.get("rows")[0]]["製品名"]
 
             dp = st.session_state.drill_product
             if dp:
