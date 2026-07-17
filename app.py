@@ -299,7 +299,13 @@ def pui(pn):
 def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
-today = pd.Timestamp.today().normalize(); dates = pd.date_range(today, today + timedelta(days=60))
+# ★修復：「today」はサーバーの実行環境時刻（pd.Timestamp.today()）のままだと、デプロイ環境によっては
+# JST（登録日時＝datetime.now(JST)で保存）と異なるタイムゾーンになり得る。そのズレが起きている間は
+# 「今日」の境界そのものが本来のJSTの日付と1日ずれてしまい、在庫計算エンジン（cs/fs/棚卸チェックポイント
+# の前後判定など）が本日の出荷・製造イベントを「過去」または「未来」に誤って分類し、
+# 現在庫や翌日以降の予測在庫が実際の出荷・製造と食い違って見える（原因不明の増減）不具合につながる。
+# 登録日時と同じ基準（JST）で「今日」を確定させることで、この種のズレの発生源を断つ。
+today = pd.Timestamp(datetime.now(JST).replace(tzinfo=None)).normalize(); dates = pd.date_range(today, today + timedelta(days=60))
 cs = {}; fs = {}
 mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(
     columns=["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日",
