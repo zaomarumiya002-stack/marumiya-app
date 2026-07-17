@@ -1626,24 +1626,49 @@ elif pg == "📊 在庫・スケジュール":
                     _win_start = today - timedelta(days=_period_days)
                     ph_win = ph[pd.to_datetime(ph["納品予定日"],errors='coerce')>=_win_start] if not ph.empty else ph
                     mh_win = mh[pd.to_datetime(mh["製造予定日"],errors='coerce')>=_win_start] if not mh.empty else mh
-                    _bal_map = _daily_balance_walk(dp, _win_start, today - timedelta(days=1)) if _win_start < today else {}
+
+                    # ★修復：以前は同じ日に複数の出荷・製造があっても、全ての行に「その日の日末残高」を
+                    # 一律に表示していたため（例：7/6に製造+36、出荷-10・-7があっても3行とも同じ数字）、
+                    # 「29－17＝12のはず」のような1行ごとの実際の増減がテーブル上で追えなかった。
+                    # ここでは日付→登録日時の順に取引を並べ、1件ずつ積み上げて「その取引が終わった
+                    # 直後」の実績在庫を行ごとに計算する。日をまたぐ際は、現在庫・在庫予測エンジン
+                    # （cs/fs／_floor_carry_balance）と同じ基準に揃えるため、過去日の日末残高が
+                    # マイナスの場合のみ0に丸めてから翌日へ繰り越す（＝日中の実数はそのまま見せつつ、
+                    # 日をまたぐ繰越値だけ他画面と一致させる）。
+                    _ev_list = []
+                    if not ph_win.empty:
+                        for _idx, r in ph_win.iterrows():
+                            _ev_list.append({"key": ("o", _idx), "_dt": r["納品予定日"], "_reg": r.get("登録日時"), "qty": -to_int(r.get("ケース数", 0))})
+                    if not mh_win.empty:
+                        for _idx, r in mh_win.iterrows():
+                            _ev_list.append({"key": ("m", _idx), "_dt": r["製造予定日"], "_reg": r.get("登録日時"), "qty": to_int(r.get("ケース数", 0))})
+                    _ev_list.sort(key=lambda e: (e["_dt"], e["_reg"] if pd.notna(e["_reg"]) else pd.Timestamp.min))
+
+                    _row_balance = {}
+                    _wbal = stock_asof(dp, _win_start); _wday = None
+                    for _e in _ev_list:
+                        _d = _e["_dt"].normalize()
+                        if _wday is not None and _d != _wday and _wday < today and _wbal < 0: _wbal = 0
+                        _wday = _d
+                        _wbal += to_int(_e["qty"])
+                        _row_balance[_e["key"]] = _wbal
 
                     _rows = []
                     if not ph_win.empty:
-                        for _, r in ph_win.sort_values("納品予定日").iterrows():
+                        for _idx, r in ph_win.sort_values("納品予定日").iterrows():
                             _note = str(r.get("備考",""))
                             _diff_q = -to_int(r.get("ケース数",0))
                             _rows.append({"_dt": r["納品予定日"], "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else "🚚 出荷(実績)",
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else f'{r.get("顧客名","")} {_note}'.strip(),
-                                          "数量(±)": _diff_q, "実績在庫": _bal_map.get(r["納品予定日"].normalize(), "")})
+                                          "数量(±)": _diff_q, "実績在庫": _row_balance.get(("o", _idx), "")})
                     if not mh_win.empty:
-                        for _, r in mh_win.sort_values("製造予定日").iterrows():
+                        for _idx, r in mh_win.sort_values("製造予定日").iterrows():
                             _note = str(r.get("備考",""))
                             _diff_q = to_int(r.get("ケース数",0))
                             _kubun = "📊 補正" if _is_adjustment(_note) else ("🏭 製造(在庫非反映)" if "【在庫非反映】" in _note else "🏭 製造(実績)")
                             _rows.append({"_dt": r["製造予定日"], "日付": format_date_jp(r["製造予定日"]), "区分": _kubun,
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
-                                          "数量(±)": _diff_q, "実績在庫": _bal_map.get(r["製造予定日"].normalize(), "")})
+                                          "数量(±)": _diff_q, "実績在庫": _row_balance.get(("m", _idx), "")})
                     _rows.sort(key=lambda x: x["_dt"])
                     _today_dtl = next((d for d in dtl if d["_dt"] == today), None)
                     _today_note = f'本日出荷先: {_today_dtl["出荷先"]}' if (_today_dtl and _today_dtl["出荷先"] not in ("", "―")) else ""
