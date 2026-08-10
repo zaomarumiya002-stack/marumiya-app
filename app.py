@@ -574,10 +574,9 @@ with st.sidebar:
         st.rerun()
 
 pg = st.session_state.current_page
-hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
+hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケ-ジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
 def page_header(t):
     st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
-    show_flash()
 def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
@@ -1445,8 +1444,8 @@ elif pg == "📊 在庫・スケジュール":
             if dp:
                 st.markdown(f'<div class="drill-panel">### 📦 {fn(dp)} 詳細', unsafe_allow_html=True)
                 oy = today - timedelta(days=365)
-                ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<today)].copy() if not odf.empty else pd.DataFrame()
-                mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<today)].copy() if not mdf.empty else pd.DataFrame()
+                ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<=today)].copy() if not odf.empty else pd.DataFrame()
+                mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<=today)].copy() if not mdf.empty else pd.DataFrame()
 
                 _adj_tags = ["【棚卸確定", "【不良廃棄】", "【在庫調整+】", "【在庫調整-】", "【在庫非反映】"]
                 def _is_adjustment(note): return any(t in str(note) for t in _adj_tags)
@@ -1569,20 +1568,21 @@ elif pg == "📊 在庫・スケジュール":
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
                                           "数量(±)": _diff_q, "実績在庫": _row_balance.get(("m", _idx), "")})
                     _rows.sort(key=lambda x: x["_dt"])
-                    _today_dtl = next((d for d in dtl if d["_dt"] == today), None)
-                    _today_note = f'本日出荷先: {_today_dtl["出荷先"]}' if (_today_dtl and _today_dtl["出荷先"] not in ("", "―")) else ""
-                    _today_qty = ((_today_dtl["製造(入)"] or 0) - (_today_dtl["出荷(出)"] or 0)) if _today_dtl else ""
-                    _today_marker = [{"_dt": today, "日付": f"── 本日 {format_date_jp(today)} ──", "区分": "", "出荷先/備考": _today_note, "数量(±)": _today_qty, "実績在庫": f"{cur_stock(dp):,}"}]
+                    
+                    _past_rows = [r for r in _rows if pd.Timestamp(r["_dt"]).normalize() < today]
+                    _today_rows = [r for r in _rows if pd.Timestamp(r["_dt"]).normalize() == today]
+                    _today_marker = [{"_dt": today, "日付": f"── ↓ 本日 {format_date_jp(today)} の記録 ↓ ──", "区分": "現在庫", "出荷先/備考": "本日開始時点の在庫", "数量(±)": "", "実績在庫": f"{cs.get(dp,0):,}"}]
                     _future_rows = [{"_dt": d["_dt"], "日付": d["日付"], "区分": "📅 予定", "出荷先/備考": d["出荷先"], "数量(±)": (d["製造(入)"] or 0) - (d["出荷(出)"] or 0), "実績在庫": d["予定在庫"]} for d in dtl if d["_dt"] > today]
-                    _combined = _rows + _today_marker + _future_rows
+                    
+                    _combined = _past_rows + _today_marker + _today_rows + _future_rows
                     if _combined:
                         cdf = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","実績在庫"]]
                         def _row_style(r):
-                            if str(r["日付"]).startswith("── 本日"): return ['background-color:#EFF6FF;font-weight:900;color:#1E40AF;']*len(r)
+                            if str(r["日付"]).startswith("── ↓ 本日"): return ['background-color:#E0F2FE;font-weight:900;color:#0369A1;']*len(r)
                             if "補正" in str(r["区分"]): return ['background-color:#F8FAFC;color:#64748B;']*len(r)
                             if isinstance(r.get("実績在庫"),(int,float)) and r.get("実績在庫")!="" and r.get("実績在庫")<0: return ['color:#DC2626;font-weight:bold;']*len(r)
                             return ['']*len(r)
-                        _today_row_idx = len(_rows)
+                        _today_row_idx = len(_past_rows)
                         _h = min(600, max(320, (_today_row_idx + 12) * 36))
                         st.dataframe(cdf.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=_h)
                         st.caption("💡「表示する過去期間」を短くすると、本日の行までのスクロール量が少なくなります（初期値：過去30日）。")
@@ -1718,14 +1718,10 @@ elif pg == "📊 在庫・スケジュール":
                 co["納品予定日"]=co["納品予定日"].apply(format_date_jp)
                 st.dataframe(co[["納品予定日","製品名","ケース数","在庫状況","備考"]].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
 
-    # -------------------------------------------------------------
-    # 📋 製品 棚卸入力 (t5) ― 修復済み
-    # -------------------------------------------------------------
     with t5:
         st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
         st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その瞬間の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。</div>""", unsafe_allow_html=True)
         
-        # フラッシュ表示用の固定領域
         _t5_msg_area = st.container()
 
         inv_d = st.date_input("📅 棚卸日", value=date.today(), key="inv_date")
@@ -1776,7 +1772,6 @@ elif pg == "📊 在庫・スケジュール":
                     flash("success", f"✅【{sel_p}】{format_date_jp(pd.Timestamp(inv_d))} 時点の在庫を {to_int(actual_q):,} cs で確定しました（{_cur_cs:,} → {to_int(actual_q):,}）。これより前の履歴は以後の計算に使われません。")
                     st.rerun()
         
-        # フラッシュ表示領域（if sel_p の外に配置）
         with _t5_msg_area:
             show_flash_inline()
 
@@ -2424,7 +2419,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 sdl=ship_d-timedelta(days=wd)
                 pr=1 if dl<=1 else 2 if dl<=3 else 3 if dl<=7 else 4 if dl<=14 else 5
                 stt=("🔴 緊急" if sdl<=n else "🟠 要注意" if dl<=3 else "🟡 注意" if dl<=7 else "🟢 計画内")
-                tasks.append({"製品名":pn,"顧客名":str(row.get("顧客名","")),"出荷日":ship_d,"受注数(cs)":oq,"製造必要量(cs)":mq,"製造時間(h)":mh,"製造開始期限":sdl,"優先度":pr,"ステータス":stt,"段取りG":pa["段取りグループ"],"歩留まり率":pa["歩留まり率"],"ライン":pa["ラインID"]})
+                tasks.append({"製品名":pn,"顧客名":str(row.get("顧客名","")),"出荷日":ship_d,"受注数(cs)":oq,"製造必要量(cs)":mq,"製造時間(h)":mh,"製造開始期限":sdl,"優先度:pr,"ステータス":stt,"段取りG":pa["段取りグループ"],"歩留まり率":pa["歩留まり率"],"ライン":pa["ラインID"]})
         needed=[t for t in tasks if t["製造必要量(cs)"]>0]
         needed.sort(key=lambda t:(t["段取りG"] or "ZZZ",t["優先度"],t["出荷日"]))
         return needed+[t for t in tasks if t["製造必要量(cs)"]==0]
@@ -3002,7 +2997,7 @@ elif pg == "🏗️ 製造スケジューラー":
         with c9a:
             ver_id=f"VER_{date.today().strftime('%Y%m%d')}_{str(uuid.uuid4())[:4].upper()}"
             st.text_input("版ID（自動生成）",value=ver_id,disabled=True,key="v3_ver_id")
-            _conf_msg = st.container()
+            _conf_msg_area = st.container()
             if st.button("💾 このスケジュールを確定保存",type="primary",key="v3_confirm"):
                 if not _sched: _conf_msg.error("スケジュールがありません。")
                 else:
@@ -3025,7 +3020,7 @@ elif pg == "🏗️ 製造スケジューラー":
                     st.session_state.v3_conf=merged_conf
                     flash("success",f"✅ スケジュールを確定保存しました。版ID: {ver_id}")
                     st.rerun()
-            with _conf_msg:
+            with _conf_msg_area:
                 show_flash_inline()
 
         with c9b:
