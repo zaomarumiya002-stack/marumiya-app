@@ -21,9 +21,6 @@ import numpy as np
 # 共通関数
 # ─────────────────────────────────────────────
 def add_today_vline(fig, x, color="#10B981", text="今日", dash="dash"):
-    """
-    add_shape + add_annotation で縦の点線＋ラベルを安全に描画する。
-    """
     fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
                   line=dict(dash=dash, color=color, width=1.5))
     fig.add_annotation(x=x, y=1, yref="paper", yshift=10, text=text,
@@ -261,11 +258,11 @@ if "current_page" not in st.session_state: st.session_state.current_page = "📋
 if "drill_product" not in st.session_state: st.session_state.drill_product = None
 if "_flash" not in st.session_state: st.session_state._flash = None
 
-# ★修復：React DOM(removeChild)エラーを解消するための安全なフラッシュ通知メカニズム
+# ★修復：ボタンの真下にメッセージ（st.success等）を表示しつつ、右上にトースト通知（st.toast）を同時出力する関数
 def flash(type_, msg):
     st.session_state._flash = {"type": type_, "msg": msg}
 
-def show_flash():
+def show_flash_inline(placeholder=None):
     f = st.session_state.get("_flash")
     if f:
         st.session_state._flash = None
@@ -275,14 +272,14 @@ def show_flash():
             st.toast(msg, icon="✅" if ftype == "success" else "⚠️" if ftype in ["error", "warning"] else "ℹ️")
         except Exception:
             pass
-        if ftype == "success": st.success(msg)
-        elif ftype == "error": st.error(msg)
-        elif ftype == "warning": st.warning(msg)
-        else: st.info(msg)
+        target = placeholder if placeholder else st
+        if ftype == "success": target.success(msg)
+        elif ftype == "error": target.error(msg)
+        elif ftype == "warning": target.warning(msg)
+        else: target.info(msg)
 
-def show_flash_inline(placeholder=None):
-    # st.emptyへの後勝ち動的アクセスによるReact DOM不整合を避けるため、安全に通知処理を呼ぶ
-    show_flash()
+def show_flash():
+    pass
 
 odf = st.session_state.orders_df; mdf = st.session_state.manufactures_df; mst = st.session_state.master_df; cdf = st.session_state.customers_df
 pk_m = st.session_state.packaging_master_df; pk_l = st.session_state.packaging_logs_df; sh_m = st.session_state.shipping_master_df; sp_s = st.session_state.special_schedule_df
@@ -625,10 +622,9 @@ if pg == "📋 受注登録":
     if prod and qty and to_int(qty)>0 and cur_stock(prod) < to_int(qty):
         st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cur_stock(prod)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cur_stock(prod)}</span></div>', unsafe_allow_html=True)
     
-    _m_add_ph = st.container()
     if st.button("✅ 受注を登録", type="primary", use_container_width=True):
         if not prod or not qty or to_int(qty)<1:
-            _m_add_ph.error("⚠️ 製品・数量は必須です。")
+            st.error("⚠️ 製品・数量は必須です。")
         else:
             frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整+】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
             cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
@@ -1622,7 +1618,7 @@ elif pg == "📊 在庫・スケジュール":
                     if not poa.empty: st.dataframe(poa.assign(日付=poa["納品予定日"].apply(format_date_jp))[["日付","顧客名","ケース数","備考"]].sort_values("日付",ascending=False), hide_index=True)
                 with tc2:
                     st.markdown('<div style="font-weight:800;color:#059669;border-left:4px solid #059669;padding-left:8px;">🏭 製造履歴</div>', unsafe_allow_html=True)
-                    if not pma.empty: st.dataframe(pma.assign(日付=pma["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非費用】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
+                    if not pma.empty: st.dataframe(pma.assign(日付=pma["製造予定日"].apply(format_date_jp))[["日付","ケース数","備考"]].sort_values("日付",ascending=False).style.apply(lambda r: ["background:#F8FAFC;color:#64748B;"]*len(r) if "【在庫非反映】" in str(r.get("備考","")) else [""]*len(r), axis=1), hide_index=True)
 
             elif _dv_nav == "📅 予定":
                 st.markdown('<div class="section-title">📅 今後60日間スケジュール</div>', unsafe_allow_html=True)
@@ -1699,9 +1695,6 @@ elif pg == "📊 在庫・スケジュール":
                 co["納品予定日"]=co["納品予定日"].apply(format_date_jp)
                 st.dataframe(co[["納品予定日","製品名","ケース数","在庫状況","備考"]].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
 
-    # -------------------------------------------------------------
-    # 📋 製品 棚卸入力 (t5) ― 修復済み
-    # -------------------------------------------------------------
     with t5:
         st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
         st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その瞬間の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。</div>""", unsafe_allow_html=True)
