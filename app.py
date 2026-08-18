@@ -52,18 +52,14 @@ def safe_dt_date(s):
                     converted = converted.dt.tz_localize(None)
             except Exception:
                 pass
-            res = converted.dt.normalize().dt.date
-            res.index = s.index
-            return res
+            return converted.dt.normalize().dt.date
         else:
             converted = pd.to_datetime(s, errors='coerce', utc=False)
             if pd.isna(converted):
                 return None
             return converted.normalize().date()
     except Exception:
-        if isinstance(s, pd.Series):
-            return pd.Series([None] * len(s), index=s.index)
-        elif hasattr(s, '__len__'):
+        if hasattr(s, '__len__'):
             return pd.Series([None] * len(s))
         return None
 
@@ -75,11 +71,9 @@ def _nd_to_date(series):
                 s = s.dt.tz_localize(None)
         except Exception:
             pass
-        res = s.dt.normalize().dt.date
-        res.index = series.index
-        return res
+        return s.dt.normalize().dt.date
     except Exception:
-        return pd.Series([None] * len(series), index=series.index if hasattr(series, 'index') else None)
+        return pd.Series([None] * len(series))
 
 def is_special_order(r): return "特注" in str(r) or "チャーター便" in str(r)
 def make_csv_bytes(df): return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
@@ -396,7 +390,7 @@ if not mst_fc.empty:
             c_s = _floor_carry_balance(cp["実数"], _after_all[_after_all["日付"] < today][["日付","qty"]])
             _future_ev = _after_all[_after_all["日付"] >= today]
         else:
-            _pev = pe_ev[_pmask]
+            _pev = pe_ev[pe_ev["製品名"] == p]
             c_s = _floor_carry_balance(r.get("初期在庫数",0), _pev[["日付","qty"]])
             _future_ev = ae[_pmask & (ae["日付"] >= today)]
         cs[p] = c_s
@@ -557,12 +551,8 @@ with st.sidebar:
     st.markdown("<div style='padding:16px 8px 8px;'><span style='font-size:22px;'>🏭</span><span style='font-size:16px; font-weight:900; color:#F1F5F9; margin-left:8px;'>丸実屋システム</span></div>", unsafe_allow_html=True)
     _today = date.today()
     if not odf.empty and "納品予定日" in odf.columns:
-        _m_valid = pd.Series(True, index=odf.index)
-        if "不良廃棄フラグ" in odf.columns:
-            _m_valid &= (odf["不良廃棄フラグ"] == False)
-        if "日付未定フラグ" in odf.columns:
-            _m_valid &= (odf["日付未定フラグ"] == False)
-        _odf_valid = odf[_m_valid]
+        _odf_valid = odf[odf["不良廃棄フラグ"] == False] if "不良廃棄フラグ" in odf.columns else odf
+        _odf_valid = _odf_valid[_odf_valid["日付未定フラグ"] == False] if "日付未定フラグ" in _odf_valid.columns else _odf_valid
         toc = int((_nd_to_date(_odf_valid["納品予定日"]) == _today).sum())
     else:
         toc = 0
@@ -584,7 +574,7 @@ with st.sidebar:
         st.rerun()
 
 pg = st.session_state.current_page
-hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
+hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケ-ジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
 def page_header(t):
     st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
 def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
@@ -725,11 +715,11 @@ elif pg == "🚚 出荷・発送管理":
         _local_today = pd.Timestamp.now().date()
         td = st.date_input("📅 対象日", value=_local_today)
         if not odf.empty:
-            _mask = (_nd_to_date(odf["納品予定日"]) == td)
-            if "不良廃棄フラグ" in odf.columns:
-                _mask = _mask & (odf["不良廃棄フラグ"] == False)
-            if "日付未定フラグ" in odf.columns:
-                _mask = _mask & (odf["日付未定フラグ"] == False)
+            _mask = (
+                (_nd_to_date(odf["納品予定日"]) == td) &
+                (odf["不良廃棄フラグ"] == False) &
+                (odf.get("日付未定フラグ", pd.Series(False, index=odf.index)) == False)
+            )
             d_ord = odf[_mask].copy()
         else:
             d_ord = pd.DataFrame()
@@ -1430,18 +1420,25 @@ elif pg == "📊 在庫・スケジュール":
     with t0:
         al = []
         for p, d_fs in fs.items():
+            p_norm = str(p).strip()
             for d in pd.date_range(today, today+timedelta(days=7)):
                 if d_fs.get(d,0)<0:
-                    if not odf.empty:
-                        _o_mask = (odf["製品名"]==p) & (safe_dt_date(odf["納品予定日"])==d.date())
-                        if "不良廃棄フラグ" in odf.columns:
-                            _o_mask = _o_mask & (odf["不良廃棄フラグ"]==False)
-                        do = odf[_o_mask]
-                    else:
-                        do = pd.DataFrame()
-                    al.append({"日付":format_date_jp(d),"製品名":p,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
+                    do = odf[(odf["製品名"]==p)&(safe_dt_date(odf["納品予定日"])==d.date())&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
+                    al.append({"日付":d,"日付表示":format_date_jp(d),"製品名":p_norm,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
         if al:
-            da = pd.DataFrame(al).drop_duplicates()
+            _da_raw = pd.DataFrame(al)
+            def _uniq_join(s):
+                seen = []
+                for part in s:
+                    for x in str(part).split(" / "):
+                        x = x.strip()
+                        if x and x != "―" and x not in seen: seen.append(x)
+                return " / ".join(seen) if seen else "―"
+            da = (_da_raw.groupby(["日付","日付表示","製品名"], as_index=False)
+                         .agg(予測在庫=("予測在庫","min"), 現在庫=("現在庫","max"),
+                              顧客名=("顧客名",_uniq_join), 備考=("備考",_uniq_join))
+                         .sort_values("日付"))
+            da = da.drop(columns=["日付"]).rename(columns={"日付表示":"日付"})[["日付","製品名","予測在庫","現在庫","顧客名","備考"]]
             st.dataframe(da.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予測在庫"]), use_container_width=True, hide_index=True)
         else: st.success("✅ 欠品予測なし")
 
@@ -1853,16 +1850,8 @@ elif pg == "📈 経営・分析ダッシュボード":
     td1,td2,td3,td4 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド"])
     with td1:
         if not odf.empty:
-            tm = date.today().replace(day=1)
-            _o_mask_m = safe_dt_date(odf["納品予定日"])>=tm
-            if "不良廃棄フラグ" in odf.columns:
-                _o_mask_ok = _o_mask_m & (odf["不良廃棄フラグ"]==False)
-                _o_mask_ng = _o_mask_m & (odf["不良廃棄フラグ"]==True)
-            else:
-                _o_mask_ok = _o_mask_m
-                _o_mask_ng = pd.Series(False, index=odf.index)
-            om = odf[_o_mask_ok]
-            c1,c2,c3,c4 = st.columns(4); c1.metric("今月 出荷", f"{om['ケース数'].apply(to_int).sum():,} cs", delta=f"{om['顧客名'].nunique()} 顧客"); c2.metric("今月 不良", f"{odf[_o_mask_ng]['ケース数'].apply(to_int).sum():,} cs", delta_color="inverse"); c3.metric("荷姿チェック率", f"{int(len(odf[odf['荷姿チェック']==True])/max(len(odf),1)*100)} %"); c4.metric("欠品品目数", f"{sum(1 for v in cs.values() if v<=0)} 品目", delta_color="inverse")
+            tm = date.today().replace(day=1); om = odf[(safe_dt_date(odf["納品予定日"])>=tm)&(odf["不良廃棄フラグ"]==False)]
+            c1,c2,c3,c4 = st.columns(4); c1.metric("今月 出荷", f"{om['ケース数'].apply(to_int).sum():,} cs", delta=f"{om['顧客名'].nunique()} 顧客"); c2.metric("今月 不良", f"{odf[(safe_dt_date(odf['納品予定日'])>=tm)&(odf['不良廃棄フラグ']==True)]['ケース数'].apply(to_int).sum():,} cs", delta_color="inverse"); c3.metric("荷姿チェック率", f"{int(len(odf[odf['荷姿チェック']==True])/max(len(odf),1)*100)} %"); c4.metric("欠品品目数", f"{sum(1 for v in cs.values() if v<=0)} 品目", delta_color="inverse")
             ca,cb = st.columns(2)
             with ca:
                 ss = odf[odf["運送会社"].str.strip()!=""]["運送会社"].value_counts().reset_index()
@@ -1872,8 +1861,7 @@ elif pg == "📈 経営・分析ダッシュボード":
                 if not cua.empty: st.plotly_chart(px.bar(cua,x="ケース数",y="顧客名",orientation='h',title="主要顧客 TOP5"), use_container_width=True)
     with td2:
         if not odf.empty:
-            o2 = odf[odf["不良廃棄フラグ"]==False].copy() if "不良廃棄フラグ" in odf.columns else odf.copy()
-            o2["ケース数"] = o2["ケース数"].apply(to_int); abc = o2.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
+            o2 = odf[odf["不良廃棄フラグ"]==False].copy(); o2["ケース数"] = o2["ケース数"].apply(to_int); abc = o2.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
             if abc["ケース数"].sum()>0:
                 abc["累計比率"] = abc["ケース数"].cumsum()/abc["ケース数"].sum()*100; abc["ランク"] = pd.cut(abc["累計比率"],bins=[0,70,90,100],labels=["A(主力)","B(中堅)","C(その他)"])
                 st.plotly_chart(px.bar(abc.head(20),x="製品名",y="ケース数",color="ランク",title="ABC TOP20"), use_container_width=True)
@@ -1885,8 +1873,7 @@ elif pg == "📈 経営・分析ダッシュボード":
         if p_sum: st.dataframe(pd.DataFrame([{"資材":k,"庫":v.get("現在庫",0),"点":v.get("発注点",0),"出":v.get("出庫",0)} for k,v in p_sum.items()]).style.apply(lambda r: ['background-color:#FFEDD5;color:#C2410C;']*len(r) if to_int(r.get("庫",0))<to_int(r.get("点",0)) else ['']*len(r), axis=1), hide_index=True)
     with td4:
         if not odf.empty:
-            tdf = odf[odf["不良廃棄フラグ"]==False].copy() if "不良廃棄フラグ" in odf.columns else odf.copy()
-            tdf["年月"] = pd.to_datetime(tdf["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
+            tdf = odf[odf["不良廃棄フラグ"]==False].copy(); tdf["年月"] = pd.to_datetime(tdf["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
             mn = tdf.groupby(["年月","大カテゴリ"])["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
             if not mn.empty: st.plotly_chart(px.bar(mn,x="年月",y="ケース数",color="大カテゴリ",barmode="stack",title="月次カテ別"), use_container_width=True)
 
@@ -2141,6 +2128,39 @@ elif pg == "🏗️ 製造スケジューラー":
         ["三角","板","20","FALSE","全ライン","形状変更"],
     ]
 
+    # ── ハイブリッド拡張：OKMライン（マクラ）／玉こん・糸こんプラント専用マスタ ──
+    # 既存の汎用エンジンはそのまま維持し、これらのマスタに登録された製品だけ
+    # 新ルール（本数/重量換算・AM/PM別キャパ・糊/フィルム切替ロス・会社カレンダー平準化）を追加適用する。
+    _OKM_COLS    = ["製品名","マクラ種類","10ケースあたり本数","糊の種類","仕様グループ"]
+    _WEIGHT_COLS = ["製品名","プラント","ケースkg換算"]
+    _CAL_COLS    = ["日付","休日区分","備考"]
+    _HKV_COLS    = ["設定キー","値","説明"]
+
+    _OKM_INIT = [
+        ["レギュラー1kg×10","レギュラー","40","糊A","フィルムA"],
+        ["平こん1kg×10","平こん","35","糊A","フィルムA"],
+        ["ショクカイ1kg×14","ショクカイ","54","糊B","フィルムB"],
+    ]
+    _WEIGHT_INIT = [
+        ["1kg×10","玉こん","12"],
+        ["500g×20","玉こん","12"],
+        ["170g×40","玉こん","8.2"],
+        ["200g×40","玉こん","9.6"],
+        ["ショクカイ玉こん1kg×14","玉こん","17"],
+        ["1kg×10","糸こん","12"],
+        ["500g×20","糸こん","12"],
+        ["170g×40","糸こん","8.2"],
+        ["200g×40","糸こん","14.5"],
+    ]
+    _HKV_INIT = [
+        ["糊切替ロス分","45","OKMライン：糊（配合）が変わる切り替えのロス時間（分）"],
+        ["フィルム切替ロス分","15","OKMライン：フィルム・セーラー等の仕様グループが変わる切り替えのロス時間（分）"],
+        ["OKM日次上限kg","1500","OKMラインの1日最大製造量（kg）"],
+        ["OKM500kgマクラ本数","150","500kg製造でできる標準マクラ本数（現場歩留まり目安）"],
+        ["糸こんAM上限kg","1700","糸こんプラントの午前（AM）最大製造量（kg）"],
+        ["糸こんPM上限kg","2000","糸こんプラントの午後（PM）最大製造量（kg）"],
+    ]
+
     @st.cache_data(ttl=120, show_spinner=False)
     def _load_sched_master(name, cols, init_rows):
         try:
@@ -2170,6 +2190,10 @@ elif pg == "🏗️ 製造スケジューラー":
         st.session_state.v3_facil  = _load_sched_master("facility_master", _FACIL_COLS, _FACIL_INIT)
         st.session_state.v3_co     = _load_sched_master("changeover_matrix", _CO_COLS,  _CO_INIT)
         st.session_state.v3_conf   = _load_sched_master("schedule_confirmed", _CONF_COLS, [])
+        st.session_state.v3_okm    = _load_sched_master("okm_master", _OKM_COLS, _OKM_INIT)
+        st.session_state.v3_weight = _load_sched_master("weight_master", _WEIGHT_COLS, _WEIGHT_INIT)
+        st.session_state.v3_cal    = _load_sched_master("company_calendar", _CAL_COLS, [])
+        st.session_state.v3_hkv    = _load_sched_master("hybrid_config", _HKV_COLS, _HKV_INIT)
         st.session_state.v3_manual_order = []
         st.session_state.v3_initialized  = True
 
@@ -2178,6 +2202,10 @@ elif pg == "🏗️ 製造スケジューラー":
     _fdf  = st.session_state.v3_facil
     _cdf  = st.session_state.v3_co
     _cfdf = st.session_state.v3_conf
+    _okmdf = st.session_state.v3_okm
+    _wdf   = st.session_state.v3_weight
+    _caldf = st.session_state.v3_cal
+    _hkvdf = st.session_state.v3_hkv
 
     def _ktype(pn):
         if not mst_u.empty:
@@ -2254,6 +2282,157 @@ elif pg == "🏗️ 製造スケジューラー":
             r = co_df[(co_df["前工程タイプ"]==tf)&(co_df["後工程タイプ"]==tt)]
             if not r.empty: return str(r.iloc[0].get("コンタミリスク","FALSE")).upper()=="TRUE"
         return tf=="黒" and tt in ("白","糸","板")
+
+    # ── ハイブリッド拡張：ヘルパー関数（会社カレンダー／OKM本数／重量換算）──
+    def _hkv(key, default=0.0):
+        try:
+            if _hkvdf.empty: return default
+            r = _hkvdf[_hkvdf["設定キー"]==key]
+            if r.empty: return default
+            v = str(r.iloc[0].get("値", default))
+            return float(v) if v not in ("", "nan", "None") else default
+        except Exception:
+            return default
+
+    def _is_holiday_date(d, caldf):
+        try:
+            if caldf is None or caldf.empty or "日付" not in caldf.columns: return False
+            ds = pd.to_datetime(caldf["日付"], errors="coerce").dt.normalize()
+            return pd.Timestamp(d).normalize() in set(ds.dropna().tolist())
+        except Exception:
+            return False
+
+    def _prev_biz_day(d, caldf):
+        c = pd.Timestamp(d).normalize()
+        for _ in range(14):
+            c -= timedelta(days=1)
+            if not _is_holiday_date(c, caldf): return c
+        return c
+
+    def _okm_lookup(pn, okmdf):
+        try:
+            if okmdf is None or okmdf.empty: return None
+            r = okmdf[okmdf["製品名"] == pn]
+            if r.empty: return None
+            row = r.iloc[0]
+            try: n10 = float(str(row.get("10ケースあたり本数", 0) or 0))
+            except Exception: n10 = 0.0
+            return {"マクラ種類": str(row.get("マクラ種類", "")), "10ケースあたり本数": n10,
+                    "糊の種類": str(row.get("糊の種類", "")), "仕様グループ": str(row.get("仕様グループ", ""))}
+        except Exception:
+            return None
+
+    def _weight_lookup(pn, plant, wdf):
+        try:
+            if wdf is None or wdf.empty: return None
+            r = wdf[(wdf["製品名"] == pn) & (wdf["プラント"] == plant)]
+            if r.empty: return None
+            v = str(r.iloc[0].get("ケースkg換算", 0) or 0)
+            return float(v) if v not in ("", "nan", "None") else None
+        except Exception:
+            return None
+
+    def _okm_order_optimize(lst, glue_loss, film_loss):
+        """OKMライン：糊(45分)・フィルム/セーラー(15分)の切替ロスが最小になる順序を貪欲法+2-optで探索"""
+        if len(lst) <= 1: return lst
+        def _cost(a, b):
+            c = 0.0
+            if a.get("糊の種類","") != b.get("糊の種類",""): c += glue_loss
+            if a.get("仕様グループ","") != b.get("仕様グループ",""): c += film_loss
+            return c
+        rem = lst[:]; ordered = [rem.pop(0)]
+        while rem:
+            best = min(rem, key=lambda x: _cost(ordered[-1], x)); rem.remove(best); ordered.append(best)
+        if len(ordered) <= 12:
+            def _total(o): return sum(_cost(o[i], o[i+1]) for i in range(len(o)-1))
+            for _ in range(8):
+                improved = False
+                for i in range(1, len(ordered)-1):
+                    for j in range(i+1, len(ordered)):
+                        no = ordered[:i] + ordered[i:j+1][::-1] + ordered[j+1:]
+                        if _total(no) < _total(ordered) - 0.01:
+                            ordered = no; improved = True
+                if not improved: break
+        return ordered
+
+    def _hybrid_process(tasks, okmdf, wdf, caldf):
+        """OKM(マクラ)/玉こん/糸こんプラント専用の日割り・平準化・残業判定（既存の汎用エンジンとは独立に追加集計）"""
+        glue_loss = _hkv("糊切替ロス分", 45)
+        film_loss = _hkv("フィルム切替ロス分", 15)
+        okm_cap   = _hkv("OKM日次上限kg", 1500)
+        maku_per_500kg = max(1.0, _hkv("OKM500kgマクラ本数", 150))
+        okm_kg_per_maku = 500.0 / maku_per_500kg
+        ito_am_cap = _hkv("糸こんAM上限kg", 1700)
+        ito_pm_cap = _hkv("糸こんPM上限kg", 2000)
+
+        items = []
+        for t in tasks:
+            pn = t.get("製品名",""); mq = to_int(t.get("製造必要量(cs)", 0))
+            if mq <= 0: continue
+            okm = _okm_lookup(pn, okmdf)
+            w_tama = _weight_lookup(pn, "玉こん", wdf)
+            w_ito  = _weight_lookup(pn, "糸こん", wdf)
+            base_date = t.get("製造開始期限")
+            if not isinstance(base_date, pd.Timestamp) or pd.isna(base_date):
+                base_date = pd.Timestamp.today().normalize()
+            if okm:
+                maku = int(np.ceil(mq/10.0 * okm["10ケースあたり本数"]))
+                kg = maku * okm_kg_per_maku
+                items.append({"種別":"OKM","製品名":pn,"本数":maku,"重量kg":round(kg,1),
+                              "マクラ種類":okm["マクラ種類"],"糊の種類":okm["糊の種類"],"仕様グループ":okm["仕様グループ"],
+                              "日付":base_date,"出荷日":t.get("出荷日"),"顧客名":t.get("顧客名","")})
+            elif w_tama:
+                items.append({"種別":"玉こん","製品名":pn,"本数":0,"重量kg":round(mq*w_tama,1),
+                              "マクラ種類":"","糊の種類":"","仕様グループ":"",
+                              "日付":base_date,"出荷日":t.get("出荷日"),"顧客名":t.get("顧客名","")})
+            elif w_ito:
+                items.append({"種別":"糸こん","製品名":pn,"本数":0,"重量kg":round(mq*w_ito,1),
+                              "マクラ種類":"","糊の種類":"","仕様グループ":"",
+                              "日付":base_date,"出荷日":t.get("出荷日"),"顧客名":t.get("顧客名","")})
+        if not items: return [], [], [], []
+
+        # 休日回避（前倒し）
+        for it in items:
+            guard = 0
+            while _is_holiday_date(it["日付"], caldf) and guard < 14:
+                it["日付"] = _prev_biz_day(it["日付"] + timedelta(days=1), caldf); guard += 1
+
+        # 日別キャパチェック → 平準化（前倒し）／残業対応判定
+        level_log, overtime_warns = [], []
+        items.sort(key=lambda x: (x["日付"], 0 if x["種別"]=="OKM" else 1))
+        cap_used = {}
+        for it in items:
+            cap = okm_cap if it["種別"]=="OKM" else ((ito_am_cap+ito_pm_cap) if it["種別"]=="糸こん" else None)
+            if cap is None: continue
+            orig_date = it["日付"]
+            placed = False
+            for _ in range(10):
+                key = (it["日付"], it["種別"])
+                used = cap_used.get(key, 0.0)
+                if used + it["重量kg"] <= cap:
+                    cap_used[key] = used + it["重量kg"]; placed = True; break
+                nxt = _prev_biz_day(it["日付"] + timedelta(days=1), caldf)
+                if nxt == it["日付"]: break
+                it["日付"] = nxt
+            if not placed:
+                # 前倒し先も含めて出荷・安全在庫に間に合わない → 残業対応（キャパオーバー警告）
+                key = (it["日付"], it["種別"])
+                cap_used[key] = cap_used.get(key, 0.0) + it["重量kg"]
+                overtime_warns.append({"日付":it["日付"],"プラント":it["種別"],"製品名":it["製品名"],
+                                        "重量kg":it["重量kg"],"状態":"🚨 残業対応（キャパオーバー）"})
+            elif it["日付"] != orig_date:
+                level_log.append({"製品名":it["製品名"],"種別":it["種別"],"元予定日":orig_date,"平準化後":it["日付"],
+                                   "理由":"1日上限超過のため前倒し"})
+
+        okm_by_day = {}
+        for it in items:
+            if it["種別"] == "OKM": okm_by_day.setdefault(it["日付"], []).append(it)
+        okm_rows = []
+        for d, lst in okm_by_day.items():
+            okm_rows.extend(_okm_order_optimize(lst, glue_loss, film_loss))
+
+        plant_rows = [it for it in items if it["種別"] in ("玉こん","糸こん")]
+        return okm_rows, plant_rows, level_log, overtime_warns
 
     def _staff_at(dt, sdf):
         if sdf.empty: return (8,1)
@@ -2583,6 +2762,9 @@ elif pg == "🏗️ 製造スケジューラー":
     needed_tasks = [t for t in all_tasks if t["製造必要量(cs)"]>0]
     display_tasks = all_tasks if show_ok else needed_tasks
 
+    # ── ハイブリッド拡張：OKM/玉こん/糸こん専用の日割り・平準化・残業判定（既存エンジンとは独立に併走）──
+    _okm_rows, _plant_rows, _level_log, _overtime_warns = _hybrid_process(needed_tasks, _okmdf, _wdf, _caldf)
+
     if st.session_state.v3_manual_order:
         pn_order = st.session_state.v3_manual_order
         _tasks_for_engine = sorted(needed_tasks, key=lambda t: pn_order.index(t["製品名"]) if t["製品名"] in pn_order else 999)
@@ -2666,7 +2848,7 @@ elif pg == "🏗️ 製造スケジューラー":
     if _conts: st.markdown(f'<div class="danger-banner">🦠 黒→白 コンタミリスク：{len(_conts)}件の徹底洗浄工程が自動挿入されています。必ず実施してください。</div>',unsafe_allow_html=True)
     if not needed_tasks: st.markdown('<div class="ok-banner">✅ 直近の製造必要品目はありません。全品目在庫充足です。</div>',unsafe_allow_html=True)
 
-    T1,T2,T3,T4,T5,T6,T7,T8,T9,T10 = st.tabs(["📋 製造指示一覧", "📅 日別タイムライン", "📊 ガントチャート", "🔧 段取り最適化", "👷 人員配置", "📈 負荷グラフ", "📦 在庫推移", "🔍 ドリルダウン", "💾 スケジュール確定・比較", "⚙️ パラメータ設定"])
+    T1,T2,T3,T4,T5,T6,T7,T8,T9,T10,T11 = st.tabs(["📋 製造指示一覧", "📅 日別タイムライン", "📊 ガントチャート", "🔧 段取り最適化", "👷 人員配置", "📈 負荷グラフ", "📦 在庫推移", "🔍 ドリルダウン", "💾 スケジュール確定・比較", "⚙️ パラメータ設定", "🆕 OKM/玉こん/糸こん"])
 
     with T1:
         if not display_tasks: st.success("✅ 対象期間内に製造が必要な品目はありません。")
@@ -3147,3 +3329,131 @@ elif pg == "🏗️ 製造スケジューラー":
                     return ['']*len(r)
                 st.dataframe(_cdf.style.apply(_co_sty,axis=1),hide_index=True,use_container_width=True)
             else: st.info("段取りマトリクスは上部「🧩 段取りマトリクス設定」エクスパンダーから登録してください。")
+
+    with T11:
+        st.markdown('<div class="section-title">🆕 新旧ハイブリッド製造スケジューラー（OKM／玉こん／糸こんライン）</div>',unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 既存の汎用スケジューラー（T1〜T10）はそのままに、OKMライン（マクラこんにゃく）・玉こんプラント・糸こんプラント専用のルールを追加した拡張タブです。対象：①本数／重量換算 ②AM・PM別キャパシティ ③糊・フィルム/セーラー切替ロス ④会社カレンダーに基づく平準化（前倒し）・残業判定。下のマスタに製品を登録すると、その製品だけ新ルールが自動適用されます（未登録品は従来通り）。</div>',unsafe_allow_html=True)
+
+        with st.expander("⚙️ ハイブリッド設定（切替ロス・キャパシティ）", expanded=False):
+            _hkv_ed = st.data_editor(_hkvdf.copy(), hide_index=True, use_container_width=True, height=min(260,len(_hkvdf)*38+60),
+                column_config={"設定キー":st.column_config.TextColumn(disabled=True),"説明":st.column_config.TextColumn(disabled=True)}, key="v3_hkv_ed")
+            _hkv_msg = st.container()
+            if st.button("💾 ハイブリッド設定を保存", key="v3_save_hkv"):
+                _save_sched_master("hybrid_config", _hkv_ed)
+                st.session_state.v3_hkv=_hkv_ed.copy()
+                flash("success","✅ ハイブリッド設定を保存しました。"); st.rerun()
+            with _hkv_msg: show_flash_inline()
+
+        with st.expander("🥢 OKMライン マクラ本数マスタ（糊種類・仕様グループ）", expanded=False):
+            st.markdown('<div class="info-tip">💡「10ケースあたり本数」は現場の歩留まり（余裕）を見た本数で登録してください。糊の種類・仕様グループが変わる順で自動的に切替ロス（糊45分／フィルム15分が目安）を計算し、ロスが最小になる製造順を自動提案します。</div>',unsafe_allow_html=True)
+            _okm_ed = st.data_editor(_okmdf.copy(), num_rows="dynamic", hide_index=True, use_container_width=True, height=min(320,len(_okmdf)*38+60), key="v3_okm_ed")
+            _okm_msg = st.container()
+            if st.button("💾 マクラ本数マスタを保存", key="v3_save_okm"):
+                _save_sched_master("okm_master", _okm_ed)
+                st.session_state.v3_okm=_okm_ed.copy()
+                flash("success","✅ マクラ本数マスタを保存しました。"); st.rerun()
+            with _okm_msg: show_flash_inline()
+
+        with st.expander("⚖️ 玉こん／糸こん プラント重量換算マスタ", expanded=False):
+            _w_ed = st.data_editor(_wdf.copy(), num_rows="dynamic", hide_index=True, use_container_width=True, height=min(320,len(_wdf)*38+60),
+                column_config={"プラント":st.column_config.SelectboxColumn(options=["玉こん","糸こん"])}, key="v3_w_ed")
+            _w_msg = st.container()
+            if st.button("💾 重量換算マスタを保存", key="v3_save_w"):
+                _save_sched_master("weight_master", _w_ed)
+                st.session_state.v3_weight=_w_ed.copy()
+                flash("success","✅ 重量換算マスタを保存しました。"); st.rerun()
+            with _w_msg: show_flash_inline()
+
+        with st.expander("📅 会社カレンダー（休業日）", expanded=False):
+            st.markdown('<div class="info-tip">💡 登録した日付は「製造予定日」の逆算計算で自動的に避けられ（前倒し）ます。日付は YYYY-MM-DD 形式で入力してください。</div>',unsafe_allow_html=True)
+            _cal_ed = st.data_editor(_caldf.copy(), num_rows="dynamic", hide_index=True, use_container_width=True, height=min(280,len(_caldf)*38+60),
+                column_config={"日付":st.column_config.TextColumn("日付(YYYY-MM-DD)")}, key="v3_cal_ed")
+            _cal_msg = st.container()
+            if st.button("💾 会社カレンダーを保存", key="v3_save_cal"):
+                _save_sched_master("company_calendar", _cal_ed)
+                st.session_state.v3_cal=_cal_ed.copy()
+                flash("success","✅ 会社カレンダーを保存しました。"); st.rerun()
+            with _cal_msg: show_flash_inline()
+
+        st.markdown('<div class="section-title">🥢 OKM製造日報（マクラカット指示）</div>',unsafe_allow_html=True)
+        if _okm_rows:
+            _okm_df_disp = pd.DataFrame([{
+                "製造日": format_date_jp(r["日付"]), "製品名": r["製品名"], "マクラ種類": r.get("マクラ種類",""),
+                "カット本数": r.get("本数",0), "重量目安(kg)": r.get("重量kg",0), "糊の種類": r.get("糊の種類",""),
+                "仕様グループ": r.get("仕様グループ",""), "出荷日": format_date_jp(r.get("出荷日")), "顧客名": r.get("顧客名",""),
+            } for r in _okm_rows])
+            st.dataframe(_okm_df_disp, hide_index=True, use_container_width=True)
+            st.download_button("📥 OKM製造日報CSV", data=make_csv_bytes(_okm_df_disp), file_name=f"OKM製造日報_{date.today()}.csv", mime="text/csv", key="v3_okm_csv")
+        else:
+            st.info("OKM対象品目（マクラ本数マスタに登録済みの製品）の製造予定は現在ありません。上の「OKMライン マクラ本数マスタ」に製品を登録すると、ここに製造日報（マクラカット指示）が表示されます。")
+
+        st.markdown('<div class="section-title">⚖️ 玉こん／糸こん プラント日別kg集計</div>',unsafe_allow_html=True)
+        if _plant_rows:
+            _pdf = pd.DataFrame([{"日付": r["日付"], "プラント": r["種別"], "製品名": r["製品名"], "重量kg": r["重量kg"]} for r in _plant_rows])
+            _agg = _pdf.groupby(["日付","プラント"], as_index=False)["重量kg"].sum().sort_values("日付")
+            _agg["日付表示"] = _agg["日付"].apply(format_date_jp)
+            _ito_am_cap = _hkv("糸こんAM上限kg", 1700); _ito_pm_cap = _hkv("糸こんPM上限kg", 2000)
+            def _cap_note(r):
+                if r["プラント"] == "糸こん":
+                    tot_cap = _ito_am_cap + _ito_pm_cap
+                    return f'{"🚨超過" if r["重量kg"]>tot_cap else "✅"}（上限 AM{int(_ito_am_cap)}+PM{int(_ito_pm_cap)}={int(tot_cap)}kg）'
+                return ""
+            _agg["判定"] = _agg.apply(_cap_note, axis=1)
+            st.dataframe(_agg[["日付表示","プラント","重量kg","判定"]], hide_index=True, use_container_width=True)
+            fig_p = px.bar(_agg, x="日付表示", y="重量kg", color="プラント", barmode="group", title="玉こん／糸こん 日別製造重量(kg)")
+            st.plotly_chart(fig_p, use_container_width=True)
+            st.download_button("📥 玉こん/糸こん日別集計CSV", data=make_csv_bytes(_agg[["日付表示","プラント","重量kg","判定"]]), file_name=f"玉こん糸こん日別集計_{date.today()}.csv", mime="text/csv", key="v3_plant_csv")
+        else:
+            st.info("玉こん／糸こん対象品目（重量換算マスタに登録済みの製品）の製造予定は現在ありません。上の「玉こん／糸こん プラント重量換算マスタ」に製品を登録すると、ここに日別kg集計が表示されます。")
+
+        st.markdown('<div class="section-title">📉 平準化ログ（前倒し実施履歴）</div>',unsafe_allow_html=True)
+        if _level_log:
+            _ldf = pd.DataFrame([{"製品名": r["製品名"], "種別": r["種別"], "元予定日": format_date_jp(r["元予定日"]),
+                                   "平準化後": format_date_jp(r["平準化後"]), "理由": r["理由"]} for r in _level_log])
+            st.markdown(f'<div class="warn-banner">⚠️ {len(_ldf)}件、1日上限を超過したため前日に前倒し（平準化）しました。</div>',unsafe_allow_html=True)
+            st.dataframe(_ldf, hide_index=True, use_container_width=True)
+        else:
+            st.markdown('<div class="ok-banner">✅ 平準化（前倒し）が必要な品目はありません。</div>',unsafe_allow_html=True)
+
+        st.markdown('<div class="section-title">🚨 残業対応（キャパオーバー警告）</div>',unsafe_allow_html=True)
+        if _overtime_warns:
+            _odf = pd.DataFrame([{"日付": format_date_jp(r["日付"]), "プラント": r["プラント"], "製品名": r["製品名"],
+                                   "重量kg": r["重量kg"], "状態": r["状態"]} for r in _overtime_warns])
+            st.markdown(f'<div class="danger-banner">🚨 {len(_odf)}件、前倒し先も含めて1日上限を超過しています。出荷・安全在庫に間に合わない場合は残業対応を検討してください。</div>',unsafe_allow_html=True)
+            st.dataframe(_odf, hide_index=True, use_container_width=True)
+            st.download_button("📥 残業対応警告CSV", data=make_csv_bytes(_odf), file_name=f"残業対応警告_{date.today()}.csv", mime="text/csv", key="v3_ot_csv")
+        else:
+            st.markdown('<div class="ok-banner">✅ 残業対応が必要な品目はありません。</div>',unsafe_allow_html=True)
+
+        st.markdown('<div class="section-title">🤖 AIによる切替順の追加提案（任意・Gemini API）</div>',unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 標準では、上記のOKM製造日報は自動（貪欲法＋2-opt）で糊・フィルム切替ロスが最小になる順序に並べています。Gemini APIキーを `st.secrets["GEMINI_API_KEY"]` に設定すると、AIによる追加の順序提案をここに表示できます（未設定の場合は自動最適化の結果のみとなり、他の機能には影響しません）。</div>',unsafe_allow_html=True)
+        try:
+            _gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+        except Exception:
+            _gemini_key = ""
+        if _gemini_key and _okm_rows:
+            if st.button("🤖 Geminiで切替順を再提案", key="v3_gemini_btn"):
+                try:
+                    import requests
+                    _prompt_items = "\n".join(
+                        f'- {r["製品名"]}（糊:{r.get("糊の種類","")} / 仕様:{r.get("仕様グループ","")}）' for r in _okm_rows[:30]
+                    )
+                    _prompt = (
+                        "以下はこんにゃく工場OKMライン（マクラカット）の本日製造予定品目です。"
+                        "糊の配合が変わる切替は45分、フィルム/セーラー等の仕様グループが変わる切替は15分のロスが発生します。"
+                        "切替ロス合計が最小になる製造順を、製品名のみのリストで提案してください。\n" + _prompt_items
+                    )
+                    resp = requests.post(
+                        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                        params={"key": _gemini_key},
+                        json={"contents": [{"parts": [{"text": _prompt}]}]}, timeout=20,
+                    )
+                    if resp.ok:
+                        _txt = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                        st.markdown("**Gemini提案順：**"); st.text(_txt)
+                    else:
+                        st.warning(f"Gemini API呼び出しに失敗しました（{resp.status_code}）。自動最適化の結果をご利用ください。")
+                except Exception as e:
+                    st.warning(f"Gemini API連携でエラーが発生しました：{e}　自動最適化の結果をご利用ください。")
+        elif not _gemini_key:
+            st.caption("ℹ️ GEMINI_API_KEY未設定のため、自動最適化（貪欲法＋2-opt）の結果のみを表示しています。")
