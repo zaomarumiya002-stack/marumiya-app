@@ -2644,29 +2644,63 @@ elif pg == "🏗️ 製造スケジューラー":
         res = []
         if not tasks_in: return res
         pa_cache = {t["製品名"]: _gpp(t["製品名"]) for t in tasks_in}
-        
+
         line_tasks = {}
         for t in tasks_in:
             line_id = pa_cache[t["製品名"]]["ラインID"]
             if not line_id: line_id = "汎用ライン"
             line_tasks.setdefault(line_id, []).append(t)
-            
+
         PROC_MIN = {"調合・練り":"最少人員_調合","成形・糊付け":"最少人員_成形","包装・充填":"最少人員_包装","レトルト・冷却":"最少人員_レトルト"}
         PROC_RATIO = {"調合・練り":"調合比率","成形・糊付け":"成形比率","包装・充填":"包装比率","レトルト・冷却":"レトルト比率"}
-        
+
+        # ── シンプル・実用型 逆算スケジューラー ──────────────────────────────
+        # ①出荷日−リードタイムで製造日を逆算し、会社カレンダーの休日を避けて前倒し
+        # ②OKM(1日1500kg)／糸プラ・玉プラ(AM1700+PM2000=1日3700kg)の容量超過は前の稼働日へ平準化。
+        #   前倒し先も収まらない場合のみ「残業対応（キャパオーバー）」フラグを既存のステータス欄に付与
+        # ③糊（段取りタイプ）変更＝45分、仕様グループ変更＝15分の切替ロスが最小になる順序に並び替え
+        day_load = {}  # (種別, 日付) -> 使用容量kg（OKM／糸プラ・玉プラ対象のみ）
+
+        def _line_class(pn):
+            if _okm_lookup(pn, _okmdf): return "OKM"
+            if _weight_lookup(pn, "糸こん", _wdf) or _weight_lookup(pn, "玉こん", _wdf): return "糸玉プラ"
+            return None
+
+        def _task_kg(pn, mq):
+            okm = _okm_lookup(pn, _okmdf)
+            if okm:
+                maku = mq/10.0*okm["10ケースあたり本数"]
+                return maku*(500.0/150.0)
+            w = _weight_lookup(pn,"糸こん",_wdf) or _weight_lookup(pn,"玉こん",_wdf)
+            return mq*w if w else 0.0
+
+        def _co_cost(pf, pt):
+            if not pf or not pt: return 0
+            pa1, pa2 = pa_cache.get(pf), pa_cache.get(pt)
+            if not pa1 or not pa2: return 0
+            c = 0
+            if pa1["段取りタイプ"] != pa2["段取りタイプ"]: c += 45   # 糊（配合）変更ロス
+            if pa1["段取りグループ"] != pa2["段取りグループ"]: c += 15  # 仕様グループ（マクラサイズ・フィルム等）変更ロス
+            return c
+
         for line, l_tasks in line_tasks.items():
-            ordered = _tsp_2opt(l_tasks, co_matrix) if do_2opt else sorted(l_tasks, key=lambda t:(t.get("優先度",5), t["出荷日"] if isinstance(t["出荷日"],pd.Timestamp) else pd.Timestamp.today()))
-            
-            if mode == "forward":
-                cursor = pd.Timestamp(start_dt).normalize() + timedelta(hours=ws_h)
-            else:
-                latest = max((t["出荷日"] for t in ordered if isinstance(t["出荷日"],pd.Timestamp)), default=pd.Timestamp.today()+timedelta(days=7))
-                wh = max(1, we_h - ws_h)
-                tot_h = sum(to_int(t.get("製造必要量(cs)",0))/max(1,pa_cache[t["製品名"]]["時間あたり生産量"])+pa_cache[t["製品名"]]["リードタイム時間"] for t in ordered)
-                tot_co = sum(_co_time(ordered[i]["製品名"],ordered[i+1]["製品名"],co_matrix)/60. for i in range(len(ordered)-1))
-                days = max(1, int(np.ceil((tot_h+tot_co)/wh)))
-                cursor = (latest - timedelta(days=days)).normalize() + timedelta(hours=ws_h)
-                cursor = _snap(cursor, ws_h, we_h, shift_slots, break_slots, 1)
+            # 切替ロス（糊45分／仕様15分）が最小になる順序を貪欲法＋2-optで探索
+            rem = l_tasks[:]
+            ordered = [rem.pop(0)] if rem else []
+            while rem:
+                best = min(rem, key=lambda x: _co_cost(ordered[-1]["製品名"], x["製品名"])); rem.remove(best); ordered.append(best)
+            if do_2opt and len(ordered) <= 40:
+                def _tot(o): return sum(_co_cost(o[i]["製品名"], o[i+1]["製品名"]) for i in range(len(o)-1))
+                for _ in range(6):
+                    improved = False
+                    for i in range(1, len(ordered)-1):
+                        for j in range(i+1, len(ordered)):
+                            no = ordered[:i]+ordered[i:j+1][::-1]+ordered[j+1:]
+                            if _tot(no) < _tot(ordered)-0.01: ordered = no; improved = True
+                    if not improved: break
+
+            fwd_cursor = pd.Timestamp(start_dt).normalize() + timedelta(hours=ws_h)
+            line_day_cursor = {}
 
             prev_pn = None
             for task in ordered:
@@ -2676,12 +2710,47 @@ elif pg == "🏗️ 製造スケジューラー":
                 mh = round(mq / max(1, pa["時間あたり生産量"]), 2)
                 lt = float(pa["リードタイム時間"])
                 ship = task.get("出荷日", pd.NaT)
+                status_extra = ""
 
-                com = _co_time(prev_pn, pn, co_matrix) if prev_pn else 0
-                coh = com / 60.
+                if mode == "forward":
+                    cursor = fwd_cursor
+                else:
+                    # ① 逆算：出荷日−リードタイムで決まった「製造開始期限」を起点に、休日を避けて前倒し
+                    target = task.get("製造開始期限", ship if isinstance(ship, pd.Timestamp) else pd.Timestamp.today().normalize())
+                    if not isinstance(target, pd.Timestamp) or pd.isna(target):
+                        target = pd.Timestamp.today().normalize()
+                    target = target.normalize()
+                    g = 0
+                    while _is_holiday_date(target, _caldf) and g < 14:
+                        target = _prev_biz_day(target+timedelta(days=1), _caldf); g += 1
+
+                    # ② 容量平準化（OKM／糸プラ・玉プラのみ対象）
+                    cls = _line_class(pn)
+                    if cls:
+                        kg = _task_kg(pn, mq)
+                        cap = 1500.0 if cls == "OKM" else 3700.0
+                        placed = False
+                        for _ in range(10):
+                            key = (cls, target.date())
+                            used = day_load.get(key, 0.0)
+                            if used+kg <= cap:
+                                day_load[key] = used+kg; placed = True; break
+                            nxt = _prev_biz_day(target+timedelta(days=1), _caldf)
+                            if nxt == target: break
+                            target = nxt
+                        if not placed:
+                            key = (cls, target.date()); day_load[key] = day_load.get(key,0.0)+kg
+                            status_extra = "🚨 残業対応（キャパオーバー）"
+
+                    dkey = (line, target.date())
+                    cursor = line_day_cursor.get(dkey, target+timedelta(hours=ws_h))
+
+                # ③ 切替ロス（糊45分／仕様15分）
+                com = _co_cost(prev_pn, pn) if prev_pn else 0
+                coh = com/60.
                 con = _is_contam(prev_pn, pn, co_df)
                 if coh > 0:
-                    ce_, _segs_co = _advance(cursor, coh, ws_h, we_h, shift_slots, break_slots, 1)
+                    ce_ = cursor + timedelta(hours=coh)
                     res.append({"区分":"🔴 段取り・洗浄" if con else "🟠 段取り",
                         "製品名":f"【{com}分洗浄】{_ktype(prev_pn)}→{_ktype(pn)}" if con else f"【段取り{com}分】→{pn}",
                         "工程":"段取り・洗浄" if con else "段取り","ライン":line, "開始":cursor,"終了":ce_,"所要時間(h)":round(coh,2),"製造量(cs)":0,
@@ -2689,22 +2758,28 @@ elif pg == "🏗️ 製造スケジューラー":
                     cursor = ce_
 
                 if lt > 0:
-                    lt_e, lt_segs = _advance(cursor, lt, ws_h, we_h, shift_slots, break_slots, pa["最少人員_調合"])
-                    res.append({"区分":"🟡 準備","製品名":pn,"工程":"準備","ライン":line, "開始":cursor,"終了":lt_e,"所要時間(h)":round(lt,2),"製造量(cs)":0, "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":0,"コンタミリスク":False, "優先度":task.get("優先度",5),"ステータス":task.get("ステータス",""), "最少人数":pa["最少人員_調合"],"キーマン必要":pa["キーマン必要"],"_segs":lt_segs})
+                    lt_e = cursor + timedelta(hours=lt)
+                    res.append({"区分":"🟡 準備","製品名":pn,"工程":"準備","ライン":line, "開始":cursor,"終了":lt_e,"所要時間(h)":round(lt,2),"製造量(cs)":0, "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":0,"コンタミリスク":False, "優先度":task.get("優先度",5),"ステータス":(task.get("ステータス","")+" "+status_extra).strip() if status_extra else task.get("ステータス",""), "最少人数":pa["最少人員_調合"],"キーマン必要":pa["キーマン必要"],"_segs":[]})
                     cursor = lt_e
 
                 for proc in _PROCESSES:
                     ph = round(mh * pa[PROC_RATIO[proc]], 2)
                     ms = pa[PROC_MIN[proc]]
                     if ph < 1e-6: continue
-                    pe, segs = _advance(cursor, ph, ws_h, we_h, shift_slots, break_slots, ms)
+                    pe = cursor + timedelta(hours=ph)
                     dok = True
                     if isinstance(ship, pd.Timestamp) and pd.notnull(ship): dok = pe.normalize() <= ship
-                    res.append({"区分":f"🏭 {proc}","製品名":pn,"工程":proc,"ライン":line, "開始":cursor,"終了":pe,"所要時間(h)":ph, "製造量(cs)":max(0,round(mq*pa[PROC_RATIO[proc]])), "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":0,"コンタミリスク":False, "優先度":task.get("優先度",5), "ステータス":"🚨 納期遅れ" if not dok else task.get("ステータス",""), "最少人数":ms,"キーマン必要":pa["キーマン必要"] and proc=="調合・練り", "_segs":segs})
+                    stt = "🚨 納期遅れ" if not dok else task.get("ステータス","")
+                    if status_extra and status_extra not in stt: stt = (stt+" "+status_extra).strip()
+                    res.append({"区分":f"🏭 {proc}","製品名":pn,"工程":proc,"ライン":line, "開始":cursor,"終了":pe,"所要時間(h)":ph, "製造量(cs)":max(0,round(mq*pa[PROC_RATIO[proc]])), "出荷日":ship,"顧客名":task.get("顧客名",""), "段取り時間(分)":0,"コンタミリスク":False, "優先度":task.get("優先度",5), "ステータス":stt, "最少人数":ms,"キーマン必要":pa["キーマン必要"] and proc=="調合・練り", "_segs":[]})
                     cursor = pe
 
+                if mode == "forward":
+                    fwd_cursor = cursor
+                else:
+                    line_day_cursor[dkey] = cursor
                 prev_pn = pn
-        
+
         res.sort(key=lambda x: (x["開始"] if isinstance(x["開始"], pd.Timestamp) else pd.Timestamp.min))
         return res
 
