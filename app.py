@@ -1424,22 +1424,33 @@ elif pg == "📊 在庫・スケジュール":
             for d in pd.date_range(today, today+timedelta(days=7)):
                 if d_fs.get(d,0)<0:
                     do = odf[(odf["製品名"]==p)&(safe_dt_date(odf["納品予定日"])==d.date())&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
-                    al.append({"日付":d,"日付表示":format_date_jp(d),"製品名":p_norm,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
+                    al.append({"日付":d,"製品名":p_norm,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
         if al:
-            _da_raw = pd.DataFrame(al)
-            def _uniq_join(s):
+            def _uniq_join(vals):
                 seen = []
-                for part in s:
+                for part in vals:
                     for x in str(part).split(" / "):
                         x = x.strip()
                         if x and x != "―" and x not in seen: seen.append(x)
                 return " / ".join(seen) if seen else "―"
-            da = (_da_raw.groupby(["日付","日付表示","製品名"], as_index=False)
-                         .agg(予測在庫=("予測在庫","min"), 現在庫=("現在庫","max"),
-                              顧客名=("顧客名",_uniq_join), 備考=("備考",_uniq_join))
-                         .sort_values("日付"))
-            da = da.drop(columns=["日付"]).rename(columns={"日付表示":"日付"})[["日付","製品名","予測在庫","現在庫","顧客名","備考"]]
-            st.dataframe(da.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予測在庫"]), use_container_width=True, hide_index=True)
+            _da_raw = pd.DataFrame(al).sort_values(["製品名","日付"])
+            rows = []
+            for pn, g in _da_raw.groupby("製品名", sort=False):
+                g = g.sort_values("日付").reset_index(drop=True)
+                buf = [g.loc[0]]; start = g.loc[0,"日付"]; prev = start
+                def _flush(buf, start, end):
+                    sub = pd.DataFrame(buf)
+                    date_disp = format_date_jp(start) if start==end else f"{format_date_jp(start)}〜{format_date_jp(end)}"
+                    rows.append({"日付":date_disp,"製品名":pn,"予測在庫(最小)":int(sub["予測在庫"].min()),"現在庫":int(sub["現在庫"].max()),"顧客名":_uniq_join(sub["顧客名"]),"備考":_uniq_join(sub["備考"])})
+                for i in range(1, len(g)):
+                    cur_d = g.loc[i,"日付"]
+                    if (cur_d - prev).days == 1:
+                        buf.append(g.loc[i]); prev = cur_d
+                    else:
+                        _flush(buf, start, prev); buf = [g.loc[i]]; start = cur_d; prev = cur_d
+                _flush(buf, start, prev)
+            da = pd.DataFrame(rows)
+            st.dataframe(da.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予測在庫(最小)"]), use_container_width=True, hide_index=True)
         else: st.success("✅ 欠品予測なし")
 
     with t1:
@@ -2613,7 +2624,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 sh=oq-max(0,ps-pa["安全在庫数"])
                 dl=(ship_d-n).days
                 if sh<=0:
-                    tasks.append({"製品名":pn,"顧客名":str(row.get("顧客名","")),"出荷日":ship_d,"受注数(cs)":oq,"製造必要量(cs)":0,"製造時間(h)":0.,"製造開始期限":ship_d,"優先度":5,"ステータス":"✅ 在庫充足","段取りG":pa["段取りグループ"],"歩留まり率":pa["歩留まり率"],"ライン":pa["ラインID"]}); continue
+                    tasks.append({"製品名":pn,"顧客名":str(row.get("顧客名","")),"出荷日":ship_d,"受注数(cs)":oq,"製造必要量(cs)":0,"製造時間(h)":0.,"製造開始期限":ship_d,"優先度":5,"ステータス":"✅ 在庫充足","段取りG":pa["段取りグループ"],"歩留まり率":pa["歩留まり率"],"ライン":pa["ラインID"],"現在庫(cs)":c_s,"安全在庫(cs)":pa["安全在庫数"]}); continue
                 yr=pa["歩留まり率"]/100.
                 mq=int(np.ceil(max(1,sh)/max(0.01,yr)))
                 lot=pa["最小製造ロット"]
@@ -2624,7 +2635,7 @@ elif pg == "🏗️ 製造スケジューラー":
                 sdl=ship_d-timedelta(days=wd)
                 pr=1 if dl<=1 else 2 if dl<=3 else 3 if dl<=7 else 4 if dl<=14 else 5
                 stt=("🔴 緊急" if sdl<=n else "🟠 要注意" if dl<=3 else "🟡 注意" if dl<=7 else "🟢 計画内")
-                tasks.append({"製品名":pn,"顧客名":str(row.get("顧客名","")),"出荷日":ship_d,"受注数(cs)":oq,"製造必要量(cs)":mq,"製造時間(h)":mh,"製造開始期限":sdl,"優先度":pr,"ステータス":stt,"段取りG":pa["段取りグループ"],"歩留まり率":pa["歩留まり率"],"ライン":pa["ラインID"]})
+                tasks.append({"製品名":pn,"顧客名":str(row.get("顧客名","")),"出荷日":ship_d,"受注数(cs)":oq,"製造必要量(cs)":mq,"製造時間(h)":mh,"製造開始期限":sdl,"優先度":pr,"ステータス":stt,"段取りG":pa["段取りグループ"],"歩留まり率":pa["歩留まり率"],"ライン":pa["ラインID"],"現在庫(cs)":c_s,"安全在庫(cs)":pa["安全在庫数"]})
         needed=[t for t in tasks if t["製造必要量(cs)"]>0]
         needed.sort(key=lambda t:(t["段取りG"] or "ZZZ",t["優先度"],t["出荷日"]))
         return needed+[t for t in tasks if t["製造必要量(cs)"]==0]
@@ -2857,7 +2868,7 @@ elif pg == "🏗️ 製造スケジューラー":
             for c in ["出荷日","製造開始期限"]:
                 if c in dft.columns:
                     dft[c]=dft[c].apply(lambda x: x.strftime("%Y/%m/%d") if isinstance(x,(pd.Timestamp,datetime)) and pd.notnull(x) else str(x)[:10])
-            sc=[c for c in ["優先度","ステータス","製品名","段取りG","ライン","顧客名","出荷日","受注数(cs)","製造必要量(cs)","製造時間(h)","製造開始期限","歩留まり率"] if c in dft.columns]
+            sc=[c for c in ["優先度","ステータス","製品名","段取りG","ライン","現在庫(cs)","安全在庫(cs)","顧客名","出荷日","受注数(cs)","製造必要量(cs)","製造時間(h)","製造開始期限","歩留まり率"] if c in dft.columns]
             def _rc(r):
                 p=r.get("優先度",5)
                 if p<=1: return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
@@ -2866,7 +2877,10 @@ elif pg == "🏗️ 製造スケジューラー":
                 if "充足" in str(r.get("ステータス","")): return ['background-color:#F0FDF4;color:#6B7280;']*len(r)
                 return ['']*len(r)
             st.dataframe(dft[sc].style.apply(_rc,axis=1),hide_index=True, use_container_width=True,
-                column_config={"優先度":st.column_config.NumberColumn(width="small"), "製造時間(h)":st.column_config.NumberColumn(format="%.1f"), "歩留まり率":st.column_config.NumberColumn("歩留まり(%)",format="%d")}, height=min(700,max(280,len(dft)*38+60)))
+                column_config={"優先度":st.column_config.NumberColumn(width="small"), "製造時間(h)":st.column_config.NumberColumn(format="%.1f"), "歩留まり率":st.column_config.NumberColumn("歩留まり(%)",format="%d"), "現在庫(cs)":st.column_config.NumberColumn("現在庫(cs)",help="本日時点の在庫（受注反映済み）"), "安全在庫(cs)":st.column_config.NumberColumn("安全在庫(cs)")}, height=min(700,max(280,len(dft)*38+60)))
+            _low_stock = [t["製品名"] for t in needed_tasks if t.get("現在庫(cs)",0) <= t.get("安全在庫(cs)",0) and t.get("優先度",5)<=2]
+            if _low_stock:
+                st.markdown(f'<div class="warn-banner">📦 現在庫が既に安全在庫以下：{"、".join(dict.fromkeys(_low_stock[:8]))}{"…" if len(_low_stock)>8 else ""} — 製造開始を前倒しできないか確認してください。</div>',unsafe_allow_html=True)
 
             with st.expander("🔀 製造順序を手動で変更"):
                 st.markdown('<div class="info-tip">💡 製品を並び替えると、段取りマトリクスを考慮した上でその順序でスケジュールを再計算します。</div>',unsafe_allow_html=True)
