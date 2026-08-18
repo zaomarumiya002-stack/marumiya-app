@@ -52,14 +52,18 @@ def safe_dt_date(s):
                     converted = converted.dt.tz_localize(None)
             except Exception:
                 pass
-            return converted.dt.normalize().dt.date
+            res = converted.dt.normalize().dt.date
+            res.index = s.index
+            return res
         else:
             converted = pd.to_datetime(s, errors='coerce', utc=False)
             if pd.isna(converted):
                 return None
             return converted.normalize().date()
     except Exception:
-        if hasattr(s, '__len__'):
+        if isinstance(s, pd.Series):
+            return pd.Series([None] * len(s), index=s.index)
+        elif hasattr(s, '__len__'):
             return pd.Series([None] * len(s))
         return None
 
@@ -71,9 +75,11 @@ def _nd_to_date(series):
                 s = s.dt.tz_localize(None)
         except Exception:
             pass
-        return s.dt.normalize().dt.date
+        res = s.dt.normalize().dt.date
+        res.index = series.index
+        return res
     except Exception:
-        return pd.Series([None] * len(series))
+        return pd.Series([None] * len(series), index=series.index if hasattr(series, 'index') else None)
 
 def is_special_order(r): return "特注" in str(r) or "チャーター便" in str(r)
 def make_csv_bytes(df): return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
@@ -551,8 +557,12 @@ with st.sidebar:
     st.markdown("<div style='padding:16px 8px 8px;'><span style='font-size:22px;'>🏭</span><span style='font-size:16px; font-weight:900; color:#F1F5F9; margin-left:8px;'>丸実屋システム</span></div>", unsafe_allow_html=True)
     _today = date.today()
     if not odf.empty and "納品予定日" in odf.columns:
-        _odf_valid = odf[odf["不良廃棄フラグ"] == False] if "不良廃棄フラグ" in odf.columns else odf
-        _odf_valid = _odf_valid[_odf_valid["日付未定フラグ"] == False] if "日付未定フラグ" in _odf_valid.columns else _odf_valid
+        _m_valid = pd.Series(True, index=odf.index)
+        if "不良廃棄フラグ" in odf.columns:
+            _m_valid &= (odf["不良廃棄フラグ"] == False)
+        if "日付未定フラグ" in odf.columns:
+            _m_valid &= (odf["日付未定フラグ"] == False)
+        _odf_valid = odf[_m_valid]
         toc = int((_nd_to_date(_odf_valid["納品予定日"]) == _today).sum())
     else:
         toc = 0
@@ -574,7 +584,7 @@ with st.sidebar:
         st.rerun()
 
 pg = st.session_state.current_page
-hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケ-ジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
+hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
 def page_header(t):
     st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
 def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
@@ -715,11 +725,11 @@ elif pg == "🚚 出荷・発送管理":
         _local_today = pd.Timestamp.now().date()
         td = st.date_input("📅 対象日", value=_local_today)
         if not odf.empty:
-            _mask = (
-                (_nd_to_date(odf["納品予定日"]) == td) &
-                (odf["不良廃棄フラグ"] == False) &
-                (odf.get("日付未定フラグ", pd.Series(False, index=odf.index)) == False)
-            )
+            _mask = (_nd_to_date(odf["納品予定日"]) == td)
+            if "不良廃棄フラグ" in odf.columns:
+                _mask = _mask & (odf["不良廃棄フラグ"] == False)
+            if "日付未定フラグ" in odf.columns:
+                _mask = _mask & (odf["日付未定フラグ"] == False)
             d_ord = odf[_mask].copy()
         else:
             d_ord = pd.DataFrame()
@@ -1422,7 +1432,13 @@ elif pg == "📊 在庫・スケジュール":
         for p, d_fs in fs.items():
             for d in pd.date_range(today, today+timedelta(days=7)):
                 if d_fs.get(d,0)<0:
-                    do = odf[(odf["製品名"]==p)&(safe_dt_date(odf["納品予定日"])==d.date())&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
+                    if not odf.empty:
+                        _o_mask = (odf["製品名"]==p) & (safe_dt_date(odf["納品予定日"])==d.date())
+                        if "不良廃棄フラグ" in odf.columns:
+                            _o_mask = _o_mask & (odf["不良廃棄フラグ"]==False)
+                        do = odf[_o_mask]
+                    else:
+                        do = pd.DataFrame()
                     al.append({"日付":format_date_jp(d),"製品名":p,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
         if al:
             da = pd.DataFrame(al).drop_duplicates()
@@ -1837,8 +1853,16 @@ elif pg == "📈 経営・分析ダッシュボード":
     td1,td2,td3,td4 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド"])
     with td1:
         if not odf.empty:
-            tm = date.today().replace(day=1); om = odf[(safe_dt_date(odf["納品予定日"])>=tm)&(odf["不良廃棄フラグ"]==False)]
-            c1,c2,c3,c4 = st.columns(4); c1.metric("今月 出荷", f"{om['ケース数'].apply(to_int).sum():,} cs", delta=f"{om['顧客名'].nunique()} 顧客"); c2.metric("今月 不良", f"{odf[(safe_dt_date(odf['納品予定日'])>=tm)&(odf['不良廃棄フラグ']==True)]['ケース数'].apply(to_int).sum():,} cs", delta_color="inverse"); c3.metric("荷姿チェック率", f"{int(len(odf[odf['荷姿チェック']==True])/max(len(odf),1)*100)} %"); c4.metric("欠品品目数", f"{sum(1 for v in cs.values() if v<=0)} 品目", delta_color="inverse")
+            tm = date.today().replace(day=1)
+            _o_mask_m = safe_dt_date(odf["納品予定日"])>=tm
+            if "不良廃棄フラグ" in odf.columns:
+                _o_mask_ok = _o_mask_m & (odf["不良廃棄フラグ"]==False)
+                _o_mask_ng = _o_mask_m & (odf["不良廃棄フラグ"]==True)
+            else:
+                _o_mask_ok = _o_mask_m
+                _o_mask_ng = pd.Series(False, index=odf.index)
+            om = odf[_o_mask_ok]
+            c1,c2,c3,c4 = st.columns(4); c1.metric("今月 出荷", f"{om['ケース数'].apply(to_int).sum():,} cs", delta=f"{om['顧客名'].nunique()} 顧客"); c2.metric("今月 不良", f"{odf[_o_mask_ng]['ケース数'].apply(to_int).sum():,} cs", delta_color="inverse"); c3.metric("荷姿チェック率", f"{int(len(odf[odf['荷姿チェック']==True])/max(len(odf),1)*100)} %"); c4.metric("欠品品目数", f"{sum(1 for v in cs.values() if v<=0)} 品目", delta_color="inverse")
             ca,cb = st.columns(2)
             with ca:
                 ss = odf[odf["運送会社"].str.strip()!=""]["運送会社"].value_counts().reset_index()
@@ -1848,7 +1872,8 @@ elif pg == "📈 経営・分析ダッシュボード":
                 if not cua.empty: st.plotly_chart(px.bar(cua,x="ケース数",y="顧客名",orientation='h',title="主要顧客 TOP5"), use_container_width=True)
     with td2:
         if not odf.empty:
-            o2 = odf[odf["不良廃棄フラグ"]==False].copy(); o2["ケース数"] = o2["ケース数"].apply(to_int); abc = o2.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
+            o2 = odf[odf["不良廃棄フラグ"]==False].copy() if "不良廃棄フラグ" in odf.columns else odf.copy()
+            o2["ケース数"] = o2["ケース数"].apply(to_int); abc = o2.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
             if abc["ケース数"].sum()>0:
                 abc["累計比率"] = abc["ケース数"].cumsum()/abc["ケース数"].sum()*100; abc["ランク"] = pd.cut(abc["累計比率"],bins=[0,70,90,100],labels=["A(主力)","B(中堅)","C(その他)"])
                 st.plotly_chart(px.bar(abc.head(20),x="製品名",y="ケース数",color="ランク",title="ABC TOP20"), use_container_width=True)
@@ -1860,7 +1885,8 @@ elif pg == "📈 経営・分析ダッシュボード":
         if p_sum: st.dataframe(pd.DataFrame([{"資材":k,"庫":v.get("現在庫",0),"点":v.get("発注点",0),"出":v.get("出庫",0)} for k,v in p_sum.items()]).style.apply(lambda r: ['background-color:#FFEDD5;color:#C2410C;']*len(r) if to_int(r.get("庫",0))<to_int(r.get("点",0)) else ['']*len(r), axis=1), hide_index=True)
     with td4:
         if not odf.empty:
-            tdf = odf[odf["不良廃棄フラグ"]==False].copy(); tdf["年月"] = pd.to_datetime(tdf["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
+            tdf = odf[odf["不良廃棄フラグ"]==False].copy() if "不良廃棄フラグ" in odf.columns else odf.copy()
+            tdf["年月"] = pd.to_datetime(tdf["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
             mn = tdf.groupby(["年月","大カテゴリ"])["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
             if not mn.empty: st.plotly_chart(px.bar(mn,x="年月",y="ケース数",color="大カテゴリ",barmode="stack",title="月次カテ別"), use_container_width=True)
 
