@@ -1568,12 +1568,20 @@ elif pg == "📊 在庫・スケジュール":
 
                     _row_balance = {}
                     _wbal = stock_asof(dp, _win_start); _wday = None
-                    for _e in _ev_list:
+                    _past_events = [e for e in _ev_list if e["_dt"].normalize() < today]
+                    _today_events = [e for e in _ev_list if e["_dt"].normalize() == today]
+                    for _e in _past_events:
                         _d = _e["_dt"].normalize()
                         if _wday is not None and _d != _wday and _wday < today and _wbal < 0: _wbal = 0
                         _wday = _d
                         _wbal += to_int(_e["qty"])
                         _row_balance[_e["key"]] = _wbal
+                    # 本日分：複数件あっても「本日開始時点の在庫」（現在庫）を起点に本日分を合算した1つの値に統一する
+                    # （1件目だけ引いた途中経過ではなく、2件目以降が再度引き算する二重減算を防ぐ）
+                    if _today_events:
+                        _today_bal = cs.get(dp, 0) + sum(to_int(_e["qty"]) for _e in _today_events)
+                        for _e in _today_events:
+                            _row_balance[_e["key"]] = _today_bal
 
                     _rows = []
                     if not ph_win.empty:
