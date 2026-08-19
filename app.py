@@ -1568,20 +1568,12 @@ elif pg == "📊 在庫・スケジュール":
 
                     _row_balance = {}
                     _wbal = stock_asof(dp, _win_start); _wday = None
-                    _past_events = [e for e in _ev_list if e["_dt"].normalize() < today]
-                    _today_events = [e for e in _ev_list if e["_dt"].normalize() == today]
-                    for _e in _past_events:
+                    for _e in _ev_list:
                         _d = _e["_dt"].normalize()
                         if _wday is not None and _d != _wday and _wday < today and _wbal < 0: _wbal = 0
                         _wday = _d
                         _wbal += to_int(_e["qty"])
                         _row_balance[_e["key"]] = _wbal
-                    # 本日分：複数件あっても「本日開始時点の在庫」（現在庫）を起点に本日分を合算した1つの値に統一する
-                    # （1件目だけ引いた途中経過ではなく、2件目以降が再度引き算する二重減算を防ぐ）
-                    if _today_events:
-                        _today_bal = cs.get(dp, 0) + sum(to_int(_e["qty"]) for _e in _today_events)
-                        for _e in _today_events:
-                            _row_balance[_e["key"]] = _today_bal
 
                     _rows = []
                     if not ph_win.empty:
@@ -1600,6 +1592,15 @@ elif pg == "📊 在庫・スケジュール":
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
                                           "数量(±)": _diff_q, "実績在庫": _row_balance.get(("m", _idx), "")})
                     _rows.sort(key=lambda x: x["_dt"])
+
+                    # 本日分：表示順どおりに「本日開始時点の在庫」（現在庫）を起点として1件ずつ正しく積み上げる
+                    # （国分北海道 -4 → 2、続くにしむら -3 → -1、のように前の行の結果から順に引き算する）
+                    _wbal_today = cs.get(dp, 0)
+                    for _r in _rows:
+                        if pd.Timestamp(_r["_dt"]).normalize() == today:
+                            _wbal_today += to_int(_r["数量(±)"])
+                            _r["実績在庫"] = _wbal_today
+
                     
                     _past_rows = [r for r in _rows if pd.Timestamp(r["_dt"]).normalize() < today]
                     _today_rows = [r for r in _rows if pd.Timestamp(r["_dt"]).normalize() == today]
