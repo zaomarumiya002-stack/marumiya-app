@@ -144,7 +144,8 @@ def load_data(name):
                          "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ",
                          "段取りタイプ","ラインID","最小製造ロット",
                          "調合比率","成形比率","包装比率","レトルト比率",
-                         "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要"],
+                         "最少人員_調合","最少人員_成形","最少人員_包装","最少人員_レトルト","キーマン必要",
+                         "特注フラグ","チャーターフラグ"],
         "customers":        ["顧客名","ふりがな","帳合先","支店名"],
         "packaging_master": ["資材名","品番","規格","仕入先","保管場所","単位","初期在庫","発注点","発注リードタイム","管理区分"],
         "packaging_logs":   ["ID","登録日","資材名","処理区分","数量","理由","備考","関連製品名","理論在庫","登録日時"],
@@ -1559,24 +1560,6 @@ elif pg == "📊 在庫・スケジュール":
                     ph_win = ph[pd.to_datetime(ph["納品予定日"],errors='coerce')>=_win_start] if not ph.empty else ph
                     mh_win = mh[pd.to_datetime(mh["製造予定日"],errors='coerce')>=_win_start] if not mh.empty else mh
 
-                    _ev_list = []
-                    if not ph_win.empty:
-                        for _idx, r in ph_win.iterrows():
-                            _ev_list.append({"key": ("o", _idx), "_dt": r["納品予定日"], "_reg": r.get("登録日時"), "qty": -to_int(r.get("ケース数", 0))})
-                    if not mh_win.empty:
-                        for _idx, r in mh_win.iterrows():
-                            _ev_list.append({"key": ("m", _idx), "_dt": r["製造予定日"], "_reg": r.get("登録日時"), "qty": to_int(r.get("ケース数", 0))})
-                    _ev_list.sort(key=lambda e: (e["_dt"], e["_reg"] if pd.notna(e["_reg"]) else pd.Timestamp.min))
-
-                    _row_balance = {}
-                    _wbal = stock_asof(dp, _win_start); _wday = None
-                    for _e in _ev_list:
-                        _d = _e["_dt"].normalize()
-                        if _wday is not None and _d != _wday and _wday < today and _wbal < 0: _wbal = 0
-                        _wday = _d
-                        _wbal += to_int(_e["qty"])
-                        _row_balance[_e["key"]] = _wbal
-
                     _rows = []
                     if not ph_win.empty:
                         for _idx, r in ph_win.sort_values("納品予定日").iterrows():
@@ -1584,7 +1567,7 @@ elif pg == "📊 在庫・スケジュール":
                             _diff_q = -to_int(r.get("ケース数",0))
                             _rows.append({"_dt": r["納品予定日"], "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else "🚚 出荷(実績)",
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else f'{r.get("顧客名","")} {_note}'.strip(),
-                                          "数量(±)": _diff_q, "実績在庫": _row_balance.get(("o", _idx), "")})
+                                          "数量(±)": _diff_q, "実績在庫": ""})
                     if not mh_win.empty:
                         for _idx, r in mh_win.sort_values("製造予定日").iterrows():
                             _note = str(r.get("備考",""))
@@ -1592,18 +1575,23 @@ elif pg == "📊 在庫・スケジュール":
                             _kubun = "📊 補正" if _is_adjustment(_note) else ("🏭 製造(在庫非反映)" if "【在庫非反映】" in _note else "🏭 製造(実績)")
                             _rows.append({"_dt": r["製造予定日"], "日付": format_date_jp(r["製造予定日"]), "区分": _kubun,
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
-                                          "数量(±)": _diff_q, "実績在庫": _row_balance.get(("m", _idx), "")})
+                                          "数量(±)": _diff_q, "実績在庫": ""})
                     _rows.sort(key=lambda x: x["_dt"])
 
-                    # 本日分：表示順どおりに「本日開始時点の在庫」（現在庫）を起点として1件ずつ正しく積み上げる
-                    # （国分北海道 -4 → 2、続くにしむら -3 → -1、のように前の行の結果から順に引き算する）
-                    _wbal_today = cs.get(dp, 0)
+                    # 実績在庫：画面に表示される順番どおりに、1件ずつ数量を足し引きして積み上げる（全製品共通ロジック）。
+                    # 過去日は期間開始時点の在庫（stock_asof）を起点に、本日分に入る瞬間は「本日開始時点の在庫」
+                    # （＝正しい現在庫 cs）に同期し直してから続けて積み上げる。同日に複数件あっても表示順どおり順番に反映される。
+                    _wbal = stock_asof(dp, _win_start); _wday = None; _synced_today = False
                     for _r in _rows:
-                        if pd.Timestamp(_r["_dt"]).normalize() == today:
-                            _wbal_today += to_int(_r["数量(±)"])
-                            _r["実績在庫"] = _wbal_today
+                        _d = pd.Timestamp(_r["_dt"]).normalize()
+                        if _d == today and not _synced_today:
+                            _wbal = cs.get(dp, 0); _synced_today = True
+                        elif _wday is not None and _d != _wday and _wday < today and _wbal < 0:
+                            _wbal = 0
+                        _wday = _d
+                        _wbal += to_int(_r["数量(±)"])
+                        _r["実績在庫"] = _wbal
 
-                    
                     _past_rows = [r for r in _rows if pd.Timestamp(r["_dt"]).normalize() < today]
                     _today_rows = [r for r in _rows if pd.Timestamp(r["_dt"]).normalize() == today]
                     _today_marker = [{"_dt": today, "日付": f"── ↓ 本日 {format_date_jp(today)} の記録 ↓ ──", "区分": "現在庫", "出荷先/備考": "本日開始時点の在庫", "数量(±)": "", "実績在庫": f"{cs.get(dp,0):,}"}]
@@ -1831,12 +1819,27 @@ elif pg == "📊 在庫・スケジュール":
 # ─────────────────────────────────────────────
 elif pg == "⭐ 特注・チャータースケジュール":
     page_header("⭐ 特注・チャータースケジュール")
-    spo = odf[odf["備考"].apply(is_special_order)].copy() if not odf.empty else pd.DataFrame()
+    _mst_sp = mst_u[["製品名","特注フラグ","チャーターフラグ"]].copy() if not mst_u.empty and "特注フラグ" in mst_u.columns else pd.DataFrame(columns=["製品名","特注フラグ","チャーターフラグ"])
+    _mst_sp_prods = set(_mst_sp[(_mst_sp["特注フラグ"]==True)|(_mst_sp["チャーターフラグ"]==True)]["製品名"].tolist()) if not _mst_sp.empty else set()
+    spo_text = odf[odf["備考"].apply(is_special_order)].copy() if not odf.empty else pd.DataFrame()
+    spo_mst = odf[odf["製品名"].isin(_mst_sp_prods)].copy() if not odf.empty and _mst_sp_prods else pd.DataFrame()
+    spo = pd.concat([spo_text, spo_mst], ignore_index=True).drop_duplicates(subset="ID") if not spo_text.empty or not spo_mst.empty else pd.DataFrame()
+    def _sp_kind(row):
+        txt = str(row.get("備考",""))
+        has_t = "特注" in txt; has_c = "チャーター便" in txt
+        if not has_t and not has_c and not _mst_sp.empty:
+            mrow = _mst_sp[_mst_sp["製品名"]==row.get("製品名")]
+            if not mrow.empty:
+                has_t = bool(mrow.iloc[0]["特注フラグ"]); has_c = bool(mrow.iloc[0]["チャーターフラグ"])
+        if has_t and has_c: return "特注+チャーター便"
+        if has_c: return "チャーター便"
+        return "特注"
     ts1, ts2, ts3 = st.tabs(["📋 一覧","📅 製品別スケジュール","✏️ 編集・保存"])
     with ts1:
         if spo.empty: st.info("なし")
         else:
-            spo["種別"] = spo["備考"].apply(lambda r: "特注+チャーター便" if "特注" in str(r) and "チャーター便" in str(r) else ("特注" if "特注" in str(r) else "チャーター便"))
+            st.markdown('<div class="info-tip">💡 受注時に「特注」「チャーター便」と登録されたもの、または製品マスタで⭐特注品／🚌チャーター品に設定されている製品の受注を、登録日時に関わらず自動的に表示しています。</div>', unsafe_allow_html=True)
+            spo["種別"] = spo.apply(_sp_kind, axis=1)
             spo["出荷予定日"] = spo["納品予定日"].apply(format_date_jp)
             sc = [c for c in ["種別","顧客名","出荷予定日","製品名","ケース数","備考"] if c in spo.columns]
             st.dataframe(spo[sc].style.apply(lambda r: ['background-color:#F3E8FF;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")) else (['background-color:#EDE9FE;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) else ['background-color:#E0F2FE;font-weight:bold;']*len(r)), axis=1), hide_index=True)
@@ -1936,12 +1939,16 @@ elif pg == "⚙️ マスタ・分析":
         if "入数" not in em_base.columns: em_base["入数"] = em_base.get("入数(袋/cs)", 10)
         if "甲消費数" not in em_base.columns: em_base["甲消費数"] = em_base.get("甲入数", 4)
         if "製造リードタイム日" not in em_base.columns: em_base["製造リードタイム日"] = 1
+        if "特注フラグ" not in em_base.columns: em_base["特注フラグ"] = False
+        if "チャーターフラグ" not in em_base.columns: em_base["チャーターフラグ"] = False
         
         _mst_active = ["大カテゴリ","製品名","初期在庫数",
                        "使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日",
-                       "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"]
+                       "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ",
+                       "特注フラグ","チャーターフラグ"]
         
         em_show = em_base[[c for c in _mst_active if c in em_base.columns]]
+        st.markdown('<div class="info-tip">💡 <b>特注フラグ／チャーターフラグ</b>：ここでONにした製品は、受注登録時の種別が自動で選択されるほか、既に登録済みの受注も含めて「⭐ 特注・チャータースケジュール」に自動反映されます。</div>', unsafe_allow_html=True)
         em = st.data_editor(em_show, num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={
                 "大カテゴリ": st.column_config.SelectboxColumn(options=[c.split(" ",1)[1] for c in CATS]),
@@ -1956,6 +1963,8 @@ elif pg == "⚙️ マスタ・分析":
                 "リードタイム時間": st.column_config.NumberColumn("LT(h)", min_value=0, step=1, format="%d"),
                 "安全在庫数": st.column_config.NumberColumn("安全在庫(cs)", min_value=0, step=1, format="%d"),
                 "段取りグループ": st.column_config.TextColumn("段取りG"),
+                "特注フラグ": st.column_config.CheckboxColumn("⭐ 特注品"),
+                "チャーターフラグ": st.column_config.CheckboxColumn("🚌 チャーター品"),
             }, height=500, key="prod_mst_ed")
         _m1_msg_area = st.container()
         if st.button("💾 製品マスタ保存", type="primary", key="btn_save_prod_mst"):
@@ -1973,6 +1982,10 @@ elif pg == "⚙️ マスタ・分析":
                 for col in numeric_cols:
                     if col in save_target.columns:
                         save_target[col] = pd.to_numeric(save_target[col], errors='coerce').fillna(0).astype(int)
+
+                for col in ["特注フラグ","チャーターフラグ"]:
+                    if col in save_target.columns:
+                        save_target[col] = save_target[col].fillna(False).astype(bool)
 
                 save_target["製造登録区分"] = save_target["製造登録区分"].replace(["", None], "ケース")
                 save_target["大カテゴリ"] = save_target["大カテゴリ"].replace(["", None], "その他")
