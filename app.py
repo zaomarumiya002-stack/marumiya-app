@@ -1484,8 +1484,8 @@ elif pg == "📊 在庫・スケジュール":
                     m = re.search(r"棚卸確定:(-?\d+)", str(note))
                     if m:
                         jissu = int(m.group(1))
-                        if diff == 0: return f"📋 棚卸確認：実数{jissu:,}枚（システム計算と一致・補正なし）"
-                        return f"📋 棚卸補正：実数{jissu:,}枚（システム計算との差分 {diff:+,}枚を補正）"
+                        if diff == 0: return f"📋 棚卸確認：実数{jissu:,}cs（システム計算と一致・補正なし）"
+                        return f"📋 棚卸補正：実数{jissu:,}cs（システム計算との差分 {diff:+,}csを補正）"
                     if "【不良廃棄】" in str(note): return f"🗑️ 不良廃棄：{note}"
                     if "【在庫調整" in str(note): return f"🔧 手動在庫調整：{note}"
                     return str(note)
@@ -1560,12 +1560,15 @@ elif pg == "📊 在庫・スケジュール":
                     ph_win = ph[pd.to_datetime(ph["納品予定日"],errors='coerce')>=_win_start] if not ph.empty else ph
                     mh_win = mh[pd.to_datetime(mh["製造予定日"],errors='coerce')>=_win_start] if not mh.empty else mh
 
+                    _cp = checkpoints.get(dp)
                     _rows = []
                     if not ph_win.empty:
                         for _idx, r in ph_win.sort_values("納品予定日").iterrows():
                             _note = str(r.get("備考",""))
                             _diff_q = -to_int(r.get("ケース数",0))
-                            _rows.append({"_dt": r["納品予定日"], "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else "🚚 出荷(実績)",
+                            _reg = pd.to_datetime(r.get("登録日時"), errors="coerce")
+                            _is_cp_row = (_cp is not None) and (TANAOSHI_TAG in _note) and (pd.Timestamp(r["納品予定日"]).normalize()==pd.Timestamp(_cp["日付"]).normalize()) and (_reg==pd.to_datetime(_cp.get("登録日時"),errors="coerce"))
+                            _rows.append({"_dt": r["納品予定日"], "_reg": _reg, "_is_cp": _is_cp_row, "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else "🚚 出荷(実績)",
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else f'{r.get("顧客名","")} {_note}'.strip(),
                                           "数量(±)": _diff_q, "実績在庫": ""})
                     if not mh_win.empty:
@@ -1573,17 +1576,24 @@ elif pg == "📊 在庫・スケジュール":
                             _note = str(r.get("備考",""))
                             _diff_q = to_int(r.get("ケース数",0))
                             _kubun = "📊 補正" if _is_adjustment(_note) else ("🏭 製造(在庫非反映)" if "【在庫非反映】" in _note else "🏭 製造(実績)")
-                            _rows.append({"_dt": r["製造予定日"], "日付": format_date_jp(r["製造予定日"]), "区分": _kubun,
+                            _reg = pd.to_datetime(r.get("登録日時"), errors="coerce")
+                            _is_cp_row = (_cp is not None) and (TANAOSHI_TAG in _note) and (pd.Timestamp(r["製造予定日"]).normalize()==pd.Timestamp(_cp["日付"]).normalize()) and (_reg==pd.to_datetime(_cp.get("登録日時"),errors="coerce"))
+                            _rows.append({"_dt": r["製造予定日"], "_reg": _reg, "_is_cp": _is_cp_row, "日付": format_date_jp(r["製造予定日"]), "区分": _kubun,
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else _note,
                                           "数量(±)": _diff_q, "実績在庫": ""})
-                    _rows.sort(key=lambda x: x["_dt"])
+                    _rows.sort(key=lambda x: (x["_dt"], x["_reg"] if pd.notna(x["_reg"]) else pd.Timestamp.min))
 
                     # 実績在庫：画面に表示される順番どおりに、1件ずつ数量を足し引きして積み上げる（全製品共通ロジック）。
                     # 過去日は期間開始時点の在庫（stock_asof）を起点に、本日分に入る瞬間は「本日開始時点の在庫」
-                    # （＝正しい現在庫 cs）に同期し直してから続けて積み上げる。同日に複数件あっても表示順どおり順番に反映される。
+                    # （＝正しい現在庫 cs）に同期し直してから続けて積み上げる。同日に複数件あっても、実際の登録日時順に反映される。
+                    # 棚卸確定（実地棚卸）の行に達したら、その時点の差分を足すのではなく、確定した実数へ直接スナップする
+                    # （実数には棚卸時点までの出荷・製造がすでに反映済みのため、二重に増減させない）。
                     _wbal = stock_asof(dp, _win_start); _wday = None; _synced_today = False
                     for _r in _rows:
                         _d = pd.Timestamp(_r["_dt"]).normalize()
+                        if _r["_is_cp"]:
+                            _wbal = _cp["実数"]; _wday = _d; _r["実績在庫"] = _wbal
+                            continue
                         if _d == today and not _synced_today:
                             _wbal = cs.get(dp, 0); _synced_today = True
                         elif _wday is not None and _d != _wday and _wday < today and _wbal < 0:
