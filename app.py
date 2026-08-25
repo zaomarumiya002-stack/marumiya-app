@@ -686,11 +686,13 @@ if pg == "📋 受注登録":
     if not odf.empty:
         do = odf.sort_values("登録日時",ascending=False).reset_index(drop=True).copy()
         do["出荷予定日(表示)"] = do.apply(lambda r: "🟡 日付未定" if r.get("日付未定フラグ") is True else format_date_jp(r["納品予定日"]), axis=1) if "日付未定フラグ" in do.columns else do["納品予定日"].apply(format_date_jp)
+        do["登録日時(表示)"] = pd.to_datetime(do["登録日時"], errors="coerce").dt.strftime("%Y/%m/%d %H:%M").fillna("")
         _odf_limit = st.selectbox("編集件数", [5,10,20,50], format_func=lambda x: f"直近 {x} 件", index=0, key="odf_edit_limit")
-        ed_o = st.data_editor(do.head(_odf_limit)[["ID","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, key="ord_recent_edit")
+        ed_o = st.data_editor(do.head(_odf_limit)[["ID","登録日時(表示)","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, key="ord_recent_edit")
         _o_save_msg_area = st.container()
         if st.button("💾 直近データ保存"):
             sv = ed_o.copy(); sv["納品予定日"] = pd.to_datetime(sv["出荷予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
+            sv = sv.drop(columns=[c for c in ["出荷予定日(表示)","登録日時(表示)"] if c in sv.columns])
             _o_ids = do.head(_odf_limit)["ID"].tolist()
             _o_ref = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
             save_sync("orders", pd.concat([odf[~odf["ID"].isin(_o_ids)], pd.merge(sv, _o_ref, on="ID", how="left")], ignore_index=True))
@@ -698,10 +700,11 @@ if pg == "📋 受注登録":
         with _o_save_msg_area:
             show_flash_inline()
         with st.expander("📂 全データ一括編集"):
-            ea_o = st.data_editor(do[["ID","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key="ord_all_edit")
+            ea_o = st.data_editor(do[["ID","登録日時(表示)","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key="ord_all_edit")
             _o_all_msg_area = st.container()
             if st.button("💾 全データ保存"):
                 sva = ea_o.copy(); sva["納品予定日"] = pd.to_datetime(sva["出荷予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
+                sva = sva.drop(columns=[c for c in ["出荷予定日(表示)","登録日時(表示)"] if c in sva.columns])
                 _o_ref_all = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
                 save_sync("orders", pd.merge(sva, _o_ref_all, on="ID", how="left"))
                 flash("success", "✅ 受注全データを保存しました。"); st.rerun()
@@ -1814,13 +1817,34 @@ elif pg == "📊 在庫・スケジュール":
         _hist_rows = []
         if not _adj_o.empty:
             for _, r in _adj_o.iterrows():
-                _hist_rows.append({"日付": format_date_jp(r.get("納品予定日")), "製品名": r.get("製品名", ""), "差分": -to_int(r.get("ケース数", 0)), "備考": r.get("備考", ""), "登録日時": r.get("登録日時", "")})
+                _hist_rows.append({"ID": r.get("ID",""), "_sheet": "orders", "日付": format_date_jp(r.get("納品予定日")), "製品名": r.get("製品名", ""), "差分": -to_int(r.get("ケース数", 0)), "備考": r.get("備考", ""), "登録日時": r.get("登録日時", "")})
         if not _adj_m.empty:
             for _, r in _adj_m.iterrows():
-                _hist_rows.append({"日付": format_date_jp(r.get("製造予定日")), "製品名": r.get("製品名", ""), "差分": to_int(r.get("ケース数", 0)), "備考": r.get("備考", ""), "登録日時": r.get("登録日時", "")})
+                _hist_rows.append({"ID": r.get("ID",""), "_sheet": "manufactures", "日付": format_date_jp(r.get("製造予定日")), "製品名": r.get("製品名", ""), "差分": to_int(r.get("ケース数", 0)), "備考": r.get("備考", ""), "登録日時": r.get("登録日時", "")})
         if _hist_rows:
-            _hist_df = pd.DataFrame(_hist_rows).sort_values("登録日時", ascending=False)
-            st.dataframe(_hist_df[["日付", "製品名", "差分", "備考"]], hide_index=True, use_container_width=True, height=300)
+            _hist_df = pd.DataFrame(_hist_rows).sort_values("登録日時", ascending=False).reset_index(drop=True)
+            _hist_df["登録日時(表示)"] = pd.to_datetime(_hist_df["登録日時"], errors="coerce").dt.strftime("%Y/%m/%d %H:%M").fillna("")
+            st.markdown('<div class="info-tip">💡 誤って登録した棚卸確定は、行を選択して削除（🗑️）し「🗑️ 選択した棚卸確定を削除」を押すと取り消せます。取り消すと、その棚卸確定が無かった状態で以後の在庫計算がやり直されます。この表からの行の追加はできません（追加しても保存されません）。</div>', unsafe_allow_html=True)
+            _hist_ed = st.data_editor(_hist_df[["ID","_sheet","登録日時(表示)","日付","製品名","差分","備考"]], num_rows="dynamic", hide_index=True, use_container_width=True, height=300,
+                column_config={"ID":None,"_sheet":None,"登録日時(表示)":st.column_config.TextColumn("登録日時",disabled=True),"日付":st.column_config.TextColumn(disabled=True),"製品名":st.column_config.TextColumn(disabled=True),"差分":st.column_config.NumberColumn(disabled=True),"備考":st.column_config.TextColumn(disabled=True)}, key="tanaoshi_hist_ed")
+            _th_msg_area = st.container()
+            if st.button("🗑️ 選択した棚卸確定を削除", key="btn_del_tanaoshi"):
+                _remaining_ids = set(_hist_ed["ID"].tolist())
+                _deleted = _hist_df[~_hist_df["ID"].isin(_remaining_ids)]
+                if _deleted.empty:
+                    flash("info", "ℹ️ 削除対象がありません。表の行を削除（🗑️）してから押してください。")
+                    st.rerun()
+                else:
+                    _del_o_ids = set(_deleted[_deleted["_sheet"]=="orders"]["ID"].tolist())
+                    _del_m_ids = set(_deleted[_deleted["_sheet"]=="manufactures"]["ID"].tolist())
+                    if _del_o_ids:
+                        save_sync("orders", odf[~odf["ID"].isin(_del_o_ids)])
+                    if _del_m_ids:
+                        save_sync("manufactures", mdf[~mdf["ID"].isin(_del_m_ids)])
+                    flash("success", f"✅ 棚卸確定を{len(_deleted)}件削除しました。以後の在庫計算に反映されます。")
+                    st.rerun()
+            with _th_msg_area:
+                show_flash_inline()
         else:
             st.info("棚卸調整の履歴はまだありません。")
 
