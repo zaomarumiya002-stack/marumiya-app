@@ -1781,23 +1781,33 @@ elif pg == "📊 在庫・スケジュール":
         sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod", format_func=fn)
         if sel_p:
             _cur_cs = stock_asof(sel_p, inv_d)
-            st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
+            _is_today_inv = pd.Timestamp(inv_d).normalize() == today
+            _today_net = to_int(ae[(ae["製品名"]==sel_p) & (ae["日付"]==today)]["qty"].sum()) if _is_today_inv else 0
+            if _is_today_inv and _today_net != 0:
+                st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))}（本日）0時時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-tip">📦 本日すでに登録されている出荷・製造の合計：<b>{_today_net:+,} cs</b>。すでに実施済み（出荷済み・製造済み）であれば、下のチェックを入れると自動で加味した数字と比較できます。</div>', unsafe_allow_html=True)
+                _include_today = st.checkbox(f"本日分（{_today_net:+,} cs）はすでに実施済みなので比較に含める", value=True, key="inv_include_today")
+                _base_cs = _cur_cs + _today_net if _include_today else _cur_cs
+                st.markdown(f'<div class="info-card" style="border-left-color:#2563EB;">📊 実数と比較する基準値：<b style="font-size:18px;">{_base_cs:,} cs</b></div>', unsafe_allow_html=True)
+            else:
+                _base_cs = _cur_cs
+                st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
             actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=0, step=1, value=None, key="inv_qty")
             inv_note = st.text_input("📝 備考", key="inv_note")
             if actual_q is not None:
-                _diff = to_int(actual_q) - _cur_cs
+                _diff = to_int(actual_q) - _base_cs
                 if _diff == 0:
                     st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています（登録するとこの日を新しい基準点として確定します）</div>', unsafe_allow_html=True)
                 else:
                     _dcolor = "#059669" if _diff > 0 else "#DC2626"
-                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_cur_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_base_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
             
             if st.button("✅ 棚卸を確定（この時点にリセット）", type="primary", use_container_width=True, key="inv_submit"):
                 if actual_q is None:
                     flash("error", "⚠️ 実棚卸数を入力してください")
                     st.rerun()
                 else:
-                    _diff = to_int(actual_q) - _cur_cs
+                    _diff = to_int(actual_q) - _base_cs
                     nid = str(uuid.uuid4())[:6].upper()
                     _cat = mst_fc[mst_fc["製品名"] == sel_p]["大カテゴリ"].iloc[0] if (not mst_fc.empty and sel_p in mst_fc["製品名"].values) else "その他"
                     _tag = f"【棚卸確定:{to_int(actual_q)}】{inv_note}".strip()
@@ -1817,7 +1827,7 @@ elif pg == "📊 在庫・スケジュール":
                             "不良廃棄フラグ": False, "日付未定フラグ": False,
                             "登録日時": datetime.now(JST).replace(tzinfo=None),
                         }]))
-                    flash("success", f"✅【{sel_p}】{format_date_jp(pd.Timestamp(inv_d))} 時点の在庫を {to_int(actual_q):,} cs で確定しました（{_cur_cs:,} → {to_int(actual_q):,}）。これより前の履歴は以後の計算に使われません。")
+                    flash("success", f"✅【{sel_p}】{format_date_jp(pd.Timestamp(inv_d))} 時点の在庫を {to_int(actual_q):,} cs で確定しました（{_base_cs:,} → {to_int(actual_q):,}）。これより前の履歴は以後の計算に使われません。")
                     st.rerun()
         
         with _t5_msg_area:
