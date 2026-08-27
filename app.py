@@ -359,10 +359,9 @@ checkpoints = {}
 
 def _after_checkpoint_mask(df, cp):
     if cp is None: return pd.Series(True, index=df.index)
-    cp_dt = cp.get("登録日時")
-    if pd.isna(cp_dt): cp_dt = pd.Timestamp.min
-    ev_dt = df["登録日時"].fillna(pd.Timestamp.min)
-    return (df["日付"] > cp["日付"]) | ((df["日付"] == cp["日付"]) & (ev_dt > cp_dt))
+    # 棚卸確定はその日1日分の最終値として扱う：同じ日付の出荷・製造は、登録日時の前後に関わらず
+    # 二重に差し引かれないよう除外する。翌日以降は通常どおり自動計算を再開する。
+    return df["日付"] > cp["日付"]
 
 def _floor_carry_balance(base_qty, ev_df):
     bal = to_int(base_qty)
@@ -1471,20 +1470,106 @@ elif pg == "📊 在庫・スケジュール":
             st.dataframe(da.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予測在庫(最小)"]), use_container_width=True, hide_index=True)
         else: st.success("✅ 欠品予測なし")
 
+    @st.dialog("📑 受注・製造 内訳", width="large")
+    def _show_breakdown_dialog(product_name):
+        st.markdown(f"**製品名：{product_name}**")
+        tab_a, tab_b = st.tabs(["🚚 出荷（受注）予定", "🏭 製造予定（試算含む）"])
+        with tab_a:
+            _o = odf[(odf["製品名"]==product_name) & (pd.to_datetime(odf["納品予定日"],errors='coerce')>=today) & (odf["不良廃棄フラグ"]==False)].copy() if not odf.empty else pd.DataFrame()
+            if _o.empty:
+                st.info("今後の出荷予定はありません。")
+            else:
+                _o["日付"] = _o["納品予定日"].apply(format_date_jp)
+                _o = _o.sort_values("納品予定日")
+                st.dataframe(_o[["日付","顧客名","ケース数","備考"]], hide_index=True, use_container_width=True)
+                st.caption(f"出荷予定合計：{_o['ケース数'].apply(to_int).sum():,} cs")
+        with tab_b:
+            _m = mdf[(mdf["製品名"]==product_name) & (pd.to_datetime(mdf["製造予定日"],errors='coerce')>=today)].copy() if not mdf.empty else pd.DataFrame()
+            _wip_rows = [{"日付":format_date_jp(k[1]),"顧客名/備考":"🧪 試算（未保存）","ケース数":v} for k,v in st.session_state.get("what_if_plan",{}).items() if k[0]==product_name]
+            _rows = []
+            if not _m.empty:
+                _m2 = _m.copy(); _m2["日付"] = _m2["製造予定日"].apply(format_date_jp)
+                for _,r in _m2.sort_values("製造予定日").iterrows():
+                    _rows.append({"日付":r["日付"],"顧客名/備考":r.get("備考",""),"ケース数":to_int(r.get("ケース数",0))})
+            _rows.extend(_wip_rows)
+            if not _rows:
+                st.info("今後の製造予定はありません。")
+            else:
+                st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+        if st.button("閉じる", key="v1_dialog_close"):
+            st.rerun()
+
     with t1:
         if mst_fc.empty: st.info("マスタ空")
         else:
             sd = pd.date_range(today, today+timedelta(days=30))
-            iv = [{"カテゴリ":r["大カテゴリ"],"製品名":r["製品名"],"現在庫":cur_stock(r["製品名"]), **{format_date_jp(d):fs.get(r["製品名"],{}).get(d,cs.get(r["製品名"],0)) for d in sd}} for _,r in mst_fc.iterrows()]
+            if "what_if_plan" not in st.session_state: st.session_state.what_if_plan = {}
+            _wip = st.session_state.what_if_plan
+
+            f1, f2 = st.columns([2, 3])
+            with f1:
+                _stock_filter = st.radio("🔍 表示フィルター", ["すべて表示", "欠品ありのみ", "安全在庫割れのみ"], horizontal=True, key="v1_stock_filter")
+            with f2:
+                with st.popover("🧪 製造予定を試算（保存されません）"):
+                    st.markdown('<div class="info-tip">💡 ここでの入力はこの画面上だけの試算です。実際のスプレッドシートには保存されません。本当に製造する場合は「🏭 製造登録」から登録してください。</div>', unsafe_allow_html=True)
+                    _wp_prod = st.selectbox("製品", options=mst_fc["製品名"].tolist(), key="v1_wip_prod")
+                    _wp_date = st.date_input("製造予定日", value=today.date(), min_value=today.date(), max_value=(today+timedelta(days=30)).date(), key="v1_wip_date")
+                    _wp_qty = st.number_input("製造予定数(cs)", min_value=0, step=1, value=0, key="v1_wip_qty")
+                    if st.button("➕ 試算に反映", key="v1_wip_apply"):
+                        if _wp_qty > 0:
+                            _k = (_wp_prod, pd.Timestamp(_wp_date).normalize())
+                            _wip[_k] = _wip.get(_k, 0) + int(_wp_qty)
+                            st.rerun()
+                        else:
+                            st.warning("1以上の数量を入力してください。")
+                    if _wip:
+                        st.markdown("---")
+                        st.caption("現在の試算入力：")
+                        st.dataframe(pd.DataFrame([{"製品名":k[0],"日付":format_date_jp(k[1]),"数量":v} for k,v in _wip.items()]), hide_index=True, use_container_width=True)
+                        if st.button("🗑️ 試算をクリア", key="v1_wip_clear"):
+                            st.session_state.what_if_plan = {}; st.rerun()
+
+            def _fc_val(pn, d):
+                base = fs.get(pn,{}).get(d, cs.get(pn,0))
+                if _wip:
+                    base = base + sum(q for (wp,wd),q in _wip.items() if wp==pn and wd<=d)
+                return base
+
+            _date_cols = [format_date_jp(d) for d in sd]
+            iv = []
+            for _,r in mst_fc.iterrows():
+                pn = r["製品名"]
+                row = {"カテゴリ":r["大カテゴリ"],"製品名":pn,"現在庫":cur_stock(pn)}
+                _shortage_date = None
+                for d in sd:
+                    v = _fc_val(pn, d)
+                    row[format_date_jp(d)] = v
+                    if _shortage_date is None and v < 0: _shortage_date = d
+                row["最速欠品日"] = f"{_shortage_date.month}/{_shortage_date.day}" if _shortage_date is not None else "OK"
+                iv.append(row)
             idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
+            idf = idf[["カテゴリ","製品名","現在庫","最速欠品日"] + _date_cols]
+
+            if _stock_filter == "欠品ありのみ":
+                idf = idf[idf[_date_cols].lt(0).any(axis=1)].reset_index(drop=True)
+            elif _stock_filter == "安全在庫割れのみ":
+                _safety_map = mst_fc.set_index("製品名")["安全在庫数"].apply(to_int).to_dict() if "安全在庫数" in mst_fc.columns else {}
+                idf = idf[idf.apply(lambda r: r["現在庫"] < _safety_map.get(r["製品名"], 0), axis=1)].reset_index(drop=True)
+
             c1, c2 = st.columns([3, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開　／　当日分はまだ製造登録前だと一時的にマイナス表示になることがあります（当日夜に製造登録すると自動的に正しい数字に更新されます）</div>', unsafe_allow_html=True)
             if c2.button("🔄 閉じる"): st.session_state.drill_product = None; st.rerun()
-            se = st.dataframe(idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else ''), use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
+            if idf.empty:
+                st.info("条件に一致する製品はありません。")
+            _sty = idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=_date_cols)
+            _sty = _sty.map(lambda v: 'color:#B45309;font-weight:bold;background-color:#FEF3C7;' if isinstance(v,str) and v!="OK" else '', subset=["最速欠品日"])
+            se = st.dataframe(_sty, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
             if se.selection.get("rows"): st.session_state.drill_product = idf.iloc[se.selection.get("rows")[0]]["製品名"]
 
             dp = st.session_state.drill_product
             if dp:
                 st.markdown(f'<div class="drill-panel">### 📦 {fn(dp)} 詳細', unsafe_allow_html=True)
+                if st.button("📑 内訳をポップアップで見る（出荷・製造予定の一覧）", key="v1_open_dialog"):
+                    _show_breakdown_dialog(dp)
                 oy = today - timedelta(days=365)
                 ph = odf[(odf["製品名"]==dp)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=oy)&(pd.to_datetime(odf["納品予定日"],errors='coerce')<=today)].copy() if not odf.empty else pd.DataFrame()
                 mh = mdf[(mdf["製品名"]==dp)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')>=oy)&(pd.to_datetime(mdf["製造予定日"],errors='coerce')<=today)].copy() if not mdf.empty else pd.DataFrame()
@@ -1601,13 +1686,17 @@ elif pg == "📊 在庫・スケジュール":
                     # 実績在庫：画面に表示される順番どおりに、1件ずつ数量を足し引きして積み上げる（全製品共通ロジック）。
                     # 過去日は期間開始時点の在庫（stock_asof）を起点に、本日分に入る瞬間は「本日開始時点の在庫」
                     # （＝正しい現在庫 cs）に同期し直してから続けて積み上げる。同日に複数件あっても、実際の登録日時順に反映される。
-                    # 棚卸確定（実地棚卸）の行に達したら、その時点の差分を足すのではなく、確定した実数へ直接スナップする
-                    # （実数には棚卸時点までの出荷・製造がすでに反映済みのため、二重に増減させない）。
-                    _wbal = stock_asof(dp, _win_start); _wday = None; _synced_today = False
+                    # 棚卸確定（実地棚卸）の行に達したら、その時点の差分を足すのではなく、確定した実数へ直接スナップする。
+                    # 棚卸確定はその日1日分の最終値のため、同じ日の他の出荷・製造（登録の前後を問わず）は
+                    # 実数にすでに反映済みとして扱い、表示上もそれ以上は増減させない（二重に減算しない）。
+                    _wbal = stock_asof(dp, _win_start); _wday = None; _synced_today = False; _cp_day = None
                     for _r in _rows:
                         _d = pd.Timestamp(_r["_dt"]).normalize()
                         if _r["_is_cp"]:
-                            _wbal = _cp["実数"]; _wday = _d; _r["実績在庫"] = _wbal
+                            _wbal = _cp["実数"]; _wday = _d; _cp_day = _d; _r["実績在庫"] = _wbal
+                            continue
+                        if _cp_day is not None and _d == _cp_day:
+                            _r["実績在庫"] = _wbal
                             continue
                         if _d == today and not _synced_today:
                             _wbal = cs.get(dp, 0); _synced_today = True
@@ -1783,15 +1872,12 @@ elif pg == "📊 在庫・スケジュール":
             _cur_cs = stock_asof(sel_p, inv_d)
             _is_today_inv = pd.Timestamp(inv_d).normalize() == today
             _today_net = to_int(ae[(ae["製品名"]==sel_p) & (ae["日付"]==today)]["qty"].sum()) if _is_today_inv else 0
-            if _is_today_inv and _today_net != 0:
-                st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))}（本日）0時時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="info-tip">📦 本日すでに登録されている出荷・製造の合計：<b>{_today_net:+,} cs</b>。すでに実施済み（出荷済み・製造済み）であれば、下のチェックを入れると自動で加味した数字と比較できます。</div>', unsafe_allow_html=True)
-                _include_today = st.checkbox(f"本日分（{_today_net:+,} cs）はすでに実施済みなので比較に含める", value=True, key="inv_include_today")
-                _base_cs = _cur_cs + _today_net if _include_today else _cur_cs
-                st.markdown(f'<div class="info-card" style="border-left-color:#2563EB;">📊 実数と比較する基準値：<b style="font-size:18px;">{_base_cs:,} cs</b></div>', unsafe_allow_html=True)
-            else:
-                _base_cs = _cur_cs
-                st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
+            _base_cs = _cur_cs
+            st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
+            if _is_today_inv:
+                st.markdown('<div class="info-tip">💡 棚卸確定は「その日1日分の最終値」として扱われます。確定した日の出荷・製造（登録の前後を問わず）は、その確定値の上にさらに差し引かれることはありません。<b>そのため、日中に数える場合は、その日残りの出荷・製造予定分もすでに終わったものとして見込んで数えてください（一番確実なのは、その日の出荷・製造がすべて終わった後、営業終了時に数えることです）。</b></div>', unsafe_allow_html=True)
+                if _today_net != 0:
+                    st.markdown(f'<div class="info-tip">📦 参考：本日すでに登録されている出荷・製造の合計は <b>{_today_net:+,} cs</b> です（上の「計算上の在庫」にはまだ反映されていません）。</div>', unsafe_allow_html=True)
             actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=0, step=1, value=None, key="inv_qty")
             inv_note = st.text_input("📝 備考", key="inv_note")
             if actual_q is not None:
