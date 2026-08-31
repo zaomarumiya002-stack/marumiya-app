@@ -624,10 +624,10 @@ if pg == "📋 受注登録":
     else:
         qty = st.number_input("📦 数量（ケース）", min_value=1, step=1, value=None)
 
-    r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄"); iadj = c3.checkbox("📊 在庫調整", help="在庫ずれ修正用。チェック時は出荷ではなく在庫への加算として扱われます（マイナスを戻す場合など）")
+    r1, r2 = st.columns([2, 2]); rem = r1.text_input("📝 備考"); c1, c2, c3 = r2.columns(3); isub = c1.checkbox("🔄 代替品"); iirr = c2.checkbox("⚠️ 不良廃棄"); iadj = c3.checkbox("📊 在庫調整（－）", help="在庫ずれ修正用。チェック時は出荷ではなく在庫を減らす（マイナス）処理として登録されます。")
     
     if iadj:
-        st.markdown('<div style="background:#EFF6FF;border:1.5px solid #2563EB;border-radius:8px;padding:8px 14px;font-size:13px;color:#1E40AF;margin:4px 0;">📊 <b>在庫調整モード</b>：この受注は「出荷」ではなく在庫を <b>増やす（＋）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
+        st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b>：この登録は在庫を <b>減らす（－）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     
     if prod and qty and to_int(qty)>0 and cur_stock(prod) < to_int(qty):
         st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cur_stock(prod)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cur_stock(prod)}</span></div>', unsafe_allow_html=True)
@@ -638,12 +638,12 @@ if pg == "📋 受注登録":
             flash("error", "⚠️ 製品・数量は必須です。")
             st.rerun()
         else:
-            frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整+】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
+            frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整-】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
             cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
             nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
             if iadj:
-                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"リパックフラグ":False,"備考":f"【在庫調整+】{frem}","登録日時": datetime.now(JST).replace(tzinfo=None)}]))
-                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(prod)}】 ＋{to_int(qty):,}  現在庫: {cur_stock(prod):,} → {cur_stock(prod)+to_int(qty):,}")
+                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"顧客名":"在庫調整","大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":"","備考":f"【在庫調整-】{frem}","荷姿チェック":False,"発送備考":"","不良廃棄フラグ":False,"日付未定フラグ":False,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
+                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(prod)}】 －{to_int(qty):,}  現在庫: {cur_stock(prod):,} → {cur_stock(prod)-to_int(qty):,}")
                 st.rerun()
             else:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
@@ -816,9 +816,9 @@ elif pg == "🏭 製造登録":
 
     mr = s2.text_input("📝 備考（製造）")
     irp = st.checkbox("🔄 リパック製造（在庫加算）")
-    iadj_m = st.checkbox("📊 在庫調整（－）", help="在庫ずれ修正用。チェック時は在庫を減らす（マイナス）処理として受注登録されます。製造ミス・廃棄・棚卸減など。")
+    iadj_m = st.checkbox("📊 在庫調整（＋）", help="在庫ずれ修正用。チェック時は在庫を増やす（プラス）処理として製造登録されます。")
     if iadj_m:
-        st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b>：この登録は在庫を <b>減らす（－）</b> 処理として出荷登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
+        st.markdown('<div style="background:#EFF6FF;border:1.5px solid #2563EB;border-radius:8px;padding:8px 14px;font-size:13px;color:#1E40AF;margin:4px 0;">📊 <b>在庫調整（＋）モード</b>：この登録は在庫を <b>増やす（＋）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     ipl = st.checkbox("📦 紐づく資材の在庫も同時に減らす", value=True) if (irp and not iadj_m) else (True if not iadj_m else False)
 
     if pm and mq and ipl and not mst_u.empty and pm in mst_u["製品名"].values:
@@ -860,16 +860,14 @@ elif pg == "🏭 製造登録":
         else:
             nid = str(uuid.uuid4())[:6].upper()
             if iadj_m:
-                rt_adj = f"【在庫調整-】 {mr}".strip()
-                app_sync("orders", pd.DataFrame([{
-                    "ID": nid, "納品予定日": pd.to_datetime(mdt),
-                    "顧客名": "在庫調整", "大カテゴリ": c_m, "製品名": pm,
-                    "ケース数": to_int(mq), "運送会社": "",
-                    "備考": rt_adj, "荷姿チェック": False, "発送備考": "",
-                    "不良廃棄フラグ": False, "日付未定フラグ": False,
+                rt_adj = f"【在庫調整+】 {mr}".strip()
+                app_sync("manufactures", pd.DataFrame([{
+                    "ID": nid, "製造予定日": pd.to_datetime(mdt),
+                    "大カテゴリ": c_m, "製品名": pm, "ケース数": to_int(mq),
+                    "リパックフラグ": False, "備考": rt_adj,
                     "登録日時": datetime.now(JST).replace(tzinfo=None)
                 }]))
-                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(pm)}】 -{to_int(mq):,} cs  現在庫: {cur_stock(pm):,} → {cur_stock(pm)-to_int(mq):,} cs")
+                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(pm)}】 ＋{to_int(mq):,} cs  現在庫: {cur_stock(pm):,} → {cur_stock(pm)+to_int(mq):,} cs")
                 st.rerun()
             else:
                 rt = f"{'【リパック】' if irp else ''} {'【資材非連動】' if irp and not ipl else ''} {mr}".strip()
@@ -1845,7 +1843,7 @@ elif pg == "📊 在庫・スケジュール":
 
     with t4:
         sec("👤 顧客別 今後の予定")
-        cl = sorted(odf[odf["顧客名"].str.strip()!=""]["顧客名"].unique().tolist()) if not odf.empty else []
+        cl = sorted(odf[odf["顧客名"].astype(str).str.strip()!=""]["顧客名"].unique().tolist()) if not odf.empty else []
         sc1c,sc2c = st.columns([1.5,2.5]); sc_c = sc1c.text_input("🔍 顧客検索"); sl_c = sc2c.selectbox("顧客", options=[c for c in cl if sc_c in c] if sc_c else cl, index=None)
         if sl_c:
             co = odf[(odf["顧客名"]==sl_c)&(pd.to_datetime(odf["納品予定日"],errors='coerce')>=today)].copy()
@@ -1976,21 +1974,83 @@ elif pg == "⭐ 特注・チャータースケジュール":
         if has_t and has_c: return "特注+チャーター便"
         if has_c: return "チャーター便"
         return "特注"
-    ts1, ts2, ts3 = st.tabs(["📋 一覧","📅 製品別スケジュール","✏️ 編集・保存"])
+    ts1, ts2, ts3, ts4 = st.tabs(["📋 一覧","📅 製品別スケジュール","✏️ 編集・保存","🗓️ 週間スケジュール"])
+    def _stock_status(pn, d):
+        if pd.isnull(d): return "―"
+        v = fs.get(pn, {}).get(pd.Timestamp(d).normalize(), 0)
+        return f"❌ 欠品 ({v:,})" if v < 0 else "✅ OK"
     with ts1:
         if spo.empty: st.info("なし")
         else:
-            st.markdown('<div class="info-tip">💡 受注時に「特注」「チャーター便」と登録されたもの、または製品マスタで⭐特注品／🚌チャーター品に設定されている製品の受注を、登録日時に関わらず自動的に表示しています。</div>', unsafe_allow_html=True)
+            st.markdown('<div class="info-tip">💡 受注時に「特注」「チャーター便」と登録されたもの、または製品マスタで⭐特注品／🚌チャーター品に設定されている製品の受注を、登録日時に関わらず自動的に表示しています。在庫状況は、その出荷予定日時点の予測在庫（この先の他の受注・製造もすべて加味した数字）で判定しています。</div>', unsafe_allow_html=True)
             spo["種別"] = spo.apply(_sp_kind, axis=1)
             spo["出荷予定日"] = spo["納品予定日"].apply(format_date_jp)
-            sc = [c for c in ["種別","顧客名","出荷予定日","製品名","ケース数","備考"] if c in spo.columns]
-            st.dataframe(spo[sc].style.apply(lambda r: ['background-color:#F3E8FF;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")) else (['background-color:#EDE9FE;font-weight:bold;']*len(r) if "特注" in str(r.get("種別","")) else ['background-color:#E0F2FE;font-weight:bold;']*len(r)), axis=1), hide_index=True)
+            spo["在庫状況"] = spo.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1)
+            _cl1 = sorted(spo["顧客名"].astype(str).str.strip().replace("", np.nan).dropna().unique().tolist())
+            fcol1, fcol2 = st.columns([2, 3])
+            with fcol1:
+                _sel_cust1 = st.selectbox("👤 顧客で絞り込み", ["（全顧客）"] + _cl1, key="ts1_cust_filter")
+            spo_f = spo if _sel_cust1 == "（全顧客）" else spo[spo["顧客名"] == _sel_cust1]
+            sc = [c for c in ["種別","顧客名","出荷予定日","製品名","ケース数","在庫状況","備考"] if c in spo_f.columns]
+            with fcol2:
+                st.write("")
+                st.download_button("📥 この一覧をCSV出力", data=make_csv_bytes(spo_f[sc]), file_name=f"特注チャータースケジュール_{_sel_cust1 if _sel_cust1!='（全顧客）' else '全顧客'}_{date.today()}.csv", mime="text/csv", key="ts1_csv_dl")
+            if spo_f.empty:
+                st.info("該当する予定はありません。")
+            else:
+                def _sty1(r):
+                    if "❌" in str(r.get("在庫状況","")): return ['background-color:#FEE2E2;font-weight:bold;']*len(r)
+                    if "特注" in str(r.get("種別","")) and "チャーター" in str(r.get("種別","")): return ['background-color:#F3E8FF;font-weight:bold;']*len(r)
+                    if "特注" in str(r.get("種別","")): return ['background-color:#EDE9FE;font-weight:bold;']*len(r)
+                    return ['background-color:#E0F2FE;font-weight:bold;']*len(r)
+                st.dataframe(spo_f[sc].style.apply(_sty1, axis=1), hide_index=True)
     with ts2:
         if not spo.empty:
-            pl = sorted(spo["製品名"].unique().tolist()); sl = st.selectbox("製品", ["（全製品）"]+pl)
-            fsp = (spo.copy() if sl=="（全製品）" else spo[spo["製品名"]==sl].copy()).sort_values("納品予定日")
+            spo["種別"] = spo.apply(_sp_kind, axis=1) if "種別" not in spo.columns else spo["種別"]
+            c1, c2 = st.columns(2)
+            pl = sorted(spo["製品名"].unique().tolist()); sl = c1.selectbox("製品", ["（全製品）"]+pl, key="ts2_prod_filter")
+            _cl2 = sorted(spo["顧客名"].astype(str).str.strip().replace("", np.nan).dropna().unique().tolist())
+            sl_c2 = c2.selectbox("👤 顧客", ["（全顧客）"]+_cl2, key="ts2_cust_filter")
+            fsp = spo.copy()
+            if sl != "（全製品）": fsp = fsp[fsp["製品名"]==sl]
+            if sl_c2 != "（全顧客）": fsp = fsp[fsp["顧客名"]==sl_c2]
+            fsp = fsp.sort_values("納品予定日")
             fsp["出荷予定日"] = fsp["納品予定日"].apply(format_date_jp)
-            st.dataframe(fsp[[c for c in ["製品名","顧客名","出荷予定日","ケース数","備考"] if c in fsp.columns]], hide_index=True)
+            fsp["在庫状況"] = fsp.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1)
+            if fsp.empty:
+                st.info("該当する予定はありません。")
+            else:
+                st.dataframe(fsp[[c for c in ["製品名","顧客名","出荷予定日","ケース数","在庫状況","備考"] if c in fsp.columns]].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
+    with ts4:
+        st.markdown('<div class="info-tip">💡 1週間分の特注・チャーター便を、日付ごとにまとめて一目で確認できます。</div>', unsafe_allow_html=True)
+        if spo.empty: st.info("なし")
+        else:
+            spo["種別"] = spo.apply(_sp_kind, axis=1) if "種別" not in spo.columns else spo["種別"]
+            wcol1, wcol2 = st.columns(2)
+            wk_start = wcol1.date_input("週の開始日", value=today.date() - timedelta(days=today.weekday()), key="ts4_week_start")
+            _cl4 = sorted(spo["顧客名"].astype(str).str.strip().replace("", np.nan).dropna().unique().tolist())
+            _sel_cust4 = wcol2.selectbox("👤 顧客で絞り込み", ["（全顧客）"] + _cl4, key="ts4_cust_filter")
+            wk_start_ts = pd.Timestamp(wk_start)
+            week_dates = [wk_start_ts + timedelta(days=i) for i in range(7)]
+            wspo = spo[(pd.to_datetime(spo["納品予定日"],errors='coerce')>=week_dates[0]) & (pd.to_datetime(spo["納品予定日"],errors='coerce')<=week_dates[-1])].copy()
+            if _sel_cust4 != "（全顧客）":
+                wspo = wspo[wspo["顧客名"]==_sel_cust4]
+            if wspo.empty:
+                st.info("この週は該当する特注・チャーター便はありません。")
+            else:
+                wspo["日付"] = pd.to_datetime(wspo["納品予定日"],errors='coerce').dt.normalize()
+                wspo["在庫状況"] = wspo.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1)
+                wspo["表示"] = wspo.apply(lambda r: f"{'⭐' if '特注' in str(r.get('種別','')) else ''}{'🚌' if 'チャーター' in str(r.get('種別','')) else ''} {fn(r['製品名'])} ×{to_int(r['ケース数'])}cs（{r['顧客名']}）{' 🚨欠品' if '❌' in str(r['在庫状況']) else ''}", axis=1)
+                _yobi = ["月","火","水","木","金","土","日"]
+                grid_rows = []
+                for d in week_dates:
+                    items = wspo[wspo["日付"]==d]["表示"].tolist()
+                    grid_rows.append({"曜日/日付": f"{_yobi[d.weekday()]} {d.month}/{d.day}", "件数": len(items), "内容": "\n".join(items) if items else "―"})
+                grid_df = pd.DataFrame(grid_rows)
+                st.dataframe(grid_df, hide_index=True, use_container_width=True,
+                             column_config={"曜日/日付": st.column_config.TextColumn(width="small"), "件数": st.column_config.NumberColumn(width="small"), "内容": st.column_config.TextColumn(width="large")},
+                             height=min(500, 60+55*len(grid_df)))
+                st.download_button("📥 週間スケジュールCSV", data=make_csv_bytes(grid_df), file_name=f"週間特注チャータースケジュール_{wk_start}_{_sel_cust4 if _sel_cust4!='（全顧客）' else '全顧客'}.csv", mime="text/csv", key="ts4_csv_dl")
     with ts3:
         if not spo.empty:
             ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時": datetime.now(JST).replace(tzinfo=None)} for _,r in spo.iterrows() if r["ID"] not in ex]
@@ -2021,7 +2081,7 @@ elif pg == "📈 経営・分析ダッシュボード":
             c1,c2,c3,c4 = st.columns(4); c1.metric("今月 出荷", f"{om['ケース数'].apply(to_int).sum():,} cs", delta=f"{om['顧客名'].nunique()} 顧客"); c2.metric("今月 不良", f"{odf[(safe_dt_date(odf['納品予定日'])>=tm)&(odf['不良廃棄フラグ']==True)]['ケース数'].apply(to_int).sum():,} cs", delta_color="inverse"); c3.metric("荷姿チェック率", f"{int(len(odf[odf['荷姿チェック']==True])/max(len(odf),1)*100)} %"); c4.metric("欠品品目数", f"{sum(1 for v in cs.values() if v<=0)} 品目", delta_color="inverse")
             ca,cb = st.columns(2)
             with ca:
-                ss = odf[odf["運送会社"].str.strip()!=""]["運送会社"].value_counts().reset_index()
+                ss = odf[odf["運送会社"].astype(str).str.strip()!=""]["運送会社"].value_counts().reset_index()
                 if not ss.empty: ss.columns=["運","件"]; st.plotly_chart(px.pie(ss,names="運",values="件",title="運送会社別"), use_container_width=True)
             with cb:
                 cua = odf[odf["顧客名"]!="未指定"].groupby("顧客名")["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index().sort_values("ケース数",ascending=False).head(5)
