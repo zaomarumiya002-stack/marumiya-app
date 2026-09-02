@@ -601,7 +601,10 @@ if pg == "📋 受注登録":
     if idu: st.markdown('<div class="info-card yellow" style="background:#FFFBEB;padding:10px 16px;">🟡 <b>日付未定</b> として登録されます。</div>', unsafe_allow_html=True)
     sl = sh_m["運送会社名"].tolist() if not sh_m.empty else []; tl = get_toriatsuki_list()
     t1,t2,t3 = st.columns([2, 2, 1])
-    stor = t1.selectbox("🏢 帳合先", options=tl, index=None, placeholder="選択…")
+    if "reg_stor" not in st.session_state: st.session_state.reg_stor = None
+    stor = t1.selectbox("🏢 帳合先", options=tl, index=None, placeholder="選択…", key="reg_stor")
+    if stor and st.button("🔄 帳合先をクリア", key="clear_stor_btn", help="別の帳合先を検索したいときに押してください"):
+        st.session_state.reg_stor = None; st.rerun()
     scands = get_shiten_list(stor)
     sv = t2.selectbox("🏬 支店・店舗名", options=["（なし）"]+scands, index=0) if scands else t2.text_input("🏬 支店・店舗名（直接入力）")
     sv = "" if sv=="（なし）" else sv
@@ -1635,6 +1638,7 @@ elif pg == "📊 在庫・スケジュール":
                         do = pof[safe_dt_date(pof["納品予定日"])==d2.date()] if not pof.empty else pd.DataFrame()
                         oq = to_int(do["ケース数"].sum()) if not do.empty else 0
                         cust = " / ".join(do["顧客名"].dropna().astype(str).unique()) if not do.empty else ""
+                        if len(do) > 1: cust = f"{cust}（{len(do)}件合算）"
                         dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                         iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
                         if d2.normalize() == today: ts = cur_stock(dp)
@@ -1809,6 +1813,7 @@ elif pg == "📊 在庫・スケジュール":
                     else: ts2_ += (iq2 - oq2)
                     if iq2>0 or oq2>0 or ts2_<0:
                         cust = " / ".join(do2["顧客名"].dropna().astype(str).unique()) if not do2.empty else ""
+                        if len(do2) > 1: cust = f"{cust}（{len(do2)}件合算）"
                         dtl.append({"日付":format_date_jp(d2),"顧客":cust,"製造(入)":iq2 or "","出荷(出)":oq2 or "","予定在庫":ts2_})
 
                 if dtl:
