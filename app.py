@@ -147,6 +147,7 @@ except Exception as e:
 """)
     st.stop()
 
+@st.cache_data(ttl=90, show_spinner=False)
 def load_data(name):
     c_def = {
         "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
