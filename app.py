@@ -314,6 +314,16 @@ def pui(pn):
     kou = max(1, to_int(row.get("甲消費数", 4)))
     return kbn, nyu, kou
 
+def to_case_qty(pn, raw_qty):
+    """袋・甲などの登録単位を、在庫計算で使う『真のケース数』へ変換する。
+    在庫（cur_stock/在庫予測など）は常にケース単位で計算されているため、
+    袋や甲で入力された数量は保存前に必ずケースへ変換しないと在庫がずれる。"""
+    kbn, nyu, kou = pui(pn)
+    r = to_int(raw_qty)
+    if kbn == "袋": return max(0, round(r / nyu))
+    if kbn == "甲": return r * kou
+    return r
+
 def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
@@ -633,8 +643,11 @@ if pg == "📋 受注登録":
     if iadj:
         st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b>：この登録は在庫を <b>減らす（－）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     
-    if prod and qty and to_int(qty)>0 and cur_stock(prod) < to_int(qty):
-        st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cur_stock(prod)}</b> ／ 不足: <span class="shortage-red">－{to_int(qty)-cur_stock(prod)}</span></div>', unsafe_allow_html=True)
+    _qty_cs = to_case_qty(prod, qty) if (prod and qty) else 0
+    if kbn != "ケース" and prod and qty:
+        st.caption(f"↳ {to_int(qty):,}{kbn} → 換算後 {_qty_cs:,} ケース として登録されます")
+    if prod and qty and _qty_cs>0 and cur_stock(prod) < _qty_cs:
+        st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 <b>製品在庫不足！</b> 現在庫: <b>{cur_stock(prod)}</b> ／ 不足: <span class="shortage-red">－{_qty_cs-cur_stock(prod)}</span></div>', unsafe_allow_html=True)
     
     _reg_msg_area = st.container()
     if st.button("✅ 受注を登録", type="primary", use_container_width=True):
@@ -642,15 +655,16 @@ if pg == "📋 受注登録":
             flash("error", "⚠️ 製品・数量は必須です。")
             st.rerun()
         else:
+            qty_cs = to_case_qty(prod, qty)
             frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整-】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
             cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
             nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
             if iadj:
-                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"顧客名":"在庫調整","大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":"","備考":f"【在庫調整-】{frem}","荷姿チェック":False,"発送備考":"","不良廃棄フラグ":False,"日付未定フラグ":False,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
-                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(prod)}】 －{to_int(qty):,}  現在庫: {cur_stock(prod):,} → {cur_stock(prod)-to_int(qty):,}")
+                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"顧客名":"在庫調整","大カテゴリ":cat,"製品名":prod,"ケース数":qty_cs,"運送会社":"","備考":f"【在庫調整-】{frem}","荷姿チェック":False,"発送備考":"","不良廃棄フラグ":False,"日付未定フラグ":False,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
+                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(prod)}】 －{qty_cs:,}cs（{to_int(qty):,}{kbn}入力）  現在庫: {cur_stock(prod):,} → {cur_stock(prod)-qty_cs:,}")
                 st.rerun()
             else:
-                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":to_int(qty),"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
+                app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":qty_cs,"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 if ("特注" in stype or "チャーター" in stype) and od:
                     app_sync("special_schedule", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
                 _cur = cur_stock(prod)
@@ -825,6 +839,10 @@ elif pg == "🏭 製造登録":
         st.markdown('<div style="background:#EFF6FF;border:1.5px solid #2563EB;border-radius:8px;padding:8px 14px;font-size:13px;color:#1E40AF;margin:4px 0;">📊 <b>在庫調整（＋）モード</b>：この登録は在庫を <b>増やす（＋）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     ipl = st.checkbox("📦 紐づく資材の在庫も同時に減らす", value=True) if (irp and not iadj_m) else (True if not iadj_m else False)
 
+    _mq_cs = to_case_qty(pm, mq) if (pm and mq) else 0
+    if kbn != "ケース" and pm and mq:
+        st.caption(f"↳ {to_int(mq):,}{kbn} → 換算後 {_mq_cs:,} ケース として在庫に反映されます")
+
     if pm and mq and ipl and not mst_u.empty and pm in mst_u["製品名"].values:
         _mrow = mst_u[mst_u["製品名"]==pm].iloc[0]
         _mat_name = str(_mrow.get("使用資材名","")).strip()
@@ -854,7 +872,7 @@ elif pg == "🏭 製造登録":
             </div>""", unsafe_allow_html=True)
 
     if pm and mq and cur_stock(pm)<=0 and not iadj_m:
-        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cur_stock(pm)} cs</span> → 製造後: <b>{cur_stock(pm)+to_int(mq)} cs</b></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cur_stock(pm)} cs</span> → 製造後: <b>{cur_stock(pm)+_mq_cs} cs</b></div>", unsafe_allow_html=True)
     st.write("---")
     _mfg_reg_msg_area = st.container()
     if st.button("➕ 製造データを記録", type="primary", use_container_width=True):
@@ -863,19 +881,20 @@ elif pg == "🏭 製造登録":
             st.rerun()
         else:
             nid = str(uuid.uuid4())[:6].upper()
+            mq_cs = to_case_qty(pm, mq)
             if iadj_m:
                 rt_adj = f"【在庫調整+】 {mr}".strip()
                 app_sync("manufactures", pd.DataFrame([{
                     "ID": nid, "製造予定日": pd.to_datetime(mdt),
-                    "大カテゴリ": c_m, "製品名": pm, "ケース数": to_int(mq),
+                    "大カテゴリ": c_m, "製品名": pm, "ケース数": mq_cs,
                     "リパックフラグ": False, "備考": rt_adj,
                     "登録日時": datetime.now(JST).replace(tzinfo=None)
                 }]))
-                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(pm)}】 ＋{to_int(mq):,} cs  現在庫: {cur_stock(pm):,} → {cur_stock(pm)+to_int(mq):,} cs")
+                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(pm)}】 ＋{mq_cs:,}cs（{to_int(mq):,}{kbn}入力）  現在庫: {cur_stock(pm):,} → {cur_stock(pm)+mq_cs:,} cs")
                 st.rerun()
             else:
                 rt = f"{'【リパック】' if irp else ''} {'【資材非連動】' if irp and not ipl else ''} {mr}".strip()
-                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":pd.to_datetime(mdt),"大カテゴリ":c_m,"製品名":pm,"ケース数":to_int(mq),"リパックフラグ":irp,"備考":rt,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
+                app_sync("manufactures", pd.DataFrame([{"ID":nid,"製造予定日":pd.to_datetime(mdt),"大カテゴリ":c_m,"製品名":pm,"ケース数":mq_cs,"リパックフラグ":irp,"備考":rt,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 _mfg_mat_msg = ""
                 if ipl and not mst_u.empty and pm in mst_u["製品名"].values:
                     _mrow2 = mst_u[mst_u["製品名"]==pm].iloc[0]
@@ -900,7 +919,7 @@ elif pg == "🏭 製造登録":
                             "備考": f"自動記録 [{_calc_memo}]", "登録日時": datetime.now(JST).replace(tzinfo=None)
                         }]))
                         _mfg_mat_msg = f"  ＋【{_pnn}】 {_deduct_qty:,}枚 自動減算（{_calc_memo}）"
-                flash("success", f"✅ 登録しました！【{fn(pm)}】 {to_int(mq):,}cs  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
+                flash("success", f"✅ 登録しました！【{fn(pm)}】 {mq_cs:,}cs（{to_int(mq):,}{kbn}入力）  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
                 st.rerun()
     with _mfg_reg_msg_area:
         show_flash_inline()
@@ -1980,6 +1999,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
     spo_text = odf[odf["備考"].apply(is_special_order)].copy() if not odf.empty else pd.DataFrame()
     spo_mst = odf[odf["製品名"].isin(_mst_sp_prods)].copy() if not odf.empty and _mst_sp_prods else pd.DataFrame()
     spo = pd.concat([spo_text, spo_mst], ignore_index=True).drop_duplicates(subset="ID") if not spo_text.empty or not spo_mst.empty else pd.DataFrame()
+    if not spo.empty and "ケース数" in spo.columns: spo["ケース数"] = spo["ケース数"].apply(to_int)
     def _sp_kind(row):
         txt = str(row.get("備考",""))
         has_t = "特注" in txt; has_c = "チャーター便" in txt
@@ -2147,9 +2167,47 @@ elif pg == "⚙️ マスタ・分析":
             if len(set(_v)) > 1: _dupe_msgs.append((_label, sorted(set(_v))))
     if _dupe_msgs:
         with st.expander(f"🚨 表記ゆれの疑いがある名称を{len(_dupe_msgs)}組検出しました（在庫がずれる主な原因になります）", expanded=True):
-            st.markdown('<div class="info-card red" style="background:#FEF2F2;">全角/半角・カタカナ/ひらがな・空白だけが違う「別名」でマスタや資材が登録されていると、受注・製造・棚卸がそれぞれ別の名前に記録され、片方だけ棚卸で合わせても他方がずれたままになります。同じ商品であれば、どちらか一方の名称に統一してください（統一後は、旧名称で登録済みの受注・製造データも新名称に書き換える必要があります）。</div>', unsafe_allow_html=True)
+            st.markdown('<div class="info-card red" style="background:#FEF2F2;">全角/半角・カタカナ/ひらがな・空白だけが違う「別名」でマスタや資材が登録されていると、受注・製造・棚卸がそれぞれ別の名前に記録され、片方だけ棚卸で合わせても他方がずれたままになります。同じ商品であれば、どちらか一方の名称に統一してください（統一後は、旧名称で登録済みの受注・製造データも新名称に書き換える必要があります）。下の「🔁 製品名の変更」ツールで一括反映できます。</div>', unsafe_allow_html=True)
             for _label, _v in _dupe_msgs:
                 st.markdown(f"- **[{_label}]** {' 　⇔　 '.join(_v)}")
+
+    with st.expander("🔁 製品名の変更（旧名称の受注・製造履歴もすべて引き継ぎます）"):
+        st.markdown('<div class="info-tip">💡 製品名を変更すると、過去に旧名称で登録された受注・製造・資材ログ・特注チャータースケジュールのデータを、すべて新しい名称に一括で書き換えます。データの紐づけ（履歴・在庫計算）はそのまま維持されます。</div>', unsafe_allow_html=True)
+        _rn_c1, _rn_c2 = st.columns(2)
+        _rn_old = _rn_c1.selectbox("変更前の製品名", options=[""] + (sorted(mst_u["製品名"].tolist()) if not mst_u.empty else []), key="rn_old_prod", format_func=lambda x: fn(x) if x else "")
+        _rn_new = _rn_c2.text_input("変更後の製品名", key="rn_new_prod")
+        if _rn_old and _rn_new and _rn_old.strip() != _rn_new.strip():
+            _pl_df = st.session_state.get("packaging_logs_df", pd.DataFrame())
+            _ss_df = st.session_state.get("special_schedule_df", pd.DataFrame())
+            _rn_targets = [
+                ("受注データ (orders)", odf, "製品名"),
+                ("製造データ (manufactures)", mdf, "製品名"),
+                ("資材ログの関連製品名 (packaging_logs)", _pl_df, "関連製品名"),
+                ("特注・チャータースケジュール (special_schedule)", _ss_df, "製品名"),
+            ]
+            _rn_affected = [(nm, int((df[col] == _rn_old).sum())) for nm, df, col in _rn_targets if not df.empty and col in df.columns and (df[col] == _rn_old).any()]
+            if _rn_affected:
+                st.markdown("**あわせて書き換えられるデータ：**")
+                for nm, cnt in _rn_affected: st.markdown(f"- {nm}：{cnt:,} 件")
+            else:
+                st.caption("この製品名を参照している受注・製造データは見つかりませんでした（マスタのみ変更されます）。")
+            if st.button(f"🔁「{_rn_old}」→「{_rn_new}」に一括変更する", type="primary", key="btn_rename_prod"):
+                _m2 = mst.copy(); _m2.loc[_m2["製品名"] == _rn_old, "製品名"] = _rn_new
+                save_sync("master", _m2)
+                if not odf.empty and (odf["製品名"] == _rn_old).any():
+                    _o2 = odf.copy(); _o2.loc[_o2["製品名"] == _rn_old, "製品名"] = _rn_new
+                    save_sync("orders", _o2)
+                if not mdf.empty and (mdf["製品名"] == _rn_old).any():
+                    _md2 = mdf.copy(); _md2.loc[_md2["製品名"] == _rn_old, "製品名"] = _rn_new
+                    save_sync("manufactures", _md2)
+                if not _pl_df.empty and "関連製品名" in _pl_df.columns and (_pl_df["関連製品名"] == _rn_old).any():
+                    _pl2 = _pl_df.copy(); _pl2.loc[_pl2["関連製品名"] == _rn_old, "関連製品名"] = _rn_new
+                    save_sync("packaging_logs", _pl2)
+                if not _ss_df.empty and "製品名" in _ss_df.columns and (_ss_df["製品名"] == _rn_old).any():
+                    _ss2 = _ss_df.copy(); _ss2.loc[_ss2["製品名"] == _rn_old, "製品名"] = _rn_new
+                    save_sync("special_schedule", _ss2)
+                flash("success", f"✅「{_rn_old}」を「{_rn_new}」に変更し、関連するすべてのデータを引き継ぎました。※「🏗️ 製造スケジューラー」内のOKM/重量換算マスタにこの製品を登録している場合は、そちらも合わせて名称を更新してください。")
+                st.rerun()
 
     tm1,tm2,tm3,tm4,tm5 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社",f"⚠️ マスタ未登録品 ({len(_orphan_names)})" if _orphan_names else "⚠️ マスタ未登録品"])
     with tm1:
