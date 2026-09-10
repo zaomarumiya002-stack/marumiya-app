@@ -359,6 +359,27 @@ def to_case_qty(pn, raw_qty):
     if kbn == "甲": return r * kou
     return r
 
+def quick_toggle_check(order_id, new_value, col_name="荷姿チェック"):
+    """チェック項目だけを高速に更新する（シート全体を再書き込みせず、該当セル1つだけを更新）。
+    行番号のズレなど想定外の状況を検知した場合はFalseを返し、呼び出し側で通常保存にフォールバックする。"""
+    try:
+        _odf_now = st.session_state.orders_df
+        idx_arr = _odf_now.index[_odf_now["ID"] == order_id]
+        if len(idx_arr) == 0: return False
+        idx = idx_arr[0]
+        row_num = int(idx) + 2  # 1行目はヘッダー
+        col_names = ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"]
+        if col_name not in col_names: return False
+        col_num = col_names.index(col_name) + 1
+        ws = sheet.worksheet("orders")
+        if str(ws.cell(row_num, 1).value or "").strip() != str(order_id).strip(): return False
+        ws.update_cell(row_num, col_num, str(new_value).upper())
+        st.session_state.orders_df.loc[idx, col_name] = new_value
+        st.cache_data.clear()
+        return True
+    except Exception:
+        return False
+
 def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
@@ -796,22 +817,28 @@ elif pg == "🚚 出荷・発送管理":
         if d_ord.empty: st.info(f"📭 {format_date_jp(td)} の予定なし")
         else:
             d_ord["ケース数"] = d_ord["ケース数"].apply(to_int)
+            d_ord["状態"] = d_ord["荷姿チェック"].map({True: "✅ 消込済", False: "⏳ 未消込"})
             dn = d_ord[d_ord["荷姿チェック"]==True]; udn = d_ord[d_ord["荷姿チェック"]==False]
             c1,c2,c3 = st.columns(3); c1.metric("出荷件数", f"{len(d_ord)} 件"); c2.metric("✅ 消込済", f"{len(dn)} 件"); c3.metric("⏳ 未消込", f"{len(udn)} 件", delta_color="inverse")
             if not udn.empty and td <= date.today(): st.error(f"🚨 出荷漏れ（荷姿未チェック）が **{len(udn)} 件** あります！")
 
-            st.markdown("##### 📦 荷姿チェック（タップで切替）")
-            for _, r in d_ord.sort_values("顧客名").iterrows():
-                _checked = str(r.get("荷姿チェック", False)).upper() == "TRUE" if isinstance(r.get("荷姿チェック"), str) else bool(r.get("荷姿チェック"))
-                bc1, bc2 = st.columns([5, 2])
-                with bc1:
-                    st.markdown(f"{'✅' if _checked else '⏳'} **{r['顧客名']}**　{fn(r['製品名'])} ×{to_int(r['ケース数']):,}cs")
-                with bc2:
-                    if st.button("↩️ 未消込に戻す" if _checked else "✅ 消込完了にする", key=f"chk_btn_{r['ID']}", use_container_width=True, type=("secondary" if _checked else "primary")):
+            st.markdown('<div style="font-size:13px;color:#64748B;">💡 列見出しをクリックすると並び替えできます。行を1つ選んで、下のボタンで消込のON/OFFを切り替えられます。</div>', unsafe_allow_html=True)
+            _ship_sc = ["ID","状態","顧客名","製品名","ケース数","運送会社","発送備考"]
+            _sel_ship = st.dataframe(d_ord[_ship_sc].style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;']*len(r) if "済" in str(r.get("状態","")) else ['']*len(r), axis=1),
+                                      column_config={"ID": None}, use_container_width=True, hide_index=True,
+                                      on_select="rerun", selection_mode="single-row", key="ship_select_grid")
+            _sel_rows = _sel_ship.selection.get("rows", [])
+            if _sel_rows:
+                _sel_row = d_ord.reset_index(drop=True).iloc[_sel_rows[0]]
+                _sel_checked = bool(_sel_row["荷姿チェック"])
+                st.markdown(f"**選択中：** {_sel_row['顧客名']}　{fn(_sel_row['製品名'])} ×{to_int(_sel_row['ケース数']):,}cs")
+                if st.button("↩️ 未消込に戻す" if _sel_checked else "✅ 消込完了にする", type=("secondary" if _sel_checked else "primary"), use_container_width=True, key="ship_toggle_btn"):
+                    if not quick_toggle_check(_sel_row["ID"], not _sel_checked):
                         _u = odf.copy().astype(object)
-                        _u.loc[_u["ID"]==r["ID"], "荷姿チェック"] = str(not _checked).upper()
+                        _u.loc[_u["ID"]==_sel_row["ID"], "荷姿チェック"] = str(not _sel_checked).upper()
                         save_sync("orders", _u)
-                        st.rerun()
+                    st.rerun()
+
             st.markdown("---")
             st.markdown("##### 🚚 運送会社・賞味期限・発送備考の編集")
             ddf = d_ord[["ID","顧客名","製品名","ケース数","運送会社","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考"]].copy()
@@ -1694,7 +1721,7 @@ elif pg == "📊 在庫・スケジュール":
 
             dp = st.session_state.drill_product
             if dp:
-                st.markdown(f'<div class="drill-panel">### 📦 {fn(dp)} 詳細', unsafe_allow_html=True)
+                st.markdown(f'<div class="drill-panel"><h4 style="margin:0;">📦 {fn(dp)} 詳細</h4></div>', unsafe_allow_html=True)
                 if st.button("📑 内訳をポップアップで見る（出荷・製造予定の一覧）", key="v1_open_dialog"):
                     _show_breakdown_dialog(dp)
                 oy = today - timedelta(days=365)
@@ -1755,11 +1782,14 @@ elif pg == "📊 在庫・スケジュール":
                         oq = to_int(do["ケース数"].sum()) if not do.empty else 0
                         cust = " / ".join(do["顧客名"].dropna().astype(str).unique()) if not do.empty else ""
                         if len(do) > 1: cust = f"{cust}（{len(do)}件合算）"
+                        _notes = " / ".join(n for n in do["備考"].dropna().astype(str).unique() if n.strip()) if not do.empty and "備考" in do.columns else ""
+                        _dest = cust if cust else "―"
+                        if _notes: _dest = f"{_dest}　📝{_notes}"
                         dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                         iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
                         if d2.normalize() == today: ts = cur_stock(dp)
                         else: ts += (iq-oq)
-                        if iq>0 or oq>0 or ts<0: dtl.append({"_dt":d2,"日付":format_date_jp(d2),"出荷先":cust if cust else "―","製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
+                        if iq>0 or oq>0 or ts<0: dtl.append({"_dt":d2,"日付":format_date_jp(d2),"出荷先":_dest,"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
 
                     _g_past_start = today - timedelta(days=30)
                     _g_bal = _daily_balance_walk(dp, _g_past_start, today - timedelta(days=1))
