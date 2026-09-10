@@ -78,6 +78,41 @@ def _nd_to_date(series):
 def is_special_order(r): return "特注" in str(r) or "チャーター便" in str(r)
 def make_csv_bytes(df): return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
+def make_excel_bytes(df, sheet_name="Sheet1"):
+    """現場で見やすいExcel出力（見出し色付け・列幅自動調整・見出し行固定）。openpyxl未導入時はNoneを返す（呼び出し側でCSVにフォールバック）。"""
+    try:
+        import io
+        from openpyxl.styles import Font, PatternFill, Alignment
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+            ws = writer.sheets[sheet_name[:31]]
+            header_fill = PatternFill(start_color="1E3A8A", end_color="1E3A8A", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                cell = ws.cell(row=1, column=col_idx)
+                cell.fill = header_fill; cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                try:
+                    max_len = max([len(str(col_name))] + [len(str(v)) for v in df[col_name].astype(str).tolist()[:200]])
+                except Exception:
+                    max_len = 12
+                ws.column_dimensions[cell.column_letter].width = min(40, max(10, max_len + 2))
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+        return buf.getvalue()
+    except Exception:
+        return None
+
+def excel_or_csv_download(df, base_filename, sheet_name="Sheet1", key=None, use_container_width=False, label_excel="📥 Excel出力（見やすい形式）", type_="secondary"):
+    """Excel出力を優先し、openpyxlが無い環境では自動でCSV出力に切り替える。"""
+    _xlsx = make_excel_bytes(df, sheet_name=sheet_name)
+    if _xlsx is not None:
+        st.download_button(label_excel, data=_xlsx, file_name=f"{base_filename}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=key, use_container_width=use_container_width, type=type_)
+    else:
+        st.download_button("📥 CSV出力", data=make_csv_bytes(df), file_name=f"{base_filename}.csv", mime="text/csv", key=key, use_container_width=use_container_width, type=type_)
+        st.caption("ℹ️ Excel出力には`openpyxl`パッケージが必要です（requirements.txtに`openpyxl`を追加すると見やすいExcel形式で出力されます）。")
+
 # ─────────────────────────────────────────────
 # ページ設定 & CSS
 # ─────────────────────────────────────────────
@@ -760,19 +795,36 @@ elif pg == "🚚 出荷・発送管理":
             d_ord = pd.DataFrame()
         if d_ord.empty: st.info(f"📭 {format_date_jp(td)} の予定なし")
         else:
+            d_ord["ケース数"] = d_ord["ケース数"].apply(to_int)
             dn = d_ord[d_ord["荷姿チェック"]==True]; udn = d_ord[d_ord["荷姿チェック"]==False]
             c1,c2,c3 = st.columns(3); c1.metric("出荷件数", f"{len(d_ord)} 件"); c2.metric("✅ 消込済", f"{len(dn)} 件"); c3.metric("⏳ 未消込", f"{len(udn)} 件", delta_color="inverse")
             if not udn.empty and td <= date.today(): st.error(f"🚨 出荷漏れ（荷姿未チェック）が **{len(udn)} 件** あります！")
-            ddf = d_ord[["ID","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考"]].copy()
+
+            st.markdown("##### 📦 荷姿チェック（タップで切替）")
+            for _, r in d_ord.sort_values("顧客名").iterrows():
+                _checked = str(r.get("荷姿チェック", False)).upper() == "TRUE" if isinstance(r.get("荷姿チェック"), str) else bool(r.get("荷姿チェック"))
+                bc1, bc2 = st.columns([5, 2])
+                with bc1:
+                    st.markdown(f"{'✅' if _checked else '⏳'} **{r['顧客名']}**　{fn(r['製品名'])} ×{to_int(r['ケース数']):,}cs")
+                with bc2:
+                    if st.button("↩️ 未消込に戻す" if _checked else "✅ 消込完了にする", key=f"chk_btn_{r['ID']}", use_container_width=True, type=("secondary" if _checked else "primary")):
+                        _u = odf.copy().astype(object)
+                        _u.loc[_u["ID"]==r["ID"], "荷姿チェック"] = str(not _checked).upper()
+                        save_sync("orders", _u)
+                        st.rerun()
+            st.markdown("---")
+            st.markdown("##### 🚚 運送会社・賞味期限・発送備考の編集")
+            ddf = d_ord[["ID","顧客名","製品名","ケース数","運送会社","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考"]].copy()
             for c in ["賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5"]: ddf[c] = pd.to_datetime(ddf[c], errors="coerce").dt.date
-            ed_s = st.data_editor(ddf.style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;text-decoration:line-through;']*len(r) if str(r.get("荷姿チェック",False)).upper()=="TRUE" else ['']*len(r), axis=1), use_container_width=True, hide_index=True, column_config={"ID":None,"顧客名":st.column_config.TextColumn(disabled=True),"製品名":st.column_config.TextColumn(disabled=True),"ケース数":st.column_config.NumberColumn(disabled=True),"運送会社":st.column_config.SelectboxColumn(options=sh_m["運送会社名"].tolist() if not sh_m.empty else []),"賞味期限1":st.column_config.DateColumn("賞味1",format="YYYY-MM-DD")})
+            _date_col_cfg = {c: st.column_config.DateColumn(f"賞味{c[-1]}", format="YYYY-MM-DD") for c in ["賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5"]}
+            ed_s = st.data_editor(ddf, use_container_width=True, hide_index=True, key="ship_edit_grid", column_config={"ID":None,"顧客名":st.column_config.TextColumn(disabled=True),"製品名":st.column_config.TextColumn(disabled=True),"ケース数":st.column_config.NumberColumn(disabled=True),"運送会社":st.column_config.SelectboxColumn(options=sh_m["運送会社名"].tolist() if not sh_m.empty else []), **_date_col_cfg})
             _ship_msg_area = st.container()
             if st.button("💾 保存", type="primary", use_container_width=True):
                 u = odf.copy().astype(object)
                 for i, r in ed_s.iterrows():
                     m = u["ID"]==r["ID"]
                     if m.any():
-                        u.loc[m,"運送会社"] = str(r.get("運送会社","")); u.loc[m,"荷姿チェック"] = str(r.get("荷姿チェック",False)).upper(); u.loc[m,"発送備考"] = str(r.get("発送備考",""))
+                        u.loc[m,"運送会社"] = str(r.get("運送会社","")); u.loc[m,"発送備考"] = str(r.get("発送備考",""))
                         for c in ["賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5"]: v=r.get(c); u.loc[m,c] = v.strftime("%Y-%m-%d") if pd.notnull(v) and v else ""
                 save_sync("orders", u)
                 flash("success", "✅ 出荷情報を保存しました。"); st.rerun()
@@ -789,6 +841,7 @@ elif pg == "🚚 出荷・発送管理":
                 d = pd.Timestamp(sw)+timedelta(days=i)
                 wo = _ord_for_date(odf, d.date())
                 if not wo.empty:
+                    wo["ケース数"] = wo["ケース数"].apply(to_int)
                     with st.expander(f"**{format_date_jp(d)}**　{len(wo)}件 ✅{len(wo[wo['荷姿チェック']==True])}件完了", expanded=(d.date()==date.today())):
                         st.dataframe(wo[["顧客名","製品名","ケース数","運送会社","荷姿チェック","発送備考"]].style.apply(lambda r: ['background-color:#D1FAE5;']*len(r) if r.get("荷姿チェック")==True else ['']*len(r), axis=1), use_container_width=True, hide_index=True)
         else:
@@ -796,21 +849,25 @@ elif pg == "🚚 出荷・発送管理":
             aw = pd.concat([f for f in frames if not f.empty], ignore_index=True) if any(not f.empty for f in frames) else pd.DataFrame()
             if aw.empty: st.info("予定なし")
             else:
-                c1,c2,c3=st.columns(3); c1.metric("件数",f"{len(aw)}件"); c2.metric("✅ 消込済",f"{len(aw[aw['荷姿チェック']==True])}件"); c3.metric("総数",f"{aw['ケース数'].apply(to_int).sum():,}cs")
+                aw["ケース数"] = aw["ケース数"].apply(to_int)
+                c1,c2,c3=st.columns(3); c1.metric("件数",f"{len(aw)}件"); c2.metric("✅ 消込済",f"{len(aw[aw['荷姿チェック']==True])}件"); c3.metric("総数",f"{aw['ケース数'].sum():,}cs")
                 sc = [c for c in ["出荷日","顧客名","製品名","ケース数","運送会社","荷姿チェック","発送備考","備考"] if c in aw.columns]
-                st.dataframe(aw[sc].style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;']*len(r) if r.get("荷姿チェック")==True else ['']*len(r), axis=1), use_container_width=True, hide_index=True, height=min(600, max(300, len(aw)*38+60)))
-                st.download_button("📥 CSV出力", data=make_csv_bytes(aw[sc]), file_name=f"週間出荷_{sw}.csv", mime="text/csv", use_container_width=True)
+                aw["荷姿チェック"] = aw["荷姿チェック"].map({True:"済",False:"未"}).fillna("")
+                st.dataframe(aw[sc].style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;']*len(r) if r.get("荷姿チェック")=="済" else ['']*len(r), axis=1), use_container_width=True, hide_index=True, height=min(600, max(300, len(aw)*38+60)))
+                excel_or_csv_download(aw[sc], f"週間出荷_{sw}", sheet_name="週間出荷", key="ts2_dl", use_container_width=True, type_="primary")
 
     with ts3:
         ce1, ce2 = st.columns(2); es = ce1.date_input("開始", value=date.today().replace(day=1)); ee = ce2.date_input("終了", value=date.today())
         if not odf.empty:
             _nd3_date = _nd_to_date(odf["納品予定日"])
             edf = odf[(_nd3_date >= es) & (_nd3_date <= ee)].copy()
+            edf["ケース数"] = edf["ケース数"].apply(to_int)
             for c in ["納品予定日","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5"]:
                 if c in edf.columns: edf[c] = pd.to_datetime(edf[c],errors='coerce').apply(lambda x: x.strftime("%Y/%m/%d") if pd.notnull(x) else "")
             edf["荷姿チェック"] = edf["荷姿チェック"].map({True:"済",False:"未"}).fillna("")
             st.metric("対象件数", f"{len(edf)} 件")
-            st.download_button("📥 CSV出力", data=make_csv_bytes(edf[[c for c in ["納品予定日","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","備考"] if c in edf.columns]]), file_name=f"出荷データ_{es}_{ee}.csv", mime="text/csv", type="primary", use_container_width=True)
+            _edf_out = edf[[c for c in ["納品予定日","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","備考"] if c in edf.columns]]
+            excel_or_csv_download(_edf_out, f"出荷データ_{es}_{ee}", sheet_name="出荷データ", key="ts3_dl", use_container_width=True, type_="primary")
 
 # ─────────────────────────────────────────────
 # 🏭 製造登録
@@ -949,6 +1006,45 @@ elif pg == "🏭 製造登録":
                 flash("success", "✅ 製造全データを保存しました。"); st.rerun()
             with _mfg_all_msg_area:
                 show_flash_inline()
+
+        with st.expander("🔧 過去の製造登録の単位ズレを確認・一括修正"):
+            st.markdown('<div class="info-tip">💡 以前は「袋」「甲」で入力した製造登録が、正しいケース数に変換されずそのまま保存されてしまうバグがありました（現在は修正済みです）。ここで「袋」「甲」で登録されている製品の過去の製造記録を、現在のマスタ設定（入数・甲消費数）を使って再計算し、ズレている記録だけを一覧表示します。修正すると、現在庫・1ヶ月在庫予想などすべての在庫計算に自動的に反映されます（計算ロジック自体は変更しません。値だけを正しく直します）。</div>', unsafe_allow_html=True)
+            if mdf.empty:
+                st.info("製造データがありません。")
+            else:
+                _fix_rows = []
+                for _idx, r in mdf.iterrows():
+                    _pn = r.get("製品名","")
+                    _note = str(r.get("備考",""))
+                    if not _pn or (not mst_u.empty and _pn not in mst_u["製品名"].values): continue
+                    if any(tag in _note for tag in ["【在庫調整", "【棚卸確定", "【在庫非反映】"]): continue
+                    _kbn3, _nyu3, _kou3 = pui(_pn)
+                    if _kbn3 == "ケース": continue
+                    _stored = to_int(r.get("ケース数", 0))
+                    _correct = to_case_qty(_pn, _stored)
+                    if _correct != _stored:
+                        _fix_rows.append({"ID": r.get("ID",""), "製品名": _pn, "製造予定日": format_date_jp(r.get("製造予定日")), "単位": _kbn3, "現在の記録(cs)": _stored, "修正後(cs)": _correct, "差分": _correct - _stored})
+                if not _fix_rows:
+                    st.success("✅ 単位ズレが疑われる製造記録は見つかりませんでした。")
+                else:
+                    _fix_df = pd.DataFrame(_fix_rows)
+                    _affected_products = sorted(_fix_df["製品名"].unique().tolist())
+                    st.markdown(f"**⚠️ {len(_fix_df)}件、{len(_affected_products)}製品で単位ズレの可能性がある記録が見つかりました：**")
+                    st.markdown("、".join(fn(p) for p in _affected_products))
+                    st.dataframe(_fix_df[["製品名","製造予定日","単位","現在の記録(cs)","修正後(cs)","差分"]], hide_index=True, use_container_width=True)
+                    st.caption("※現在のマスタ設定（入数・甲消費数）で再計算した想定値です。過去に入数・甲消費数の設定を変更したことがある場合、その期間の記録はズレる可能性があります。内容をご確認の上、修正してください。")
+                    _sel_fix_ids = st.multiselect("修正する記録を選択（未選択＝上に表示されている全件を修正）", options=_fix_df["ID"].tolist(),
+                        format_func=lambda i: f"{_fix_df[_fix_df['ID']==i].iloc[0]['製品名']} {_fix_df[_fix_df['ID']==i].iloc[0]['製造予定日']}（{_fix_df[_fix_df['ID']==i].iloc[0]['現在の記録(cs)']}→{_fix_df[_fix_df['ID']==i].iloc[0]['修正後(cs)']}）",
+                        key="fix_mfg_select")
+                    _apply_ids = _sel_fix_ids if _sel_fix_ids else _fix_df["ID"].tolist()
+                    if st.button(f"🔧 選択した{len(_apply_ids)}件を正しいケース数に修正する", type="primary", key="btn_fix_mfg_units"):
+                        _md_fixed = mdf.copy()
+                        for _fid in _apply_ids:
+                            _new_val = int(_fix_df[_fix_df["ID"]==_fid].iloc[0]["修正後(cs)"])
+                            _md_fixed.loc[_md_fixed["ID"]==_fid, "ケース数"] = _new_val
+                        save_sync("manufactures", _md_fixed)
+                        flash("success", f"✅ {len(_apply_ids)}件の製造記録を正しいケース数に修正しました。現在庫・1ヶ月在庫予想など、すべての在庫計算に自動的に反映されます。")
+                        st.rerun()
 
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
@@ -2026,12 +2122,12 @@ elif pg == "⭐ 特注・チャータースケジュール":
             fcol1, fcol2 = st.columns([3, 2])
             with fcol1:
                 _sel_cust1 = st.multiselect("👤 顧客で絞り込み（複数選択可・未選択＝全顧客）", options=_cl1, key="ts1_cust_filter")
-            spo_f = spo if not _sel_cust1 else spo[spo["顧客名"].isin(_sel_cust1)]
+            spo_f = spo if not _sel_cust1 else spo[spo["顧客名"].astype(str).str.strip().isin(_sel_cust1)]
             sc = [c for c in ["種別","顧客名","出荷予定日","製品名","ケース数","在庫状況","備考"] if c in spo_f.columns]
             with fcol2:
                 st.write("")
                 _fname1 = "_".join(_sel_cust1) if _sel_cust1 else "全顧客"
-                st.download_button("📥 この一覧をCSV出力", data=make_csv_bytes(spo_f[sc]), file_name=f"特注チャータースケジュール_{_fname1}_{date.today()}.csv", mime="text/csv", key="ts1_csv_dl")
+                excel_or_csv_download(spo_f[sc], f"特注チャータースケジュール_{_fname1}_{date.today()}", sheet_name="特注チャーター一覧", key="ts1_csv_dl")
             if spo_f.empty:
                 st.info("該当する予定はありません。")
             else:
@@ -2051,7 +2147,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
             sl_c2 = c2.multiselect("👤 顧客で絞り込み（複数選択可・未選択＝全顧客）", options=_cl2, key="ts2_cust_filter")
             fsp = spo.copy()
             if sl: fsp = fsp[fsp["製品名"].isin(sl)]
-            if sl_c2: fsp = fsp[fsp["顧客名"].isin(sl_c2)]
+            if sl_c2: fsp = fsp[fsp["顧客名"].astype(str).str.strip().isin(sl_c2)]
             fsp = fsp.sort_values("納品予定日")
             fsp["出荷予定日"] = fsp["納品予定日"].apply(format_date_jp)
             fsp["在庫状況"] = fsp.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1)
@@ -2060,7 +2156,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
             else:
                 sc2 = [c for c in ["製品名","顧客名","出荷予定日","ケース数","在庫状況","備考"] if c in fsp.columns]
                 st.dataframe(fsp[sc2].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
-                st.download_button("📥 この一覧をCSV出力", data=make_csv_bytes(fsp[sc2]), file_name=f"製品別特注チャータースケジュール_{date.today()}.csv", mime="text/csv", key="ts2_csv_dl")
+                excel_or_csv_download(fsp[sc2], f"製品別特注チャータースケジュール_{date.today()}", sheet_name="製品別スケジュール", key="ts2_csv_dl")
     with ts4:
         st.markdown('<div class="info-tip">💡 1週間分の特注・チャーター便を、曜日順の一覧で確認できます。製品名は省略せずフルで表示しています。</div>', unsafe_allow_html=True)
         if spo.empty: st.info("なし")
@@ -2074,7 +2170,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
             week_dates = [wk_start_ts + timedelta(days=i) for i in range(7)]
             wspo = spo[(pd.to_datetime(spo["納品予定日"],errors='coerce')>=week_dates[0]) & (pd.to_datetime(spo["納品予定日"],errors='coerce')<=week_dates[-1])].copy()
             if _sel_cust4:
-                wspo = wspo[wspo["顧客名"].isin(_sel_cust4)]
+                wspo = wspo[wspo["顧客名"].astype(str).str.strip().isin(_sel_cust4)]
             if wspo.empty:
                 st.info("この週は該当する特注・チャーター便はありません。")
             else:
@@ -2089,7 +2185,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
                              column_config={"曜日/日付": st.column_config.TextColumn(width="small"), "製品名": st.column_config.TextColumn(width="large")},
                              height=min(600, 60+40*len(wspo)))
                 _fname4 = "_".join(_sel_cust4) if _sel_cust4 else "全顧客"
-                st.download_button("📥 週間スケジュールCSV", data=make_csv_bytes(wspo[sc4]), file_name=f"週間特注チャータースケジュール_{wk_start}_{_fname4}.csv", mime="text/csv", key="ts4_csv_dl")
+                excel_or_csv_download(wspo[sc4], f"週間特注チャータースケジュール_{wk_start}_{_fname4}", sheet_name="週間スケジュール", key="ts4_csv_dl")
     with ts3:
         if not spo.empty:
             ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時": datetime.now(JST).replace(tzinfo=None)} for _,r in spo.iterrows() if r["ID"] not in ex]
