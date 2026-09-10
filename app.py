@@ -380,6 +380,32 @@ def quick_toggle_check(order_id, new_value, col_name="荷姿チェック"):
     except Exception:
         return False
 
+def quick_toggle_check_batch(order_ids, new_value, col_name="荷姿チェック"):
+    """複数件をまとめて高速更新する（1件ずつセルを更新し、最後に1回だけキャッシュをクリア）。
+    戻り値は「更新できなかったID」のリスト。呼び出し側でそれだけ通常保存にフォールバックする。"""
+    col_names = ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"]
+    if col_name not in col_names: return list(order_ids)
+    col_num = col_names.index(col_name) + 1
+    try:
+        ws = sheet.worksheet("orders")
+    except Exception:
+        return list(order_ids)
+    _odf_now = st.session_state.orders_df
+    failed = []
+    for oid in order_ids:
+        try:
+            idx_arr = _odf_now.index[_odf_now["ID"] == oid]
+            if len(idx_arr) == 0: failed.append(oid); continue
+            idx = idx_arr[0]; row_num = int(idx) + 2
+            if str(ws.cell(row_num, 1).value or "").strip() != str(oid).strip():
+                failed.append(oid); continue
+            ws.update_cell(row_num, col_num, str(new_value).upper())
+            st.session_state.orders_df.loc[idx, col_name] = new_value
+        except Exception:
+            failed.append(oid)
+    st.cache_data.clear()
+    return failed
+
 def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
 def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
 
@@ -822,20 +848,31 @@ elif pg == "🚚 出荷・発送管理":
             c1,c2,c3 = st.columns(3); c1.metric("出荷件数", f"{len(d_ord)} 件"); c2.metric("✅ 消込済", f"{len(dn)} 件"); c3.metric("⏳ 未消込", f"{len(udn)} 件", delta_color="inverse")
             if not udn.empty and td <= date.today(): st.error(f"🚨 出荷漏れ（荷姿未チェック）が **{len(udn)} 件** あります！")
 
-            st.markdown('<div style="font-size:13px;color:#64748B;">💡 列見出しをクリックすると並び替えできます。行を1つ選んで、下のボタンで消込のON/OFFを切り替えられます。</div>', unsafe_allow_html=True)
-            _ship_sc = ["ID","状態","顧客名","製品名","ケース数","運送会社","発送備考"]
+            st.markdown('<div style="font-size:13px;color:#64748B;">💡 列見出しをクリックで並び替え。左端のチェックで複数選び、下のボタンでまとめて消込できます。</div>', unsafe_allow_html=True)
+            _ship_sc = ["ID","顧客名","製品名","ケース数","状態","運送会社","発送備考"]
             _sel_ship = st.dataframe(d_ord[_ship_sc].style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;']*len(r) if "済" in str(r.get("状態","")) else ['']*len(r), axis=1),
-                                      column_config={"ID": None}, use_container_width=True, hide_index=True,
-                                      on_select="rerun", selection_mode="single-row", key="ship_select_grid")
+                                      column_config={"ID": None}, use_container_width=True, hide_index=True, row_height=44,
+                                      on_select="rerun", selection_mode="multi-row", key="ship_select_grid")
             _sel_rows = _sel_ship.selection.get("rows", [])
             if _sel_rows:
-                _sel_row = d_ord.reset_index(drop=True).iloc[_sel_rows[0]]
-                _sel_checked = bool(_sel_row["荷姿チェック"])
-                st.markdown(f"**選択中：** {_sel_row['顧客名']}　{fn(_sel_row['製品名'])} ×{to_int(_sel_row['ケース数']):,}cs")
-                if st.button("↩️ 未消込に戻す" if _sel_checked else "✅ 消込完了にする", type=("secondary" if _sel_checked else "primary"), use_container_width=True, key="ship_toggle_btn"):
-                    if not quick_toggle_check(_sel_row["ID"], not _sel_checked):
+                _sel_df = d_ord.reset_index(drop=True).iloc[_sel_rows]
+                _n_checked = int((_sel_df["荷姿チェック"]==True).sum()); _n_unchecked = len(_sel_df) - _n_checked
+                st.markdown(f"**{len(_sel_df)}件選択中**　（✅済:{_n_checked}件／⏳未:{_n_unchecked}件）")
+                bcol1, bcol2 = st.columns(2)
+                if bcol1.button(f"✅ 選択した{len(_sel_df)}件を消込完了にする", type="primary", use_container_width=True, key="ship_batch_done"):
+                    _ids = _sel_df["ID"].tolist()
+                    _failed = quick_toggle_check_batch(_ids, True)
+                    if _failed:
                         _u = odf.copy().astype(object)
-                        _u.loc[_u["ID"]==_sel_row["ID"], "荷姿チェック"] = str(not _sel_checked).upper()
+                        _u.loc[_u["ID"].isin(_failed), "荷姿チェック"] = "TRUE"
+                        save_sync("orders", _u)
+                    st.rerun()
+                if bcol2.button(f"↩️ 選択した{len(_sel_df)}件を未消込に戻す", use_container_width=True, key="ship_batch_undo"):
+                    _ids = _sel_df["ID"].tolist()
+                    _failed = quick_toggle_check_batch(_ids, False)
+                    if _failed:
+                        _u = odf.copy().astype(object)
+                        _u.loc[_u["ID"].isin(_failed), "荷姿チェック"] = "FALSE"
                         save_sync("orders", _u)
                     st.rerun()
 
