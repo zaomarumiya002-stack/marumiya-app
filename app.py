@@ -728,13 +728,10 @@ if pg == "📋 受注登録":
     sl = sh_m["運送会社名"].tolist() if not sh_m.empty else []; tl = get_toriatsuki_list()
     t1,t2,t3 = st.columns([2, 2, 1])
     with t1:
-        _stor_search = st.text_input("🏢 帳合先を検索", key="reg_stor_search", placeholder="会社名の一部を入力（そのまま日本語で入力できます）")
-        _stor_filtered = sorted(set(c for c in tl if _stor_search.strip() and _stor_search.strip() in c)) if _stor_search.strip() else tl
-        if "reg_stor_pick" not in st.session_state: st.session_state.reg_stor_pick = None
-        if st.session_state.reg_stor_pick not in _stor_filtered: st.session_state.reg_stor_pick = None
-        stor = st.selectbox("🏢 帳合先を選択", options=_stor_filtered, index=None, placeholder="上で検索、または一覧から選択…", key="reg_stor_pick")
+        if "reg_stor" not in st.session_state: st.session_state.reg_stor = None
+        stor = st.selectbox("🏢 帳合先", options=tl, index=None, placeholder="選択…", key="reg_stor")
     if stor and st.button("🔄 帳合先をクリア", key="clear_stor_btn", help="別の帳合先を検索したいときに押してください"):
-        st.session_state.reg_stor_pick = None; st.session_state.reg_stor_search = ""; st.rerun()
+        st.session_state.reg_stor = None; st.rerun()
     scands = get_shiten_list(stor)
     sv = t2.selectbox("🏬 支店・店舗名", options=["（なし）"]+scands, index=0) if scands else t2.text_input("🏬 支店・店舗名（直接入力）")
     sv = "" if sv=="（なし）" else sv
