@@ -261,6 +261,31 @@ def save_sync(name, df):
                 ds[col] = ds[col].fillna('').astype(str)
         
         ds = ds.replace(["nan", "None", "NaT", "NaN"], "")
+
+        # ── 同時編集による消失防止 ──
+        # 自分がこのデータを画面に読み込んだ後、他の人が新しく登録した行がシート上に増えている場合、
+        # そのまま上書き保存すると気づかずに消してしまう。保存直前に最新のシートを確認し、
+        # 見つかった「他の人が追加した新規行」は保存内容に合流させて保護する。
+        _protected_new = 0
+        if "ID" in ds.columns:
+            try:
+                ws_check = sheet.worksheet(name)
+                _remote_data = ws_check.get_all_values()
+                if len(_remote_data) > 1 and "ID" in _remote_data[0]:
+                    _rh = _remote_data[0]
+                    _id_pos = _rh.index("ID")
+                    _known_ids = st.session_state.get(f"{name}_known_ids", set())
+                    _local_ids = set(ds["ID"].tolist())
+                    _remote_rows = {r[_id_pos]: r for r in _remote_data[1:] if len(r) > _id_pos}
+                    _new_ids = [i for i in _remote_rows.keys() if i and i not in _known_ids and i not in _local_ids]
+                    if _new_ids:
+                        _extra = pd.DataFrame([_remote_rows[i] for i in _new_ids], columns=_rh)
+                        _extra = _extra.reindex(columns=ds.columns.tolist(), fill_value="")
+                        ds = pd.concat([ds, _extra], ignore_index=True)
+                        _protected_new = len(_new_ids)
+            except Exception:
+                pass  # 確認できない場合も、通常の保存は継続する（安全側フォールバック）
+
         update_values = [ds.columns.tolist()] + ds.values.tolist()
         
         ws = sheet.worksheet(name)
@@ -268,7 +293,12 @@ def save_sync(name, df):
         ws.update(values=update_values, range_name='A1')
         
         st.cache_data.clear()
-        st.session_state[f"{name}_df"] = df
+        if _protected_new > 0:
+            st.session_state[f"{name}_df"] = load_data.__wrapped__(name)  # 保護した行を正しい型で反映するため再読込
+            st.info(f"ℹ️ 他の方が追加した {_protected_new} 件のデータが見つかったため、保護して一緒に保存しました。")
+        else:
+            st.session_state[f"{name}_df"] = df
+        if "ID" in ds.columns: st.session_state[f"{name}_known_ids"] = set(ds["ID"].tolist())
         st.success(f"✅ {name} を正常に保存しました。")
     except Exception as e:
         st.error(f"保存処理中にエラーが発生しました: {str(e)}")
@@ -302,7 +332,10 @@ def app_sync(name, nr):
         st.error(f"追加保存エラー: {e}")
 
 for _s in ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]:
-    if f"{_s}_df" not in st.session_state: st.session_state[f"{_s}_df"] = load_data(_s)
+    if f"{_s}_df" not in st.session_state:
+        st.session_state[f"{_s}_df"] = load_data(_s)
+        _loaded_df = st.session_state[f"{_s}_df"]
+        st.session_state[f"{_s}_known_ids"] = set(_loaded_df["ID"].astype(str).tolist()) if isinstance(_loaded_df, pd.DataFrame) and "ID" in _loaded_df.columns else set()
 if "current_page" not in st.session_state: st.session_state.current_page = "📋 受注登録"
 if "drill_product" not in st.session_state: st.session_state.drill_product = None
 if "_flash" not in st.session_state: st.session_state._flash = None
@@ -694,10 +727,14 @@ if pg == "📋 受注登録":
     if idu: st.markdown('<div class="info-card yellow" style="background:#FFFBEB;padding:10px 16px;">🟡 <b>日付未定</b> として登録されます。</div>', unsafe_allow_html=True)
     sl = sh_m["運送会社名"].tolist() if not sh_m.empty else []; tl = get_toriatsuki_list()
     t1,t2,t3 = st.columns([2, 2, 1])
-    if "reg_stor" not in st.session_state: st.session_state.reg_stor = None
-    stor = t1.selectbox("🏢 帳合先", options=tl, index=None, placeholder="選択…", key="reg_stor")
+    with t1:
+        _stor_search = st.text_input("🏢 帳合先を検索", key="reg_stor_search", placeholder="会社名の一部を入力（そのまま日本語で入力できます）")
+        _stor_filtered = sorted(set(c for c in tl if _stor_search.strip() and _stor_search.strip() in c)) if _stor_search.strip() else tl
+        if "reg_stor_pick" not in st.session_state: st.session_state.reg_stor_pick = None
+        if st.session_state.reg_stor_pick not in _stor_filtered: st.session_state.reg_stor_pick = None
+        stor = st.selectbox("🏢 帳合先を選択", options=_stor_filtered, index=None, placeholder="上で検索、または一覧から選択…", key="reg_stor_pick")
     if stor and st.button("🔄 帳合先をクリア", key="clear_stor_btn", help="別の帳合先を検索したいときに押してください"):
-        st.session_state.reg_stor = None; st.rerun()
+        st.session_state.reg_stor_pick = None; st.session_state.reg_stor_search = ""; st.rerun()
     scands = get_shiten_list(stor)
     sv = t2.selectbox("🏬 支店・店舗名", options=["（なし）"]+scands, index=0) if scands else t2.text_input("🏬 支店・店舗名（直接入力）")
     sv = "" if sv=="（なし）" else sv
