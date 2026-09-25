@@ -2310,7 +2310,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
 # ─────────────────────────────────────────────
 elif pg == "📈 経営・分析ダッシュボード":
     page_header("📈 経営・製造管理 ダッシュボード")
-    td1,td2,td3,td4 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド"])
+    td1,td2,td3,td4,td5 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド","🗑️ 廃盤検討"])
     with td1:
         if not odf.empty:
             tm = date.today().replace(day=1); om = odf[(safe_dt_date(odf["納品予定日"])>=tm)&(odf["不良廃棄フラグ"]==False)]
@@ -2323,11 +2323,92 @@ elif pg == "📈 経営・分析ダッシュボード":
                 cua = odf[odf["顧客名"]!="未指定"].groupby("顧客名")["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index().sort_values("ケース数",ascending=False).head(5)
                 if not cua.empty: st.plotly_chart(px.bar(cua,x="ケース数",y="顧客名",orientation='h',title="主要顧客 TOP5"), use_container_width=True)
     with td2:
-        if not odf.empty:
-            o2 = odf[odf["不良廃棄フラグ"]==False].copy(); o2["ケース数"] = o2["ケース数"].apply(to_int); abc = o2.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
-            if abc["ケース数"].sum()>0:
-                abc["累計比率"] = abc["ケース数"].cumsum()/abc["ケース数"].sum()*100; abc["ランク"] = pd.cut(abc["累計比率"],bins=[0,70,90,100],labels=["A(主力)","B(中堅)","C(その他)"])
-                st.plotly_chart(px.bar(abc.head(20),x="製品名",y="ケース数",color="ランク",title="ABC TOP20"), use_container_width=True)
+        if odf.empty:
+            st.info("受注（出荷）データがありません。")
+        else:
+            st.markdown('<div class="info-tip">💡 <b>ABC分析</b>：出荷ケース数の多い順に並べ、累計比率が70%までを<b>Aランク（主力）</b>、90%までを<b>Bランク（中堅）</b>、残り10%を<b>Cランク（その他）</b>とする一般的な「パレート分析（70/90/100）」で分類しています。実際に売れている量に基づくランクなので、廃盤・リニューアル検討の土台として使えます（原価・利益データはこのシステムに無いため、あくまで出荷量ベースの目安です）。</div>', unsafe_allow_html=True)
+            _abc_period = st.radio("集計期間", ["直近3ヶ月","直近6ヶ月","直近12ヶ月","全期間"], index=2, horizontal=True, key="abc_period_sel")
+            _period_months = {"直近3ヶ月":3,"直近6ヶ月":6,"直近12ヶ月":12,"全期間":None}[_abc_period]
+            _today_ts = pd.Timestamp(date.today())
+            _abc_start = _today_ts - pd.DateOffset(months=_period_months) if _period_months else None
+
+            o2 = odf[odf["不良廃棄フラグ"]==False].copy()
+            o2["ケース数"] = o2["ケース数"].apply(to_int)
+            o2["_納品日dt"] = pd.to_datetime(o2["納品予定日"], errors="coerce")
+            o2 = o2[o2["_納品日dt"].notna()]
+            o2w = o2[o2["_納品日dt"]>=_abc_start].copy() if _abc_start is not None else o2.copy()
+
+            if o2w.empty or o2w["ケース数"].sum()<=0:
+                st.info("選択した期間に出荷データがありません。")
+            else:
+                abc = o2w.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
+                _grand_total = abc["ケース数"].sum()
+                abc["累計比率"] = abc["ケース数"].cumsum()/_grand_total*100
+                abc["ランク"] = pd.cut(abc["累計比率"], bins=[-0.01,70,90,100.01], labels=["A(主力)","B(中堅)","C(その他)"])
+
+                o2w["_年月"] = o2w["_納品日dt"].dt.to_period("M")
+                _months_active = o2w.groupby("製品名")["_年月"].nunique().rename("出荷月数")
+                _window_month_cnt = max(1, o2w["_年月"].nunique())
+                _first_ship_all = o2.groupby("製品名")["_納品日dt"].min().rename("初回出荷日")
+                _last_ship_all = o2.groupby("製品名")["_納品日dt"].max().rename("直近出荷日")
+                abc = abc.merge(_months_active, on="製品名", how="left").merge(_first_ship_all, on="製品名", how="left").merge(_last_ship_all, on="製品名", how="left")
+                abc["出荷月数"] = abc["出荷月数"].fillna(0).astype(int)
+
+                _mid_ts = o2w["_納品日dt"].min() + (o2w["_納品日dt"].max()-o2w["_納品日dt"].min())/2
+                _fh = o2w[o2w["_納品日dt"]<_mid_ts].groupby("製品名")["ケース数"].sum()
+                _sh = o2w[o2w["_納品日dt"]>=_mid_ts].groupby("製品名")["ケース数"].sum()
+                _trend = pd.DataFrame({"前半cs":_fh,"後半cs":_sh}).fillna(0).reset_index()
+                def _trend_tag(r):
+                    if r["前半cs"]<=0 and r["後半cs"]>0: return "🆕新規/再開"
+                    if r["前半cs"]>0 and r["後半cs"]<=0: return "📉消滅"
+                    if r["前半cs"]==0: return "➡️横ばい"
+                    ratio = r["後半cs"]/r["前半cs"]
+                    if ratio>=1.1: return "📈増加"
+                    if ratio<=0.7: return "📉減少"
+                    return "➡️横ばい"
+                _trend["傾向"] = _trend.apply(_trend_tag, axis=1)
+                abc = abc.merge(_trend[["製品名","傾向"]], on="製品名", how="left")
+
+                st.markdown(f"**ランク別サマリ（{_abc_period} / 全{abc['製品名'].nunique()}品目・{int(_grand_total):,}cs）**")
+                _rc1,_rc2,_rc3 = st.columns(3)
+                for _rc,_rk,_color in [(_rc1,"A(主力)","#DCFCE7"),(_rc2,"B(中堅)","#FEF9C3"),(_rc3,"C(その他)","#FEE2E2")]:
+                    _sub = abc[abc["ランク"]==_rk]
+                    _cs_sum = int(_sub["ケース数"].sum()); _pct = (_cs_sum/_grand_total*100) if _grand_total else 0
+                    with _rc:
+                        st.markdown(f'<div style="background:{_color};border-radius:10px;padding:12px 14px;"><div style="font-size:13px;font-weight:700;">{_rk}</div><div style="font-size:22px;font-weight:900;">{len(_sub)}品目</div><div style="font-size:13px;">{_cs_sum:,} cs（全体の{_pct:.1f}%）</div></div>', unsafe_allow_html=True)
+
+                abc["累計比率表示"] = abc["累計比率"].round(1).astype(str)+"%"
+                abc["初回出荷日表示"] = abc["初回出荷日"].apply(format_date_jp)
+                abc["直近出荷日表示"] = abc["直近出荷日"].apply(format_date_jp)
+                abc["出荷月数表示"] = abc["出荷月数"].astype(str)+f"/{_window_month_cnt}ヶ月"
+
+                st.plotly_chart(px.bar(abc.head(20),x="製品名",y="ケース数",color="ランク",
+                    color_discrete_map={"A(主力)":"#16A34A","B(中堅)":"#CA8A04","C(その他)":"#DC2626"},
+                    title=f"ABC分析 TOP20（{_abc_period}・出荷ケース数）"), use_container_width=True)
+
+                _abc_disp = abc[["製品名","ランク","ケース数","累計比率表示","出荷月数表示","傾向","初回出荷日表示","直近出荷日表示"]].rename(
+                    columns={"累計比率表示":"累計比率","出荷月数表示":"出荷月数","初回出荷日表示":"初回出荷日","直近出荷日表示":"直近出荷日"})
+                def _abc_row_style(r):
+                    c = "#F0FDF4" if r["ランク"]=="A(主力)" else ("#FFFBEB" if r["ランク"]=="B(中堅)" else "#FEF2F2")
+                    return [f'background-color:{c};']*len(r)
+                st.dataframe(_abc_disp.style.apply(_abc_row_style, axis=1), hide_index=True, use_container_width=True, height=420)
+                excel_or_csv_download(_abc_disp, f"ABC分析_{_abc_period}_{date.today()}", sheet_name="ABC分析", key="v3_abc_dl")
+
+                with st.expander("🗓️ 製品×月別 出荷ケース数（季節性・トレンド確認用）"):
+                    st.markdown('<div class="info-tip">💡 廃盤・リニューアルを検討する前に、季節商品（お歳暮・夏季需要など）でないかをここで必ず確認してください。年間で数ヶ月しか出荷されない商品でも、季節性が理由であれば廃盤対象にすべきではありません。</div>', unsafe_allow_html=True)
+                    _piv = o2w.groupby(["製品名","_年月"])["ケース数"].sum().reset_index()
+                    _piv["_年月"] = _piv["_年月"].astype(str)
+                    _top_n = st.slider("表示する上位品目数", 5, min(60,max(5,abc['製品名'].nunique())), min(20,abc['製品名'].nunique()), key="v3_abc_heat_n")
+                    _top_products = abc.head(_top_n)["製品名"].tolist()
+                    _piv_top = _piv[_piv["製品名"].isin(_top_products)]
+                    if not _piv_top.empty:
+                        _piv_wide = _piv_top.pivot(index="製品名", columns="_年月", values="ケース数").reindex(_top_products).fillna(0)
+                        fig_heat = px.imshow(_piv_wide, aspect="auto", color_continuous_scale="Blues",
+                            labels=dict(x="年月", y="製品名", color="ケース数"), title="製品×月別 出荷ケース数ヒートマップ")
+                        st.plotly_chart(fig_heat, use_container_width=True)
+                    _piv_disp = _piv.pivot(index="製品名", columns="_年月", values="ケース数").fillna(0).astype(int)
+                    st.dataframe(_piv_disp, use_container_width=True)
+                    excel_or_csv_download(_piv_disp.reset_index(), f"製品別月次出荷_{_abc_period}_{date.today()}", sheet_name="月次出荷", key="v3_abc_monthly_dl")
     with td3:
         if not mdf.empty:
             mt = mdf[safe_dt_date(mdf["製造予定日"])>=date.today().replace(day=1)]; tc = mt["ケース数"].apply(to_int).sum(); rc = mt[mt["リパックフラグ"]==True]["ケース数"].apply(to_int).sum()
@@ -2339,6 +2420,98 @@ elif pg == "📈 経営・分析ダッシュボード":
             tdf = odf[odf["不良廃棄フラグ"]==False].copy(); tdf["年月"] = pd.to_datetime(tdf["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
             mn = tdf.groupby(["年月","大カテゴリ"])["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
             if not mn.empty: st.plotly_chart(px.bar(mn,x="年月",y="ケース数",color="大カテゴリ",barmode="stack",title="月次カテ別"), use_container_width=True)
+
+    with td5:
+        st.markdown('<div class="info-tip">💡 <b>廃盤・リニューアル検討の目安（食品メーカー向けの一般的な考え方）</b><br>①<b>ABCランク</b>：出荷ケース数の累計比率で下位（Cランク）の商品は、売上への影響が小さい候補です。<br>②<b>出荷頻度</b>：年間のうち出荷があった月数が少ない商品は、需要が細く・不定期で、製造の切替ロスや欠品リスクに対して割に合わない可能性があります。<br>③<b>トレンド</b>：Cランクでなくても、期間の後半に大きく落ち込んでいる商品はリニューアル・テコ入れ or 廃盤の検討材料になります。<br>④<b>新製品の除外</b>：発売直後の商品は実績が少なくて当然のため、一定期間は候補から外します。<br>⑤<b>季節商品への配慮</b>：お歳暮・夏季需要など季節性がある商品は、年間の出荷月数が少なくても廃盤対象ではありません。上の「📦 製品・ABC分析」タブのヒートマップで必ず確認してください。<br>※このシステムには原価・利益率のデータが無いため、この判定は<b>出荷量ベースの目安</b>です。実際の廃盤判断では、利益率・専用資材の有無・得意先との契約・欠品時のクレームリスクなども必ず合わせてご確認ください。</div>', unsafe_allow_html=True)
+
+        if odf.empty:
+            st.info("受注（出荷）データがありません。")
+        else:
+            with st.expander("⚙️ 廃盤検討の判定基準（調整可能）", expanded=True):
+                _dc1,_dc2,_dc3 = st.columns(3)
+                _dc_period_months = _dc1.selectbox("集計対象期間", [12,6,24], index=0, format_func=lambda x: f"直近{x}ヶ月", key="v3_dc_period")
+                _dc_min_months = _dc2.number_input("出荷頻度の目安：直近期間中、出荷があった月数がこれ未満なら「出荷が細い」", min_value=1, max_value=24, value=3, key="v3_dc_minmonths")
+                _dc_decline_pct = _dc3.number_input("トレンドの目安：後半が前半よりこの割合(%)以上減っていれば「減少傾向」", min_value=10, max_value=90, value=30, step=5, key="v3_dc_decline")
+                _dc4,_dc5 = st.columns(2)
+                _dc_new_grace = _dc4.number_input("新製品として除外する期間（初回出荷からの月数）", min_value=0, max_value=24, value=6, key="v3_dc_newgrace")
+                _dc_ranks = _dc5.multiselect("廃盤検討の対象ランク", ["A(主力)","B(中堅)","C(その他)"], default=["C(その他)"], key="v3_dc_ranks")
+                st.caption("上記はあくまで初期値の目安です。自社の実情（製造ロット、賞味期限、得意先事情など）に合わせて調整してください。")
+
+            _today_ts2 = pd.Timestamp(date.today())
+            _dc_start = _today_ts2 - pd.DateOffset(months=_dc_period_months)
+            o_all = odf[odf["不良廃棄フラグ"]==False].copy()
+            o_all["ケース数"] = o_all["ケース数"].apply(to_int)
+            o_all["_納品日dt"] = pd.to_datetime(o_all["納品予定日"], errors="coerce")
+            o_all = o_all[o_all["_納品日dt"].notna()]
+            o_win = o_all[o_all["_納品日dt"]>=_dc_start].copy()
+
+            _all_products = sorted(mst_u["製品名"].unique().tolist()) if not mst_u.empty else sorted(o_all["製品名"].unique().tolist())
+            _first_ship = o_all.groupby("製品名")["_納品日dt"].min()
+            _last_ship = o_all.groupby("製品名")["_納品日dt"].max()
+
+            if o_win.empty or o_win["ケース数"].sum()<=0:
+                st.info("選択した期間に出荷データがありません。")
+            else:
+                _abc2 = o_win.groupby("製品名")["ケース数"].sum().reset_index().sort_values("ケース数",ascending=False)
+                _grand2 = _abc2["ケース数"].sum()
+                _abc2["累計比率"] = _abc2["ケース数"].cumsum()/_grand2*100
+                _abc2["ランク"] = pd.cut(_abc2["累計比率"], bins=[-0.01,70,90,100.01], labels=["A(主力)","B(中堅)","C(その他)"])
+                o_win["_年月"] = o_win["_納品日dt"].dt.to_period("M")
+                _win_months = max(1, o_win["_年月"].nunique())
+                _months_active2 = o_win.groupby("製品名")["_年月"].nunique()
+                _mid2 = o_win["_納品日dt"].min() + (o_win["_納品日dt"].max()-o_win["_納品日dt"].min())/2
+                _fh2 = o_win[o_win["_納品日dt"]<_mid2].groupby("製品名")["ケース数"].sum()
+                _sh2 = o_win[o_win["_納品日dt"]>=_mid2].groupby("製品名")["ケース数"].sum()
+
+                _cand_rows = []
+                for _p in _all_products:
+                    _fs = _first_ship.get(_p); _ls = _last_ship.get(_p)
+                    _is_new = (_fs is not None) and ((_today_ts2 - _fs).days < _dc_new_grace*30)
+                    _cs_win = int(_abc2.loc[_abc2["製品名"]==_p, "ケース数"].sum())
+                    _rank = _abc2.loc[_abc2["製品名"]==_p, "ランク"].iloc[0] if _p in _abc2["製品名"].values else None
+                    _months_cnt = int(_months_active2.get(_p, 0))
+                    _fh_v = float(_fh2.get(_p, 0)); _sh_v = float(_sh2.get(_p, 0))
+                    _declining = (_fh_v>0) and (_sh_v <= _fh_v*(1-_dc_decline_pct/100))
+                    _no_ship_in_win = _cs_win<=0
+
+                    _reasons = []
+                    if _is_new:
+                        _tag = "🆕新製品（対象外）"
+                    else:
+                        if _no_ship_in_win: _reasons.append(f"直近{_dc_period_months}ヶ月間 出荷実績なし")
+                        else:
+                            if _rank is not None and _rank in _dc_ranks: _reasons.append(f"{_rank}")
+                            if _months_cnt < _dc_min_months: _reasons.append(f"出荷月数 {_months_cnt}/{_win_months}ヶ月（少ない）")
+                            if _declining: _reasons.append(f"後半に{_dc_decline_pct}%以上減少")
+                        _tag = "🗑️ 廃盤検討" if (_no_ship_in_win or (_rank is not None and _rank in _dc_ranks and (_months_cnt<_dc_min_months or _declining))) else ""
+                    if _tag:
+                        _cand_rows.append({"製品名":_p, "判定":_tag, "理由":"、".join(_reasons) if _reasons else "-",
+                            "直近期間ケース数":_cs_win, "ランク":_rank if _rank is not None else "-",
+                            "出荷月数":f"{_months_cnt}/{_win_months}" if not _is_new else "-",
+                            "初回出荷日":format_date_jp(_fs) if _fs is not None else "不明",
+                            "直近出荷日":format_date_jp(_ls) if _ls is not None else "出荷履歴なし"})
+
+                _cand_df = pd.DataFrame(_cand_rows)
+                _new_df = _cand_df[_cand_df["判定"].str.contains("新製品")] if not _cand_df.empty else pd.DataFrame()
+                _disc_df = _cand_df[_cand_df["判定"].str.contains("廃盤検討")] if not _cand_df.empty else pd.DataFrame()
+
+                _sc1,_sc2,_sc3 = st.columns(3)
+                _sc1.metric("廃盤検討 候補数", f"{len(_disc_df)} 品目")
+                _sc2.metric("新製品（対象外）", f"{len(_new_df)} 品目")
+                _sc3.metric("マスタ登録 総品目数", f"{len(_all_products)} 品目")
+
+                if _disc_df.empty:
+                    st.success("✅ 現在の基準では廃盤検討候補は見つかりませんでした。")
+                else:
+                    st.markdown(f"**🗑️ 廃盤検討候補：{len(_disc_df)}品目**")
+                    st.dataframe(_disc_df[["製品名","理由","ランク","出荷月数","直近期間ケース数","初回出荷日","直近出荷日"]].sort_values("直近期間ケース数"),
+                        hide_index=True, use_container_width=True, height=min(480, 60+len(_disc_df)*36))
+                    excel_or_csv_download(_disc_df, f"廃盤検討候補_{date.today()}", sheet_name="廃盤検討", key="v3_disc_dl")
+                    st.caption("⚠️ このリストは出荷量ベースの機械的な目安です。季節商品・得意先専用品・利益率の高い少量商品などは、上記のヒートマップや現場の状況を必ず確認したうえで最終判断してください。")
+
+                if not _new_df.empty:
+                    with st.expander(f"🆕 新製品として対象外にした品目（{len(_new_df)}品目）"):
+                        st.dataframe(_new_df[["製品名","初回出荷日","直近出荷日"]], hide_index=True, use_container_width=True)
 
 # ─────────────────────────────────────────────
 # ⚙️ マスタ・分析
