@@ -1,3 +1,5 @@
+只今システム修繕中です。15：20分～復旧します。志村
+
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
@@ -16,6 +18,8 @@ JST = timezone(timedelta(hours=+9))
 import gspread
 from google.oauth2.service_account import Credentials
 import numpy as np
+import threading
+import time as _time
 
 # ─────────────────────────────────────────────
 # 共通関数
@@ -25,6 +29,9 @@ def add_today_vline(fig, x, color="#10B981", text="今日", dash="dash"):
                   line=dict(dash=dash, color=color, width=1.5))
     fig.add_annotation(x=x, y=1, yref="paper", yshift=10, text=text,
                         showarrow=False, font=dict(color=color, size=11))
+
+def new_id():
+    return uuid.uuid4().hex[:8].upper()
 
 def to_int(v):
     try:
@@ -168,8 +175,21 @@ def get_client():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"])
     return gspread.authorize(creds)
 
+@st.cache_resource
+def get_spreadsheet():
+    return get_client().open_by_url(st.secrets["spreadsheet_url"])
+
+@st.cache_resource
+def get_write_lock():
+    # 同じサーバ内の全ユーザーの「書き込み」を順番待ちにして、同時保存による登録消失を防ぐ
+    return threading.Lock()
+
+@st.cache_resource
+def _ws_registry():
+    return {}
+
 try:
-    client = get_client(); sheet = client.open_by_url(st.secrets["spreadsheet_url"])
+    sheet = get_spreadsheet()
 except Exception as e:
     st.markdown("<div style='text-align:center;margin-top:40px;'><span style='font-size:64px;'>🚨</span><h2 style='color:#DC2626;'>データの読み込みに失敗しました。</h2></div>", unsafe_allow_html=True)
     st.error(f"Googleスプレッドシートへの接続でエラーが発生しました：\n\n{type(e).__name__}: {e}")
@@ -182,9 +202,14 @@ except Exception as e:
 """)
     st.stop()
 
-@st.cache_data(ttl=90, show_spinner=False)
-def load_data(name):
-    c_def = {
+def get_ws(name, refresh=False):
+    """ワークシートを毎回メタデータ取得せずに使い回す（高速化）。"""
+    reg = _ws_registry()
+    if refresh or name not in reg:
+        reg[name] = sheet.worksheet(name)
+    return reg[name]
+
+SHEET_COLS = {
         "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
         "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
         "master":       ["大カテゴリ","製品名","初期在庫数",
@@ -201,15 +226,45 @@ def load_data(name):
         "special_schedule": ["ID","受注ID","製品名","顧客名","納品予定日","出荷予定日","備考","更新日時"],
         "order_purchases":  ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先",
                              "納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"],
-    }
-    tc = c_def.get(name, [])
+}
+
+_LOAD_WARNINGS = st.session_state.setdefault("_load_warnings", {})
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _fetch_all_raw():
+    """全シートを1回のAPI呼び出しでまとめて取得（従来は9シート×複数回）。失敗時は例外（キャッシュされない）。"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            titles = {w.title: w for w in sheet.worksheets()}
+            reg = _ws_registry(); reg.update(titles)
+            for name, tc in SHEET_COLS.items():
+                if name not in titles:
+                    ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
+                    ws.update(values=[tc,["ヤマト運輸"],["佐川急便"],["自社配送"]] if name=="shipping_master" else [tc], range_name="A1")
+                    reg[name] = ws
+            names = list(SHEET_COLS.keys())
+            res = sheet.values_batch_get(ranges=[f"'{n}'" for n in names])
+            vrs = res.get("valueRanges", [])
+            out = {}
+            for n, vr in zip(names, vrs):
+                rows = vr.get("values", []) or []
+                width = max((len(r) for r in rows), default=0)
+                out[n] = [list(r) + [""] * (width - len(r)) for r in rows]
+            if len(out) != len(names): raise RuntimeError("シートの一括取得結果が不完全です")
+            return out
+        except Exception as e:
+            last_err = e; _time.sleep(1.5 * (attempt + 1))
+    raise last_err
+
+def load_data(name):
+    raw = _fetch_all_raw()
+    return _parse_sheet(name, raw.get(name, []))
+
+def _parse_sheet(name, data):
+    tc = SHEET_COLS.get(name, [])
     if not tc: return pd.DataFrame()
-    try: ws = sheet.worksheet(name)
-    except:
-        ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
-        ws.update(values=[tc,["ヤマト運輸"],["佐川急便"],["自社配送"]] if name=="shipping_master" else [tc], range_name="A1")
     try:
-        data = ws.get_all_values()
         if len(data) <= 1: return pd.DataFrame(columns=tc)
         df = pd.DataFrame(data[1:], columns=data[0])
         df.columns = df.columns.str.strip().str.replace(' ','').str.replace('　','')
@@ -241,12 +296,18 @@ def load_data(name):
         if "製造登録区分" not in df.columns: df["製造登録区分"] = df.get("資材消費単位", "ケース")
             
         return df[ordered_cols]
-    except: return pd.DataFrame(columns=tc)
+    except Exception as e:
+        # 読み込み解析に失敗した場合は空表示にするが、その表を「上書き保存」しないよう記録する
+        _LOAD_WARNINGS[name] = f"{type(e).__name__}: {e}"
+        return pd.DataFrame(columns=tc)
 
 def save_sync(name, df):
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         st.warning(f"⚠️ {name} のデータが空のため、消失を防ぐために保存を中止しました。")
-        return
+        return False
+    if name in _LOAD_WARNINGS:
+        st.error(f"⚠️ {name} の読み込みに問題があったため、データ保護のため保存を中止しました。『スプレッドシートを再読込』を押してからやり直してください。（{_LOAD_WARNINGS[name]}）")
+        return False
 
     try:
         ds = df.copy()
@@ -259,83 +320,127 @@ def save_sync(name, df):
                 ds[col] = ds[col].fillna(0).astype(str)
             else:
                 ds[col] = ds[col].fillna('').astype(str)
-        
         ds = ds.replace(["nan", "None", "NaT", "NaN"], "")
 
-        # ── 同時編集による消失防止 ──
-        # 自分がこのデータを画面に読み込んだ後、他の人が新しく登録した行がシート上に増えている場合、
-        # そのまま上書き保存すると気づかずに消してしまう。保存直前に最新のシートを確認し、
-        # 見つかった「他の人が追加した新規行」は保存内容に合流させて保護する。
-        _protected_new = 0
-        if "ID" in ds.columns:
-            try:
-                ws_check = sheet.worksheet(name)
-                _remote_data = ws_check.get_all_values()
-                if len(_remote_data) > 1 and "ID" in _remote_data[0]:
-                    _rh = _remote_data[0]
-                    _id_pos = _rh.index("ID")
-                    _known_ids = st.session_state.get(f"{name}_known_ids", set())
-                    _local_ids = set(ds["ID"].tolist())
-                    _remote_rows = {r[_id_pos]: r for r in _remote_data[1:] if len(r) > _id_pos}
-                    _new_ids = [i for i in _remote_rows.keys() if i and i not in _known_ids and i not in _local_ids]
-                    if _new_ids:
-                        _extra = pd.DataFrame([_remote_rows[i] for i in _new_ids], columns=_rh)
-                        _extra = _extra.reindex(columns=ds.columns.tolist(), fill_value="")
-                        ds = pd.concat([ds, _extra], ignore_index=True)
-                        _protected_new = len(_new_ids)
-            except Exception:
-                pass  # 確認できない場合も、通常の保存は継続する（安全側フォールバック）
+        with get_write_lock():
+            ws = get_ws(name)
+            # 保存直前に最新のシートを必ず確認する（確認できない場合は上書きせず中止＝消失防止）
+            _remote_data = None
+            for _try in range(3):
+                try:
+                    _remote_data = ws.get_all_values(); break
+                except Exception:
+                    _time.sleep(1.0 * (_try + 1))
+            if _remote_data is None:
+                st.error("⚠️ 保存前のシート確認に失敗しました。データ保護のため保存を中止しました。少し待ってからもう一度お試しください。")
+                return False
 
-        update_values = [ds.columns.tolist()] + ds.values.tolist()
-        
-        ws = sheet.worksheet(name)
-        ws.clear()
-        ws.update(values=update_values, range_name='A1')
-        
-        st.cache_data.clear()
+            # 他の人が新しく登録した行を保存内容に合流させて保護
+            _protected_new = 0
+            if "ID" in ds.columns and len(_remote_data) > 1 and "ID" in _remote_data[0]:
+                _rh = _remote_data[0]
+                _id_pos = _rh.index("ID")
+                _known_ids = st.session_state.get(f"{name}_known_ids", set())
+                _local_ids = set(ds["ID"].tolist())
+                _remote_rows = {r[_id_pos]: r for r in _remote_data[1:] if len(r) > _id_pos}
+                _new_ids = [i for i in _remote_rows.keys() if i and i not in _known_ids and i not in _local_ids]
+                if _new_ids:
+                    _extra = pd.DataFrame([_remote_rows[i] + [""] * (len(_rh) - len(_remote_rows[i])) for i in _new_ids], columns=_rh)
+                    _extra = _extra.reindex(columns=ds.columns.tolist(), fill_value="")
+                    ds = pd.concat([ds, _extra], ignore_index=True)
+                    _protected_new = len(_new_ids)
+
+            update_values = [ds.columns.tolist()] + ds.values.tolist()
+            old_rows = len(_remote_data)
+            old_cols = max((len(r) for r in _remote_data), default=0)
+            n_rows, n_cols = len(update_values), len(update_values[0])
+
+            ws.update(values=update_values, range_name='A1')   # ← まず新しい内容を書く（この間データは消えない）
+            try:  # その後、余った古い行・列だけを消す
+                from gspread.utils import rowcol_to_a1
+                if old_rows > n_rows:
+                    ws.batch_clear([f"{rowcol_to_a1(n_rows + 1, 1)}:{rowcol_to_a1(old_rows, max(old_cols, n_cols))}"])
+                if old_cols > n_cols:
+                    ws.batch_clear([f"{rowcol_to_a1(1, n_cols + 1)}:{rowcol_to_a1(n_rows, old_cols)}"])
+            except Exception:
+                st.warning("ℹ️ 保存は完了しましたが、不要になった古い行の整理に失敗しました。次回の保存時に自動整理されます。")
+
+            st.cache_data.clear()
+            if _protected_new > 0:
+                st.session_state[f"{name}_df"] = _parse_sheet(name, ws.get_all_values())
+            else:
+                st.session_state[f"{name}_df"] = df
+            if "ID" in ds.columns: st.session_state[f"{name}_known_ids"] = set(ds["ID"].tolist())
         if _protected_new > 0:
-            st.session_state[f"{name}_df"] = load_data.__wrapped__(name)  # 保護した行を正しい型で反映するため再読込
             st.info(f"ℹ️ 他の方が追加した {_protected_new} 件のデータが見つかったため、保護して一緒に保存しました。")
-        else:
-            st.session_state[f"{name}_df"] = df
-        if "ID" in ds.columns: st.session_state[f"{name}_known_ids"] = set(ds["ID"].tolist())
         st.success(f"✅ {name} を正常に保存しました。")
+        return True
     except Exception as e:
         st.error(f"保存処理中にエラーが発生しました: {str(e)}")
         st.write("発生箇所のDF情報:")
         st.write(df.dtypes)
+        return False
 
 def app_sync(name, nr):
-    if nr.empty: return
-    try:
-        ws = sheet.worksheet(name)
+    """1行追加。書き込みが確認できた場合のみTrue。失敗時はエラーを表示して画面を再描画する
+    （呼び出し元の『登録しました』表示が出ないようにする）。"""
+    if nr.empty: return False
+    last_err = None
+    for attempt in range(3):
         try:
-            header = ws.row_values(1)
-        except:
-            header = nr.columns.tolist()
-            ws.append_row(header)
-            
-        rc = nr.copy()
-        for col in header:
-            if col not in rc.columns: rc[col] = ""
-        rc = rc[header]
-        
-        for col in rc.columns:
-            if pd.api.types.is_datetime64_any_dtype(rc[col]): rc[col] = rc[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
-            elif pd.api.types.is_bool_dtype(rc[col]): rc[col] = rc[col].astype(str).str.upper()
-            else: rc[col] = rc[col].fillna('').astype(str)
-            
-        ws.append_row(rc.fillna("").values[0].tolist())
-        st.cache_data.clear()
-        st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
-    except Exception as e:
-        st.error(f"追加保存エラー: {e}")
+            with get_write_lock():
+                ws = get_ws(name)
+                header = ws.row_values(1)
+                if not header:
+                    header = nr.columns.tolist(); ws.append_row(header)
+                rc = nr.copy()
+                for col in header:
+                    if col not in rc.columns: rc[col] = ""
+                rc = rc[header]
+                for col in rc.columns:
+                    if pd.api.types.is_datetime64_any_dtype(rc[col]): rc[col] = rc[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+                    elif pd.api.types.is_bool_dtype(rc[col]): rc[col] = rc[col].astype(str).str.upper()
+                    else: rc[col] = rc[col].fillna('').astype(str)
+                _vals = rc.fillna("").values[0].tolist()
+                try:
+                    resp = ws.append_row(_vals, insert_data_option="INSERT_ROWS")   # 既存行を上書きしない
+                except TypeError:
+                    resp = ws.append_row(_vals)
+                _ok_rows = None
+                try: _ok_rows = (resp or {}).get("updates", {}).get("updatedRows")
+                except Exception: pass
+                if _ok_rows is not None and int(_ok_rows) < 1:
+                    raise RuntimeError("書き込み結果が確認できませんでした")
+            st.cache_data.clear()
+            st.session_state[f"{name}_df"] = pd.concat([st.session_state[f"{name}_df"], nr], ignore_index=True)
+            if "ID" in nr.columns:
+                st.session_state.setdefault(f"{name}_known_ids", set()).update(nr["ID"].astype(str).tolist())
+            return True
+        except Exception as e:
+            last_err = e
+            try: get_ws(name, refresh=True)
+            except Exception: pass
+            _time.sleep(1.0 * (attempt + 1))
+    st.session_state["_app_err"] = f"🚨 【登録できませんでした】{name} への保存に失敗しました（通信エラーの可能性）。**登録されていません**ので、もう一度登録してください。（{type(last_err).__name__}: {last_err}）"
+    st.rerun()
 
-for _s in ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]:
+_ALL_SHEETS = ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]
+if any(f"{_s}_df" not in st.session_state for _s in _ALL_SHEETS):
+    try:
+        _fetch_all_raw()
+    except Exception as _e:
+        st.error(f"🚨 スプレッドシートの読み込みに失敗しました（通信エラーの可能性）。データは消えていません。少し待ってから再読込してください。\n\n{type(_e).__name__}: {_e}")
+        if st.button("🔄 再読込", type="primary"):
+            st.cache_data.clear(); st.rerun()
+        st.stop()
+    st.session_state["_loaded_at"] = datetime.now(JST).strftime("%H:%M:%S")
+for _s in _ALL_SHEETS:
     if f"{_s}_df" not in st.session_state:
         st.session_state[f"{_s}_df"] = load_data(_s)
         _loaded_df = st.session_state[f"{_s}_df"]
         st.session_state[f"{_s}_known_ids"] = set(_loaded_df["ID"].astype(str).tolist()) if isinstance(_loaded_df, pd.DataFrame) and "ID" in _loaded_df.columns else set()
+for _wn, _wm in list(_LOAD_WARNINGS.items()):
+    st.warning(f"⚠️ {_wn} シートの読み込み解析でエラーが発生しました（{_wm}）。このシートは安全のため保存を停止しています。")
 if "current_page" not in st.session_state: st.session_state.current_page = "📋 受注登録"
 if "drill_product" not in st.session_state: st.session_state.drill_product = None
 if "_flash" not in st.session_state: st.session_state._flash = None
@@ -404,7 +509,7 @@ def quick_toggle_check(order_id, new_value, col_name="荷姿チェック"):
         col_names = ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"]
         if col_name not in col_names: return False
         col_num = col_names.index(col_name) + 1
-        ws = sheet.worksheet("orders")
+        ws = get_ws("orders")
         if str(ws.cell(row_num, 1).value or "").strip() != str(order_id).strip(): return False
         ws.update_cell(row_num, col_num, str(new_value).upper())
         st.session_state.orders_df.loc[idx, col_name] = new_value
@@ -420,7 +525,7 @@ def quick_toggle_check_batch(order_ids, new_value, col_name="荷姿チェック"
     if col_name not in col_names: return list(order_ids)
     col_num = col_names.index(col_name) + 1
     try:
-        ws = sheet.worksheet("orders")
+        ws = get_ws("orders")
     except Exception:
         return list(order_ids)
     _odf_now = st.session_state.orders_df
@@ -444,7 +549,7 @@ def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店�
 
 today = pd.Timestamp(datetime.now(JST).replace(tzinfo=None)).normalize(); dates = pd.date_range(today, today + timedelta(days=60))
 cs = {}; fs = {}
-mst_u = mst.drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(
+mst_u = mst[mst["製品名"].astype(str).str.strip() != ""].drop_duplicates(subset=["製品名"]) if not mst.empty else pd.DataFrame(
     columns=["大カテゴリ","製品名","初期在庫数","使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日",
              "時間あたり生産量","歩留まり率","リードタイム時間","安全在庫数","段取りグループ"])
 
@@ -457,7 +562,7 @@ for _ext_col, _ext_def in [
 ]:
     if not mst.empty and _ext_col not in mst.columns:
         mst[_ext_col] = _ext_def
-        mst_u = mst.drop_duplicates(subset=["製品名"])
+        mst_u = mst[mst["製品名"].astype(str).str.strip() != ""].drop_duplicates(subset=["製品名"])
 
 _master_names = set(mst_u["製品名"].astype(str).tolist()) if not mst_u.empty else set()
 _order_names = set(odf["製品名"].dropna().astype(str).tolist()) if not odf.empty and "製品名" in odf.columns else set()
@@ -518,19 +623,19 @@ if not mst_fc.empty:
             checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"])}
     ae = ae[~_tz_mask].copy()  
 
-    pe_ev = ae[ae["日付"] < today]
+    _ae_by_p = {k: g for k, g in ae.groupby("製品名")}
+    _ae_empty = ae.iloc[0:0]
     for _, r in mst_fc.iterrows():
         p = r["製品名"]; cp = checkpoints.get(p)
-        _pmask = ae["製品名"] == p
+        _pae = _ae_by_p.get(p, _ae_empty)
         if cp:
-            after_mask = _after_checkpoint_mask(ae, cp)
-            _after_all = ae[_pmask & after_mask]
+            _after_all = _pae[_after_checkpoint_mask(_pae, cp)]
             c_s = _floor_carry_balance(cp["実数"], _after_all[_after_all["日付"] < today][["日付","qty"]])
             _future_ev = _after_all[_after_all["日付"] >= today]
         else:
-            _pev = pe_ev[pe_ev["製品名"] == p]
+            _pev = _pae[_pae["日付"] < today]
             c_s = _floor_carry_balance(r.get("初期在庫数",0), _pev[["日付","qty"]])
-            _future_ev = ae[_pmask & (ae["日付"] >= today)]
+            _future_ev = _pae[_pae["日付"] >= today]
         cs[p] = c_s
         pr = _future_ev.groupby("日付")["qty"].sum() if not _future_ev.empty else pd.Series(dtype=float)
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
@@ -553,7 +658,9 @@ def stock_asof(p, asof_date):
 fd = 90; pf = {}
 if not mst_u.empty and not odf.empty:
     mpi = mst_u.set_index("製品名")[["使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日"]].to_dict('index')
-    for _, r in odf.iterrows():
+    _odf_dt = pd.to_datetime(odf["納品予定日"], errors="coerce")
+    _odf_fut = odf[_odf_dt.notna() & (_odf_dt.dt.date >= date.today()) & (_odf_dt <= today + timedelta(days=fd))]
+    for _, r in _odf_fut.iterrows():
         p, q, dt = str(r.get("製品名","")), to_int(r.get("ケース数",0)), pd.to_datetime(r.get("納品予定日"),errors="coerce")
         if pd.isna(dt) or dt.date()<date.today() or dt>today+timedelta(days=fd) or p not in mpi: continue
         pn = str(mpi[p].get("使用資材名",""))
@@ -599,14 +706,14 @@ daily_usage = {}
 net_change_by_day = {} 
 
 if not pk_l.empty:
-    for _, r in pk_l.iterrows():
-        dt = pd.to_datetime(r.get("登録日", today), errors="coerce")
+    _pk_dts = pd.to_datetime(pk_l["登録日"], errors="coerce") if "登録日" in pk_l.columns else pd.Series([today] * len(pk_l), index=pk_l.index)
+    for dt, _pn0, _q0, _pt0 in zip(_pk_dts, pk_l["資材名"], pk_l["数量"], pk_l["処理区分"]):
         if pd.isna(dt): continue
         if dt.tz is not None: dt = dt.tz_localize(None)
         
-        pn = str(r.get("資材名",""))
-        q = to_int(r.get("数量",0))
-        pt = str(r.get("処理区分",""))
+        pn = str(_pn0)
+        q = to_int(_q0)
+        pt = str(_pt0)
         
         if pn in p_sum:
             if "入庫" in pt:
@@ -703,17 +810,21 @@ with st.sidebar:
             st.session_state.current_page = m; st.session_state.drill_product = None; st.rerun()
 
     st.markdown("<div style='height:1px; background:rgba(255,255,255,0.1); margin:14px 0 10px;'></div>", unsafe_allow_html=True)
+    st.caption(f"🕒 最終読込: {st.session_state.get('_loaded_at','-')}")
     if st.button("🔄 スプレッドシートを再読込", use_container_width=True, help="Googleスプレッドシートを直接編集した場合など、最新データを読み込み直します"):
         for _s in ["orders","manufactures","master","customers","packaging_master",
                    "packaging_logs","shipping_master","special_schedule","order_purchases"]:
             st.session_state.pop(f"{_s}_df", None)
-        st.cache_data.clear()
+        st.cache_data.clear(); _LOAD_WARNINGS.clear()
         st.session_state._flash = {"type": "success", "msg": "✅ スプレッドシートから最新データを再読込しました。"}
+        st.session_state["_loaded_at"] = datetime.now(JST).strftime("%H:%M:%S")
         st.rerun()
 
 pg = st.session_state.current_page
 hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #10B981", "🚚 出荷・発送管理": "#047857, #34D399", "📦 資材・入出庫": "#B45309, #F59E0B", "📑 登録一覧": "#0F766E, #14B8A6", "📊 在庫・スケジュール": "#1E3A8A, #6366F1", "🏗️ 製造スケ-ジューラー": "#1C1917, #78350F", "⭐ 特注・チャータースケジュール": "#5B21B6, #8B5CF6", "📈 経営・分析ダッシュボード": "#0C4A6E, #0EA5E9", "⚙️ マスタ・分析": "#475569, #1E293B"}
 def page_header(t):
+    _e = st.session_state.pop("_app_err", None)
+    if _e: st.error(_e)
     st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
 def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
 
@@ -774,7 +885,7 @@ if pg == "📋 受注登録":
             qty_cs = to_case_qty(prod, qty)
             frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整-】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
             cn = f"{stor} {sv}".strip() if sv else (stor if stor else "未指定")
-            nid = str(uuid.uuid4())[:6].upper(); ddt = pd.to_datetime(od) if od else pd.NaT
+            nid = new_id(); ddt = pd.to_datetime(od) if od else pd.NaT
             if iadj:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt if not pd.isna(ddt) else pd.Timestamp(date.today()),"顧客名":"在庫調整","大カテゴリ":cat,"製品名":prod,"ケース数":qty_cs,"運送会社":"","備考":f"【在庫調整-】{frem}","荷姿チェック":False,"発送備考":"","不良廃棄フラグ":False,"日付未定フラグ":False,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 flash("success", f"📊 在庫調整(－)を登録しました！【{fn(prod)}】 －{qty_cs:,}cs（{to_int(qty):,}{kbn}入力）  現在庫: {cur_stock(prod):,} → {cur_stock(prod)-qty_cs:,}")
@@ -782,7 +893,7 @@ if pg == "📋 受注登録":
             else:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":qty_cs,"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 if ("特注" in stype or "チャーター" in stype) and od:
-                    app_sync("special_schedule", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
+                    app_sync("special_schedule", pd.DataFrame([{"ID":new_id(),"受注ID":nid,"製品名":prod,"顧客名":cn,"納品予定日":ddt,"出荷予定日":ddt-timedelta(days=1),"備考":frem,"更新日時":datetime.now()}]))
                 _cur = cur_stock(prod)
                 _d_key = pd.Timestamp(od).normalize() if od else None
                 _proj = fs.get(prod, {}).get(_d_key, _cur) if _d_key else _cur
@@ -1035,7 +1146,7 @@ elif pg == "🏭 製造登録":
             flash("error", "⚠️ 製品・数量は必須")
             st.rerun()
         else:
-            nid = str(uuid.uuid4())[:6].upper()
+            nid = new_id()
             mq_cs = to_case_qty(pm, mq)
             if iadj_m:
                 rt_adj = f"【在庫調整+】 {mr}".strip()
@@ -1068,7 +1179,7 @@ elif pg == "🏭 製造登録":
                             _deduct_qty = abs(to_int(mq))
                             _calc_memo = f"製造{to_int(mq)}ケース"
                         app_sync("packaging_logs", pd.DataFrame([{
-                            "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(mdt), "資材名": _pnn,
+                            "ID": new_id(), "登録日": pd.to_datetime(mdt), "資材名": _pnn,
                             "処理区分": "製造連動", "数量": _deduct_qty, "理由": f"製造ID:{nid} ({_calc_memo})",
                             "関連製品名": pm, "理論在庫": p_sum.get(_pnn,{}).get("現在庫",0) - _deduct_qty,
                             "備考": f"自動記録 [{_calc_memo}]", "登録日時": datetime.now(JST).replace(tzinfo=None)
@@ -1104,45 +1215,6 @@ elif pg == "🏭 製造登録":
                 flash("success", "✅ 製造全データを保存しました。"); st.rerun()
             with _mfg_all_msg_area:
                 show_flash_inline()
-
-        with st.expander("🔧 過去の製造登録の単位ズレを確認・一括修正"):
-            st.markdown('<div class="info-tip">💡 以前は「袋」「甲」で入力した製造登録が、正しいケース数に変換されずそのまま保存されてしまうバグがありました（現在は修正済みです）。ここで「袋」「甲」で登録されている製品の過去の製造記録を、現在のマスタ設定（入数・甲消費数）を使って再計算し、ズレている記録だけを一覧表示します。修正すると、現在庫・1ヶ月在庫予想などすべての在庫計算に自動的に反映されます（計算ロジック自体は変更しません。値だけを正しく直します）。</div>', unsafe_allow_html=True)
-            if mdf.empty:
-                st.info("製造データがありません。")
-            else:
-                _fix_rows = []
-                for _idx, r in mdf.iterrows():
-                    _pn = r.get("製品名","")
-                    _note = str(r.get("備考",""))
-                    if not _pn or (not mst_u.empty and _pn not in mst_u["製品名"].values): continue
-                    if any(tag in _note for tag in ["【在庫調整", "【棚卸確定", "【在庫非反映】"]): continue
-                    _kbn3, _nyu3, _kou3 = pui(_pn)
-                    if _kbn3 == "ケース": continue
-                    _stored = to_int(r.get("ケース数", 0))
-                    _correct = to_case_qty(_pn, _stored)
-                    if _correct != _stored:
-                        _fix_rows.append({"ID": r.get("ID",""), "製品名": _pn, "製造予定日": format_date_jp(r.get("製造予定日")), "単位": _kbn3, "現在の記録(cs)": _stored, "修正後(cs)": _correct, "差分": _correct - _stored})
-                if not _fix_rows:
-                    st.success("✅ 単位ズレが疑われる製造記録は見つかりませんでした。")
-                else:
-                    _fix_df = pd.DataFrame(_fix_rows)
-                    _affected_products = sorted(_fix_df["製品名"].unique().tolist())
-                    st.markdown(f"**⚠️ {len(_fix_df)}件、{len(_affected_products)}製品で単位ズレの可能性がある記録が見つかりました：**")
-                    st.markdown("、".join(fn(p) for p in _affected_products))
-                    st.dataframe(_fix_df[["製品名","製造予定日","単位","現在の記録(cs)","修正後(cs)","差分"]], hide_index=True, use_container_width=True)
-                    st.caption("※現在のマスタ設定（入数・甲消費数）で再計算した想定値です。過去に入数・甲消費数の設定を変更したことがある場合、その期間の記録はズレる可能性があります。内容をご確認の上、修正してください。")
-                    _sel_fix_ids = st.multiselect("修正する記録を選択（未選択＝上に表示されている全件を修正）", options=_fix_df["ID"].tolist(),
-                        format_func=lambda i: f"{_fix_df[_fix_df['ID']==i].iloc[0]['製品名']} {_fix_df[_fix_df['ID']==i].iloc[0]['製造予定日']}（{_fix_df[_fix_df['ID']==i].iloc[0]['現在の記録(cs)']}→{_fix_df[_fix_df['ID']==i].iloc[0]['修正後(cs)']}）",
-                        key="fix_mfg_select")
-                    _apply_ids = _sel_fix_ids if _sel_fix_ids else _fix_df["ID"].tolist()
-                    if st.button(f"🔧 選択した{len(_apply_ids)}件を正しいケース数に修正する", type="primary", key="btn_fix_mfg_units"):
-                        _md_fixed = mdf.copy()
-                        for _fid in _apply_ids:
-                            _new_val = int(_fix_df[_fix_df["ID"]==_fid].iloc[0]["修正後(cs)"])
-                            _md_fixed.loc[_md_fixed["ID"]==_fid, "ケース数"] = _new_val
-                        save_sync("manufactures", _md_fixed)
-                        flash("success", f"✅ {len(_apply_ids)}件の製造記録を正しいケース数に修正しました。現在庫・1ヶ月在庫予想など、すべての在庫計算に自動的に反映されます。")
-                        st.rerun()
 
 # ─────────────────────────────────────────────
 # 📦 資材・入出庫
@@ -1323,11 +1395,11 @@ elif pg == "📦 資材・入出庫":
                         st.rerun()
                     else:
                         fpt, lq = ("入庫", diff) if diff > 0 else ("出庫", abs(diff))
-                        app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}]))
+                        app_sync("packaging_logs", pd.DataFrame([{"ID":new_id(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}]))
                         flash("success", f"✅ 登録しました！【{sl_pk}】 棚卸調整 {'+' if fpt=='入庫' else '-'}{lq} ({fpt})")
                         st.rerun()
                 elif lq > 0:
-                    app_sync("packaging_logs", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}]))
+                    app_sync("packaging_logs", pd.DataFrame([{"ID":new_id(),"登録日":pd.to_datetime(pd_t),"資材名":sl_pk,"処理区分":fpt,"数量":lq,"理由":pr,"関連製品名":"","理論在庫":"","備考":prm,"登録日時":datetime.now()}]))
                     disp_type = "入庫" if "入庫" in pt else "出庫"
                     flash("success", f"✅ 登録しました！【{sl_pk}】 {disp_type} {lq:,} 枚 / {pr}")
                     st.rerun()
@@ -1413,7 +1485,7 @@ elif pg == "📦 資材・入出庫":
         _PO_COLS = ["発注ID","発注日","資材名","発注時在庫","発注数","発注単価","仕入先","納入予定日","実際納入日","実際納入数","ステータス","備考","登録日時"]
         if "po_df_loaded" not in st.session_state:
             try:
-                _ws_po = sheet.worksheet("order_purchases")
+                _ws_po = get_ws("order_purchases")
                 _po_data = _ws_po.get_all_values()
                 if len(_po_data) > 1:
                     po_df = pd.DataFrame(_po_data[1:], columns=_po_data[0])
@@ -1427,7 +1499,7 @@ elif pg == "📦 資材・入出庫":
         po_df = st.session_state.order_purchases_df
         def _save_po(df):
             try:
-                try: _wsp = sheet.worksheet("order_purchases")
+                try: _wsp = get_ws("order_purchases")
                 except: _wsp = sheet.add_worksheet(title="order_purchases", rows="500", cols="20")
                 _wsp.clear()
                 _ds = df.copy().fillna("").astype(str)
@@ -1605,7 +1677,7 @@ elif pg == "📦 資材・入出庫":
                     _comp_msg_area = st.container()
                     if st.button("✅ 納入完了処理を実行", type="primary", use_container_width=True, key="po_comp_btn"):
                         app_sync("packaging_logs", pd.DataFrame([{
-                            "ID": str(uuid.uuid4())[:6].upper(), "登録日": pd.to_datetime(_actual_date), "資材名": _mat_nm, "処理区分": "入庫", "数量": _actual_qty,
+                            "ID": new_id(), "登録日": pd.to_datetime(_actual_date), "資材名": _mat_nm, "処理区分": "入庫", "数量": _actual_qty,
                             "理由": f"発注納入 [{_sel_row.get('発注ID','')}]", "関連製品名": "", "理論在庫": p_sum.get(_mat_nm,{}).get("現在庫",0) + _actual_qty,
                             "備考": f"発注納入完了 仕入先:{_sel_row.get('仕入先','')} {_po_comp_rem}", "登録日時": datetime.now(JST).replace(tzinfo=None)
                         }]))
@@ -1654,11 +1726,12 @@ elif pg == "📊 在庫・スケジュール":
 
     with t0:
         al = []
+        _odf_d_all = safe_dt_date(odf["納品予定日"]) if not odf.empty else None
         for p, d_fs in fs.items():
             p_norm = str(p).strip()
             for d in pd.date_range(today, today+timedelta(days=7)):
                 if d_fs.get(d,0)<0:
-                    do = odf[(odf["製品名"]==p)&(safe_dt_date(odf["納品予定日"])==d.date())&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
+                    do = odf[(odf["製品名"]==p)&(_odf_d_all==d.date())&(odf["不良廃棄フラグ"]==False)] if not odf.empty else pd.DataFrame()
                     al.append({"日付":d,"製品名":p_norm,"予測在庫":d_fs.get(d,0),"現在庫":cur_stock(p),"顧客名":" / ".join(do["顧客名"].dropna().unique()) if not do.empty else "―","備考":" / ".join(do["備考"].dropna().unique()) if not do.empty else ""})
         if al:
             def _uniq_join(vals):
@@ -1754,6 +1827,7 @@ elif pg == "📊 在庫・スケジュール":
                 return base
 
             _date_cols = [format_date_jp(d) for d in sd]
+            _dcol_map = dict(zip(sd, _date_cols))
             iv = []
             for _,r in mst_fc.iterrows():
                 pn = r["製品名"]
@@ -1761,7 +1835,7 @@ elif pg == "📊 在庫・スケジュール":
                 _shortage_date = None
                 for d in sd:
                     v = _fc_val(pn, d)
-                    row[format_date_jp(d)] = v
+                    row[_dcol_map[d]] = v
                     if _shortage_date is None and v < 0: _shortage_date = d
                 row["最速欠品日"] = f"{_shortage_date.month:02d}/{_shortage_date.day:02d}" if _shortage_date is not None else "OK"
                 iv.append(row)
@@ -2000,7 +2074,7 @@ elif pg == "📊 在庫・スケジュール":
             if _dv_nav == "📜 履歴":
                 with st.expander("➕ 過去の製造実績を登録（在庫非反映）", expanded=False):
                     h1,h2,h3 = st.columns([1,1,2]); hd = h1.date_input("日", value=today-timedelta(days=1)); hq = h2.number_input("数", min_value=1, step=1); hr = h3.text_input("備考", placeholder="過去実績")
-                    if st.button("💾 登録（非反映）"): app_sync("manufactures", pd.DataFrame([{"ID":str(uuid.uuid4())[:6].upper(),"製造予定日":pd.to_datetime(hd),"大カテゴリ":c_det,"製品名":sp,"ケース数":to_int(hq),"リパックフラグ":False,"備考":f"【在庫非反映】 {hr}".strip(),"登録日時":datetime.now()}])); st.rerun()
+                    if st.button("💾 登録（非反映）"): app_sync("manufactures", pd.DataFrame([{"ID":new_id(),"製造予定日":pd.to_datetime(hd),"大カテゴリ":c_det,"製品名":sp,"ケース数":to_int(hq),"リパックフラグ":False,"備考":f"【在庫非反映】 {hr}".strip(),"登録日時":datetime.now()}])); st.rerun()
                 tc1, tc2 = st.columns(2)
                 with tc1:
                     st.markdown('<div style="font-weight:800;color:#DC2626;border-left:4px solid #DC2626;padding-left:8px;">🚚 出荷履歴</div>', unsafe_allow_html=True)
@@ -2124,7 +2198,7 @@ elif pg == "📊 在庫・スケジュール":
                     st.rerun()
                 else:
                     _diff = to_int(actual_q) - _base_cs
-                    nid = str(uuid.uuid4())[:6].upper()
+                    nid = new_id()
                     _cat = mst_fc[mst_fc["製品名"] == sel_p]["大カテゴリ"].iloc[0] if (not mst_fc.empty and sel_p in mst_fc["製品名"].values) else "その他"
                     _tag = f"【棚卸確定:{to_int(actual_q)}】{inv_note}".strip()
                     if _diff >= 0:
@@ -2289,7 +2363,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
                 excel_or_csv_download(wspo[sc4], f"週間特注チャータースケジュール_{wk_start}_{_fname4}", sheet_name="週間スケジュール", key="ts4_csv_dl")
     with ts3:
         if not spo.empty:
-            ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":str(uuid.uuid4())[:6].upper(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時": datetime.now(JST).replace(tzinfo=None)} for _,r in spo.iterrows() if r["ID"] not in ex]
+            ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":new_id(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時": datetime.now(JST).replace(tzinfo=None)} for _,r in spo.iterrows() if r["ID"] not in ex]
             sw = pd.concat([sp_s, pd.DataFrame(nr)], ignore_index=True) if nr else sp_s.copy()
             se = pd.merge(sw, odf[["ID","備考"]].rename(columns={"ID":"受注ID","備考":"受注備考"}), on="受注ID", how="left")
             se["種別"] = se["受注備考"].apply(lambda x: "特注" if "特注" in str(x) else "チャーター便"); se["出荷予定日(表示)"] = pd.to_datetime(se["納品予定日"],errors='coerce').apply(format_date_jp); se["出荷予定日_edit"] = pd.to_datetime(se["出荷予定日"],errors='coerce').dt.date
@@ -2848,7 +2922,7 @@ elif pg == "🏗️ 製造スケジューラー":
     @st.cache_data(ttl=120, show_spinner=False)
     def _load_sched_master(name, cols, init_rows):
         try:
-            ws = sheet.worksheet(name)
+            ws = get_ws(name)
             data = ws.get_all_values()
             if len(data) <= 1: return pd.DataFrame(init_rows, columns=cols) if init_rows else pd.DataFrame(columns=cols)
             df = pd.DataFrame(data[1:], columns=data[0])
@@ -2859,7 +2933,7 @@ elif pg == "🏗️ 製造スケジューラー":
 
     def _save_sched_master(name, df):
         try:
-            try: ws = sheet.worksheet(name)
+            try: ws = get_ws(name)
             except: ws = sheet.add_worksheet(title=name, rows="500", cols="25")
             ws.clear()
             ds = df.copy().fillna("").astype(str)
