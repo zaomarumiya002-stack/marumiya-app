@@ -1,5 +1,3 @@
-只今システム修繕中です。15：20分～復旧します。志村
-
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
