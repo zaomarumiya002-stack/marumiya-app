@@ -583,14 +583,24 @@ else:
 # 在庫計算・資材計算エンジン
 # ─────────────────────────────────────────────
 TANAOSHI_TAG = "【棚卸確定"  
-ae = pd.DataFrame(columns=["日付", "製品名", "qty", "備考", "登録日時"])
+ae = pd.DataFrame(columns=["日付", "製品名", "qty", "備考", "登録日時", "src"])
 checkpoints = {}  
 
 def _after_checkpoint_mask(df, cp):
     if cp is None: return pd.Series(True, index=df.index)
     # 棚卸確定はその日1日分の最終値として扱う：同じ日付の出荷・製造は、登録日時の前後に関わらず
     # 二重に差し引かれないよう除外する。翌日以降は通常どおり自動計算を再開する。
-    return df["日付"] > cp["日付"]
+    m = df["日付"] > cp["日付"]
+    _pd = cp.get("準備済日")
+    if _pd is not None and "src" in df.columns and len(df):
+        # 棚卸の時点で出荷準備を済ませていた受注（棚卸日の翌日〜準備済日、棚卸より前に登録済み）は
+        # 数えた実数にすでに反映されているため、以後の計算では引かない。
+        # 棚卸のあとに新しく登録された受注や、製造は通常どおり反映する。
+        _regs = pd.to_datetime(df["登録日時"], errors="coerce")
+        _not_adj = ~df["備考"].fillna("").str.contains("【在庫調整|【不良廃棄】|【棚卸確定")
+        _prepped = (df["src"] == "o") & (df["日付"] <= _pd) & _not_adj & (_regs.isna() | (_regs <= cp["登録日時"]))
+        m = m & ~_prepped
+    return m
 
 def _floor_carry_balance(base_qty, ev_df):
     bal = to_int(base_qty)
@@ -603,9 +613,11 @@ def _floor_carry_balance(base_qty, ev_df):
 
 if not mst_fc.empty:
     ev_o = odf[["納品予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"納品予定日":"日付","ケース数":"qty"}) if not odf.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
+    ev_o["src"] = "o"
     if not ev_o.empty: ev_o["qty"] = -pd.to_numeric(ev_o["qty"], errors='coerce').fillna(0).abs()
     vm = mdf[~mdf["備考"].fillna("").str.contains("【在庫非反映】")] if not mdf.empty else pd.DataFrame()
     ev_m = vm[["製造予定日","製品名","ケース数","備考","登録日時"]].copy().rename(columns={"製造予定日":"日付","ケース数":"qty"}) if not vm.empty else pd.DataFrame(columns=["日付","製品名","qty","備考","登録日時"])
+    ev_m["src"] = "m"
     if not ev_m.empty: ev_m["qty"] = pd.to_numeric(ev_m["qty"], errors='coerce').fillna(0).abs()
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"])
     ae["qty"] = ae["qty"].apply(to_int); ae["備考"] = ae["備考"].fillna("")
@@ -615,10 +627,12 @@ if not mst_fc.empty:
     if _tz_mask.any():
         _tz = ae[_tz_mask].copy()
         _tz["実数"] = _tz["備考"].str.extract(r"棚卸確定:(-?\d+)】").astype(float)
+        _tz["準備済日"] = pd.to_datetime(_tz["備考"].str.extract(r"出荷準備済:(\d{4}-\d{2}-\d{2})")[0], errors="coerce")
         _tz = _tz.dropna(subset=["実数"]).sort_values(["日付","登録日時"])
         for p, g in _tz.groupby("製品名"):
             last = g.iloc[-1]
-            checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"])}
+            checkpoints[p] = {"日付": last["日付"], "登録日時": last["登録日時"], "実数": to_int(last["実数"]),
+                              "準備済日": (None if pd.isna(last["準備済日"]) else pd.Timestamp(last["準備済日"]).normalize())}
     ae = ae[~_tz_mask].copy()  
 
     _ae_by_p = {k: g for k, g in ae.groupby("製品名")}
@@ -638,6 +652,19 @@ if not mst_fc.empty:
         pr = _future_ev.groupby("日付")["qty"].sum() if not _future_ev.empty else pd.Series(dtype=float)
         pc = pr.reindex(dates, fill_value=0).fillna(0).cumsum()
         fs[p] = {d: c_s + to_int(pc.get(d,0)) for d in dates}
+
+def is_prepared_order(p, dt, reg, note):
+    """棚卸時点で出荷準備済みとして数えられた受注か（＝実数に反映済みで、以後は引かない）。"""
+    cp = checkpoints.get(p)
+    if not cp or cp.get("準備済日") is None: return False
+    if any(t in str(note) for t in ["【在庫調整", "【不良廃棄】", "【棚卸確定"]): return False
+    try:
+        d = pd.Timestamp(dt).normalize()
+        if not (pd.Timestamp(cp["日付"]) < d <= cp["準備済日"]): return False
+        reg = pd.to_datetime(reg, errors="coerce")
+        return bool(pd.isna(reg) or reg <= cp["登録日時"])
+    except Exception:
+        return False
 
 def cur_stock(p):
     return fs.get(p, {}).get(today, cs.get(p, 0))
@@ -1881,8 +1908,10 @@ elif pg == "📊 在庫・スケジュール":
                     m = re.search(r"棚卸確定:(-?\d+)", str(note))
                     if m:
                         jissu = int(m.group(1))
-                        if diff == 0: return f"📋 棚卸確認：実数{jissu:,}cs（システム計算と一致・補正なし）"
-                        return f"📋 棚卸補正：実数{jissu:,}cs（システム計算との差分 {diff:+,}csを補正）"
+                        _pm2 = re.search(r"出荷準備済:(\d{4}-\d{2}-\d{2})", str(note))
+                        _pt = f"［{_pm2.group(1)}出荷分の準備済を除く］" if _pm2 else ""
+                        if diff == 0: return f"📋 棚卸確認：実数{jissu:,}cs{_pt}（システム計算と一致・補正なし）"
+                        return f"📋 棚卸補正：実数{jissu:,}cs{_pt}（システム計算との差分 {diff:+,}csを補正）"
                     if "【不良廃棄】" in str(note): return f"🗑️ 不良廃棄：{note}"
                     if "【在庫調整" in str(note): return f"🔧 手動在庫調整：{note}"
                     return str(note)
@@ -1898,6 +1927,8 @@ elif pg == "📊 在庫・スケジュール":
                             after = day_ev[_after_checkpoint_mask(day_ev, cp)]
                             bal = cp["実数"] + to_int(after["qty"].sum())
                         else:
+                            if cp and d > cp["日付"]:
+                                day_ev = day_ev[_after_checkpoint_mask(day_ev, cp)]
                             bal += to_int(day_ev["qty"].sum())
                             if d < today and bal < 0: bal = 0
                         out[d.normalize()] = bal
@@ -1923,16 +1954,21 @@ elif pg == "📊 在庫・スケジュール":
                     for d2 in pd.date_range(today, today+timedelta(days=59)):
                         do = pof[safe_dt_date(pof["納品予定日"])==d2.date()] if not pof.empty else pd.DataFrame()
                         oq = to_int(do["ケース数"].sum()) if not do.empty else 0
+                        _prep_q = 0
+                        if not do.empty and checkpoints.get(dp, {}).get("準備済日") is not None:
+                            _pm = do.apply(lambda _r: is_prepared_order(dp, _r["納品予定日"], _r.get("登録日時"), _r.get("備考","")), axis=1)
+                            _prep_q = to_int(do[_pm]["ケース数"].sum()); oq = oq - _prep_q
                         cust = " / ".join(do["顧客名"].dropna().astype(str).unique()) if not do.empty else ""
                         if len(do) > 1: cust = f"{cust}（{len(do)}件合算）"
                         _notes = " / ".join(n for n in do["備考"].dropna().astype(str).unique() if n.strip()) if not do.empty and "備考" in do.columns else ""
                         _dest = cust if cust else "―"
                         if _notes: _dest = f"{_dest}　📝{_notes}"
+                        if _prep_q: _dest = f"{_dest}　🧺出荷準備済{_prep_q}cs（棚卸に反映済）"
                         dm = pmf[safe_dt_date(pmf["製造予定日"])==d2.date()] if not pmf.empty else pd.DataFrame()
                         iq = to_int(dm["ケース数"].sum()) if not dm.empty else 0
                         if d2.normalize() == today: ts = cur_stock(dp)
                         else: ts += (iq-oq)
-                        if iq>0 or oq>0 or ts<0: dtl.append({"_dt":d2,"日付":format_date_jp(d2),"出荷先":_dest,"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
+                        if iq>0 or oq>0 or _prep_q>0 or ts<0: dtl.append({"_dt":d2,"日付":format_date_jp(d2),"出荷先":_dest,"製造(入)":iq or "","出荷(出)":oq or "","予定在庫":ts})
 
                     _g_past_start = today - timedelta(days=30)
                     _g_bal = _daily_balance_walk(dp, _g_past_start, today - timedelta(days=1))
@@ -1969,7 +2005,8 @@ elif pg == "📊 在庫・スケジュール":
                             _diff_q = -to_int(r.get("ケース数",0))
                             _reg = pd.to_datetime(r.get("登録日時"), errors="coerce")
                             _is_cp_row = (_cp is not None) and (TANAOSHI_TAG in _note) and (pd.Timestamp(r["納品予定日"]).normalize()==pd.Timestamp(_cp["日付"]).normalize()) and (_reg==pd.to_datetime(_cp.get("登録日時"),errors="coerce"))
-                            _rows.append({"_dt": r["納品予定日"], "_reg": _reg, "_is_cp": _is_cp_row, "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else "🚚 出荷(実績)",
+                            _prepd = is_prepared_order(dp, r["納品予定日"], _reg, _note)
+                            _rows.append({"_dt": r["納品予定日"], "_reg": _reg, "_is_cp": _is_cp_row, "_prepped": _prepd, "日付": format_date_jp(r["納品予定日"]), "区分": "📊 補正" if _is_adjustment(_note) else ("🧺 出荷(準備済・棚卸に反映済)" if _prepd else "🚚 出荷(実績)"),
                                           "出荷先/備考": _adjustment_note(_note, _diff_q) if _is_adjustment(_note) else f'{r.get("顧客名","")} {_note}'.strip(),
                                           "数量(±)": _diff_q, "実績在庫": ""})
                     if not mh_win.empty:
@@ -1997,6 +2034,9 @@ elif pg == "📊 在庫・スケジュール":
                             _wbal = _cp["実数"]; _wday = _d; _cp_day = _d; _r["実績在庫"] = _wbal
                             continue
                         if _cp_day is not None and _d == _cp_day:
+                            _r["実績在庫"] = _wbal
+                            continue
+                        if _r.get("_prepped"):
                             _r["実績在庫"] = _wbal
                             continue
                         if _d == today and not _synced_today:
@@ -2159,7 +2199,7 @@ elif pg == "📊 在庫・スケジュール":
 
     with t5:
         st.markdown('<div class="section-title">📋 製品 棚卸入力</div>', unsafe_allow_html=True)
-        st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その瞬間の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。</div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="info-tip">💡 実際に数えた在庫数を入力すると、その日の営業終了時の実数を新しい基準点として登録します。以後の在庫計算は棚卸日以前の履歴を参照せず、この実数からの増減だけで計算されます（マスタの「初期在庫数」は変更しません）。<br><b>おすすめ運用：</b>その日の出荷・製造がすべて終わり、翌営業日の出荷準備まで済ませた後に数え、「出荷準備済みの分を除いて数える」で入力します。準備分が足りない製品はマイナスで入力してください。</div>""", unsafe_allow_html=True)
         
         _t5_msg_area = st.container()
 
@@ -2171,43 +2211,82 @@ elif pg == "📊 在庫・スケジュール":
         inv_f = [p for p in mst_fc["製品名"].tolist() if inv_s in p] if inv_s else (mst_fc[mst_fc["大カテゴリ"]==inv_cat]["製品名"].tolist() if not mst_fc.empty else [])
         sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod", format_func=fn)
         if sel_p:
-            _cur_cs = stock_asof(sel_p, inv_d)
-            _is_today_inv = pd.Timestamp(inv_d).normalize() == today
-            _today_net = to_int(ae[(ae["製品名"]==sel_p) & (ae["日付"]==today)]["qty"].sum()) if _is_today_inv else 0
-            _base_cs = _cur_cs
-            st.markdown(f'<div class="info-card">{format_date_jp(pd.Timestamp(inv_d))} 時点の計算上の在庫：<b style="font-size:18px;">{_cur_cs:,} cs</b></div>', unsafe_allow_html=True)
-            if _is_today_inv:
-                st.markdown('<div class="info-tip">💡 棚卸確定は「その日1日分の最終値」として扱われます。確定した日の出荷・製造（登録の前後を問わず）は、その確定値の上にさらに差し引かれることはありません。<b>そのため、日中に数える場合は、その日残りの出荷・製造予定分もすでに終わったものとして見込んで数えてください（一番確実なのは、その日の出荷・製造がすべて終わった後、営業終了時に数えることです）。</b></div>', unsafe_allow_html=True)
-                if _today_net != 0:
-                    st.markdown(f'<div class="info-tip">📦 参考：本日すでに登録されている出荷・製造の合計は <b>{_today_net:+,} cs</b> です（上の「計算上の在庫」にはまだ反映されていません）。</div>', unsafe_allow_html=True)
-            actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=0, step=1, value=None, key="inv_qty")
+            _inv_ts = pd.Timestamp(inv_d).normalize()
+            _start_cs = stock_asof(sel_p, inv_d)                                   # 棚卸日の朝の計算在庫
+            _end_cs = stock_asof(sel_p, _inv_ts + timedelta(days=1))               # 棚卸日の営業終了時の計算在庫（当日の出荷・製造を反映）
+            st.markdown(f'<div class="info-card">{format_date_jp(_inv_ts)} 営業終了時点の計算上の在庫：<b style="font-size:18px;">{_end_cs:,} cs</b>　<span style="font-size:12px;color:#64748B;">（朝の在庫 {_start_cs:,} ＋ 当日の出荷・製造を反映）</span></div>', unsafe_allow_html=True)
+
+            _mode = st.radio("🧺 明日以降の出荷準備の扱い", ["📦 出荷準備済みの分を除いて数える（推奨）", "📋 出荷準備分も含めて数える（現物すべて）"], key="inv_mode",
+                             help="推奨：夕方に翌営業日の出荷準備（ピッキング）まで終えたあとで棚卸をする運用。準備済みの現物は数えず、足りない分はマイナスで入力できます。")
+            _prep_mode = _mode.startswith("📦")
+
+            # 翌営業日（＝棚卸日より後で、最初に出荷がある日）の自動判定
+            _prep_date = None; _prep_q = 0
+            if _prep_mode:
+                _ovalid = odf[(odf["日付未定フラグ"] == False)] if (not odf.empty and "日付未定フラグ" in odf.columns) else odf
+                if not _ovalid.empty:
+                    _ovalid = _ovalid[~_ovalid["備考"].fillna("").str.contains("【在庫調整|【不良廃棄】|【棚卸確定")]
+                    _od = pd.to_datetime(_ovalid["納品予定日"], errors="coerce").dt.normalize()
+                    _later = _od[_od > _inv_ts].dropna()
+                    _auto_next = _later.min().date() if len(_later) else None
+                else:
+                    _auto_next = None
+                if _auto_next is None:
+                    st.markdown('<div class="info-tip">ℹ️ 棚卸日より後の出荷予定が登録されていないため、除外する出荷準備分はありません（実数をそのまま入力してください）。</div>', unsafe_allow_html=True)
+                else:
+                    _pd_in = st.date_input("🚚 出荷準備を済ませた出荷日（自動：次に出荷がある日）", value=_auto_next, min_value=(_inv_ts + timedelta(days=1)).date(), key=f"inv_prep_date_{_inv_ts.date()}")
+                    _prep_date = pd.Timestamp(_pd_in).normalize()
+                    _po = odf[(odf["製品名"] == sel_p)]
+                    if not _po.empty:
+                        _po = _po[(pd.to_datetime(_po["納品予定日"], errors="coerce").dt.normalize() > _inv_ts) & (pd.to_datetime(_po["納品予定日"], errors="coerce").dt.normalize() <= _prep_date)]
+                        _po = _po[~_po["備考"].fillna("").str.contains("【在庫調整|【不良廃棄】|【棚卸確定")]
+                        _prep_q = to_int(_po["ケース数"].apply(to_int).sum())
+                    st.markdown(f'<div class="info-card yellow" style="background:#FFFBEB;">🧺 {format_date_jp(_prep_date)} までの出荷指示（この製品）：<b>{_prep_q:,} cs</b>　→ 準備済みとして<b>棚卸の数から除いて</b>数えます。</div>', unsafe_allow_html=True)
+            _same_cp = checkpoints.get(sel_p)
+            _same_day_cp = bool(_same_cp) and pd.Timestamp(_same_cp["日付"]).normalize() == _inv_ts
+            _expected = _end_cs - (_prep_q if (_prep_mode and not _same_day_cp) else 0)
+            if _same_day_cp:
+                st.markdown(f'<div class="info-tip">ℹ️ この製品は同じ日にすでに棚卸済み（実数 {_same_cp["実数"]:,} cs）です。再登録すると最後の棚卸が有効になります。予想値は前回の棚卸値を基準にしています。</div>', unsafe_allow_html=True)
+            if _prep_mode:
+                st.markdown(f'<div class="info-card">🎯 システム上の予想値（数える数）：<b style="font-size:18px;">{_expected:,} cs</b>　<span style="font-size:12px;color:#64748B;">＝ {_end_cs:,} － 出荷準備済み {_prep_q:,}</span></div>', unsafe_allow_html=True)
+                st.markdown('<div class="info-tip">💡 <b>マイナスも入力できます。</b>例：現物3ケース・翌日の出荷指示4ケースで4ケース分を準備済みなら、準備後の在庫は <b>－1</b>（＝1ケース不足）と入力します。この不足は在庫予測に欠品として表示され、製造登録すると解消されます。</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="info-tip">💡 このモードでは「棚卸日の現物すべて」を数え、翌日以降の出荷は通常どおり在庫から差し引かれます。翌営業日の出荷準備を先に終えた場合は、上の「除いて数える」を選んでください。</div>', unsafe_allow_html=True)
+
+            actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=(None if _prep_mode else 0), step=1, value=None, key="inv_qty")
             inv_note = st.text_input("📝 備考", key="inv_note")
             if actual_q is not None:
-                _diff = to_int(actual_q) - _base_cs
+                _diff = to_int(actual_q) - _expected
                 if _diff == 0:
-                    st.markdown('<div class="ok-banner">✅ 現在の在庫と一致しています（登録するとこの日を新しい基準点として確定します）</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="ok-banner">✅ システムの予想値と一致しています（登録するとこの日を新しい基準点として確定します）</div>', unsafe_allow_html=True)
                 else:
                     _dcolor = "#059669" if _diff > 0 else "#DC2626"
-                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（{_base_cs:,} → {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
-            
+                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（予想 {_expected:,} → 実数 {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
+                if _prep_mode and to_int(actual_q) < 0:
+                    st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 準備済みの出荷に対して <b>{abs(to_int(actual_q)):,} cs 不足</b>として登録されます。</div>', unsafe_allow_html=True)
+
             if st.button("✅ 棚卸を確定（この時点にリセット）", type="primary", use_container_width=True, key="inv_submit"):
                 if actual_q is None:
                     flash("error", "⚠️ 実棚卸数を入力してください")
                     st.rerun()
+                elif (not _prep_mode) and to_int(actual_q) < 0:
+                    flash("error", "⚠️ 「準備分も含めて数える」モードでは、マイナスは入力できません。")
+                    st.rerun()
                 else:
-                    _diff = to_int(actual_q) - _base_cs
+                    _diff = to_int(actual_q) - _expected
                     nid = new_id()
                     _cat = mst_fc[mst_fc["製品名"] == sel_p]["大カテゴリ"].iloc[0] if (not mst_fc.empty and sel_p in mst_fc["製品名"].values) else "その他"
-                    _tag = f"【棚卸確定:{to_int(actual_q)}】{inv_note}".strip()
+                    _prep_tag = f"【出荷準備済:{_prep_date.strftime('%Y-%m-%d')}】" if (_prep_mode and _prep_date is not None) else ""
+                    _tag = f"【棚卸確定:{to_int(actual_q)}】{_prep_tag}{inv_note}".strip()
                     if _diff >= 0:
-                        app_sync("manufactures", pd.DataFrame([{
+                        _ok = app_sync("manufactures", pd.DataFrame([{
                             "ID": nid, "製造予定日": pd.to_datetime(inv_d),
                             "大カテゴリ": _cat, "製品名": sel_p, "ケース数": _diff,
                             "リパックフラグ": False, "備考": _tag,
                             "登録日時": datetime.now(JST).replace(tzinfo=None),
                         }]))
                     else:
-                        app_sync("orders", pd.DataFrame([{
+                        _ok = app_sync("orders", pd.DataFrame([{
                             "ID": nid, "納品予定日": pd.to_datetime(inv_d),
                             "顧客名": "在庫調整（棚卸）", "大カテゴリ": _cat, "製品名": sel_p,
                             "ケース数": abs(_diff), "運送会社": "",
@@ -2215,7 +2294,8 @@ elif pg == "📊 在庫・スケジュール":
                             "不良廃棄フラグ": False, "日付未定フラグ": False,
                             "登録日時": datetime.now(JST).replace(tzinfo=None),
                         }]))
-                    flash("success", f"✅【{sel_p}】{format_date_jp(pd.Timestamp(inv_d))} 時点の在庫を {to_int(actual_q):,} cs で確定しました（{_base_cs:,} → {to_int(actual_q):,}）。これより前の履歴は以後の計算に使われません。")
+                    _pm_msg = f"（{format_date_jp(_prep_date)} 分の出荷準備 {_prep_q:,}cs は反映済みとして扱います）" if _prep_tag else ""
+                    flash("success", f"✅【{sel_p}】{format_date_jp(_inv_ts)} の棚卸を {to_int(actual_q):,} cs で確定しました（予想 {_expected:,} → {to_int(actual_q):,}）。{_pm_msg}")
                     st.rerun()
         
         with _t5_msg_area:
