@@ -733,6 +733,8 @@ if not mst_fc.empty:
     ae = pd.concat([ev_o, ev_m], ignore_index=True).dropna(subset=["製品名","日付"])
     ae["qty"] = ae["qty"].apply(to_int); ae["備考"] = ae["備考"].fillna("")
     ae["登録日時"] = pd.to_datetime(ae["登録日時"], errors="coerce")
+    ae["日付"] = pd.to_datetime(ae["日付"], errors="coerce").dt.normalize()   # 時刻付きの日付でも、その日の出荷・製造として集計する
+    ae = ae.dropna(subset=["日付"])
 
     _tz_mask = ae["備考"].str.contains(TANAOSHI_TAG, regex=False)
     if _tz_mask.any():
@@ -2077,12 +2079,24 @@ elif pg == "📊 在庫・スケジュール":
                     base = base + sum(q for (wp,wd),q in _wip.items() if wp==pn and wd<=d)
                 return base
 
-            _date_cols = [format_date_jp(d) for d in sd]
+            _WD = "月火水木金土日"
+            _date_cols = [("★" if d == today else "") + f"{d.month}/{d.day}({_WD[d.weekday()]})" for d in sd]
             _dcol_map = dict(zip(sd, _date_cols))
+
+            # 日別の出荷量・製造量（棚卸で反映済みの出荷準備分は除く）
+            _mv = {}
+            _ae_f = ae[(ae["日付"] >= today) & (ae["日付"] <= today + timedelta(days=30))] if not ae.empty else ae
+            for _p, _g in (_ae_f.groupby("製品名") if not _ae_f.empty else []):
+                _cp0 = checkpoints.get(_p)
+                if _cp0: _g = _g[_after_checkpoint_mask(_g, _cp0)]
+                _mv[_p] = ((-_g[_g["qty"] < 0].groupby("日付")["qty"].sum()).to_dict(), _g[_g["qty"] > 0].groupby("日付")["qty"].sum().to_dict())
+
+            _view_mode = st.radio("🔎 表示形式", ["📦 在庫数のみ", "📦＋🚚 在庫数と出荷・製造量を併記", "🚚 出荷・製造量のみ"], horizontal=True, key="v1_view_mode",
+                                  help="併記：「3 ▼4 ▲10」＝その日の終わりの在庫が3、出荷4・製造10。出荷・製造量のみ：動きがあった日だけ表示。")
             iv = []
             for _,r in mst_fc.iterrows():
                 pn = r["製品名"]
-                row = {"カテゴリ":r["大カテゴリ"],"製品名":pn,"現在庫":cur_stock(pn)}
+                row = {"カテゴリ":r["大カテゴリ"],"製品名":pn,"現在庫":cur_stock(pn),"30日出荷計":int(sum(_mv.get(pn, ({}, {}))[0].values()))}
                 _shortage_date = None
                 for d in sd:
                     v = _fc_val(pn, d)
@@ -2090,8 +2104,11 @@ elif pg == "📊 在庫・スケジュール":
                     if _shortage_date is None and v < 0: _shortage_date = d
                 row["最速欠品日"] = f"{_shortage_date.month:02d}/{_shortage_date.day:02d}" if _shortage_date is not None else "OK"
                 iv.append(row)
-            idf = pd.DataFrame(iv).sort_values("カテゴリ").reset_index(drop=True)
-            idf = idf[["カテゴリ","製品名","現在庫","最速欠品日"] + _date_cols]
+            idf = pd.DataFrame(iv)
+            _cat_order = {c.split(" ", 1)[1]: i for i, c in enumerate(CATS)}
+            idf["_ord"] = idf["カテゴリ"].map(lambda c: _cat_order.get(c, 999))
+            idf = idf.sort_values("_ord", kind="stable").drop(columns="_ord").reset_index(drop=True)   # カテゴリ順（マスタの並び）で、同じカテゴリ内の順序は崩さない
+            idf = idf[["カテゴリ","製品名","現在庫","30日出荷計","最速欠品日"] + _date_cols]
 
             if _stock_filter == "欠品ありのみ":
                 idf = idf[idf[_date_cols].lt(0).any(axis=1)].reset_index(drop=True)
@@ -2105,14 +2122,52 @@ elif pg == "📊 在庫・スケジュール":
             if _sel_prods:
                 idf = idf[idf["製品名"].isin(_sel_prods)].reset_index(drop=True)
 
-            c1, c2, c3 = st.columns([3, 1, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開　／　当日分はまだ製造登録前だと一時的にマイナス表示になることがあります（当日夜に製造登録すると自動的に正しい数字に更新されます）</div>', unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([3, 1, 1]); c1.markdown('<div style="font-size:13px;color:#64748B;">💡 行クリックで詳細展開　／　「現在庫」と★今日の列は、今日の出荷・製造の登録分まで反映した「今日の終了時点」の在庫です。製造登録前は一時的にマイナスになることがあります（登録すると自動で更新されます）</div>', unsafe_allow_html=True)
             c2.download_button("📥 CSV出力", data=make_csv_bytes(idf), file_name=f"1ヶ月在庫予測_{date.today()}.csv", mime="text/csv", key="v1_csv_dl", use_container_width=True)
             if c3.button("🔄 閉じる"): st.session_state.drill_product = None; st.rerun()
             if idf.empty:
                 st.info("条件に一致する製品はありません。")
-            _sty = idf.style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=_date_cols)
+            st.markdown('<div style="font-size:12.5px;color:#475569;line-height:1.9;">'
+                        '<span style="background:#FEE2E2;color:#DC2626;font-weight:bold;padding:1px 6px;border-radius:4px;">-3</span> 不足（その日までの不足の<b>累計</b>。製造登録されるまで翌日以降も残ります）　'
+                        '<span style="background:#FEF3C7;color:#B45309;font-weight:bold;padding:1px 6px;border-radius:4px;">0</span> 出荷でちょうど在庫ゼロ　'
+                        '<span style="background:#F1F5F9;color:#94A3B8;padding:1px 6px;border-radius:4px;">0</span> 在庫なし・その日の動きなし　'
+                        '<span style="background:#ECFDF5;color:#047857;padding:1px 6px;border-radius:4px;">8</span> その日に製造あり　'
+                        '▼出荷　▲製造　／　数字は<b>その日の終わりの予測在庫</b>（★は今日）</div>', unsafe_allow_html=True)
+            _prods = idf["製品名"].tolist(); _nr = len(_prods); _nc = len(sd)
+            _bal = idf[_date_cols].to_numpy(dtype=float) if _nr else np.zeros((0, _nc))
+            _out = np.array([[_mv.get(p, ({}, {}))[0].get(d, 0) for d in sd] for p in _prods], dtype=float).reshape(_nr, _nc)
+            _inn = np.array([[_mv.get(p, ({}, {}))[1].get(d, 0) for d in sd] for p in _prods], dtype=float).reshape(_nr, _nc)
+
+            _disp = idf.copy()
+            if not _view_mode.startswith("📦 在庫数のみ"):
+                for _c, _col in enumerate(_date_cols):
+                    _cells = []
+                    for _r in range(_nr):
+                        _mvt = (f"▼{int(_out[_r][_c]):,}" if _out[_r][_c] else "") + ((" " if _out[_r][_c] and _inn[_r][_c] else "") + f"▲{int(_inn[_r][_c]):,}" if _inn[_r][_c] else "")
+                        _cells.append(f"{int(_bal[_r][_c]):,}" + (f" {_mvt}" if _mvt else "") if _view_mode.startswith("📦＋") else _mvt)
+                    _disp[_col] = _cells
+
+            def _css_all(_df):
+                _css = pd.DataFrame("", index=_df.index, columns=_df.columns)
+                for _c, _col in enumerate(_date_cols):
+                    _ci = _css.columns.get_loc(_col)
+                    for _r in range(_nr):
+                        b, o, i = _bal[_r][_c], _out[_r][_c], _inn[_r][_c]
+                        if b < 0: s = "color:#DC2626;font-weight:bold;background-color:#FEE2E2;"
+                        elif b == 0 and o > 0: s = "color:#B45309;font-weight:bold;background-color:#FEF3C7;"
+                        elif b == 0: s = "color:#94A3B8;background-color:#F1F5F9;"
+                        elif i > 0: s = "color:#047857;background-color:#ECFDF5;"
+                        else: s = ""
+                        _css.iat[_r, _ci] = s
+                return _css
+
+            _sty = _disp.style.apply(_css_all, axis=None)
             _sty = _sty.map(lambda v: 'color:#B45309;font-weight:bold;background-color:#FEF3C7;' if isinstance(v,str) and v!="OK" else '', subset=["最速欠品日"])
-            se = st.dataframe(_sty, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
+            try:
+                _colcfg = {"製品名": st.column_config.TextColumn("製品名", pinned=True)}
+            except TypeError:
+                _colcfg = {}
+            se = st.dataframe(_sty, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", column_config=_colcfg)
             if se.selection.get("rows"): st.session_state.drill_product = idf.iloc[se.selection.get("rows")[0]]["製品名"]
 
             dp = st.session_state.drill_product
