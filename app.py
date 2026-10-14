@@ -1152,6 +1152,8 @@ if pg == "📋 受注登録":
     elif kbn != "ケース" and prod and qty:
         _how = f"{to_int(qty):,}甲 × 甲消費数{kou}（マスタ設定）" if kbn == "甲" else f"{to_int(qty):,}袋 ÷ 入数{nyu}（マスタ設定）"
         st.caption(f"↳ {_how} ＝ {_qty_cs:,} ケース として登録されます（在庫はすべてケース単位で管理）")
+        if kbn == "甲":
+            st.warning(f"⚠️ この製品はマスタが「甲（ケースに換算）」の設定のため、{to_int(qty):,}甲が {_qty_cs:,} ケースに変換されます。**甲のまま管理したい場合は、「⚙️ マスタ・分析」→製品で『製造登録区分』を「甲数管理」に変更してください**（変更後は {to_int(qty):,} と入力すれば {to_int(qty):,}甲 のまま登録されます）。")
         if _qty_cs < 1: st.error("⚠️ ケース換算すると 0 ケースになるため、このままでは登録できません（入数に対して数量が少なすぎます）。")
     _pv_ref = cur_stock(prod) if prod else 0; _pv_lbl = "現在庫"
     if prod and od and pd.Timestamp(od).normalize() >= today:
@@ -1510,6 +1512,8 @@ elif pg == "🏭 製造登録":
     elif kbn != "ケース" and pm and mq:
         _how_m = f"{to_int(mq):,}甲 × 甲消費数{kou}（マスタ設定）" if kbn == "甲" else f"{to_int(mq):,}袋 ÷ 入数{nyu}（マスタ設定）"
         st.caption(f"↳ {_how_m} ＝ {_mq_cs:,} ケース として在庫に反映されます（在庫はすべてケース単位で管理）")
+        if kbn == "甲":
+            st.warning(f"⚠️ この製品はマスタが「甲（ケースに換算）」の設定のため、{to_int(mq):,}甲が {_mq_cs:,} ケースに変換されます。**甲のまま管理したい場合は、「⚙️ マスタ・分析」→製品で『製造登録区分』を「甲数管理」に変更してください**（資材は {to_int(mq):,}甲 × {kou} ＝ {to_int(mq)*kou:,} 枚で、どちらの設定でも同じです）。")
         if _mq_cs < 1: st.error("⚠️ ケース換算すると 0 ケースになるため、このままでは登録できません（入数に対して数量が少なすぎます）。")
 
     if pm and mq and ipl and not mst_u.empty and pm in mst_u["製品名"].values:
@@ -3193,6 +3197,12 @@ elif pg == "⚙️ マスタ・分析":
     tm1,tm2,tm3,tm4,tm5 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社",f"⚠️ マスタ未登録品 ({len(_orphan_names)})" if _orphan_names else "⚠️ マスタ未登録品"])
     with tm1:
         st.markdown('<div class="info-tip">💡 <b>製造登録区分</b>：製造・受注の登録単位とダンボール消費の計算をシンプルに設定できます。<br>・<b>ケース</b>：1登録で1枚消費<br>・<b>袋</b>：登録数 ÷ 入数 ＝ 消費枚数（例: 10袋登録 ÷ 入数10 = 1枚消費）<br>・<b>甲</b>：登録数 × 甲消費数 ＝ ケース数に換算して管理（例: 5甲登録 × 甲消費数4 ＝ 20ケースとして在庫管理・20枚消費）<br>・<b>甲数管理</b>：在庫・受注・製造を<b>甲のまま</b>管理します（5甲の受注は「5」と登録）。資材は 登録数 × 甲消費数 を消費（例: 5甲 × 4 ＝ 20枚）。この製品の「初期在庫数」「安全在庫数」も甲数で入力してください。<br>※すでにケース換算で登録済みの製品を「甲数管理」へ切り替えるときは、切り替えた日に「棚卸」で甲数の実数を登録し直してください（棚卸より前の履歴は参照されません）。</div>', unsafe_allow_html=True)
+        _legacy_kou = mst_u[mst_u["製造登録区分"].astype(str).str.strip() == "甲"]["製品名"].tolist() if (not mst_u.empty and "製造登録区分" in mst_u.columns) else []
+        _mgmt_kou = mst_u[mst_u["製造登録区分"].astype(str).str.strip() == "甲数管理"]["製品名"].tolist() if (not mst_u.empty and "製造登録区分" in mst_u.columns) else []
+        if _legacy_kou:
+            st.warning("🔁 現在「甲（ケースに換算して管理）」の設定になっている製品：" + "、".join(_legacy_kou) + "　→ 甲のまま管理したい製品は、下の表で『製造登録区分』を「甲数管理」に変えて「💾 保存」してください。")
+        if _mgmt_kou:
+            st.success("✅ 「甲数管理」（甲のまま管理）の製品：" + "、".join(_mgmt_kou))
         em_base = mst.copy()
         
         if "製造登録区分" not in em_base.columns: em_base["製造登録区分"] = em_base.get("資材消費単位", "ケース")
