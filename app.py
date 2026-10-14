@@ -364,6 +364,96 @@ def _save_fail(msg):
     st.session_state["_save_failed_msg"] = msg
     return False
 
+
+_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+def _canon_cell(x):
+    """比較用の正規化（20 と 20.0、TRUE と True、日付の時刻有無などの表記ゆれを同一視）。"""
+    x = "" if x is None else str(x).strip()
+    if x in ("nan", "None", "NaT", "NaN"): return ""
+    if x.lower() in ("true", "false"): return x.upper()
+    if _NUM_RE.match(x):
+        try: return f"{float(x):.10g}"
+        except Exception: return x
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})( 00:00:00)?$", x)
+    if m: return m.group(1)
+    return x
+
+def _to_sheet_strings(df):
+    ds = df.copy()
+    for col in ds.columns:
+        if pd.api.types.is_datetime64_any_dtype(ds[col]):
+            ds[col] = ds[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+        elif pd.api.types.is_bool_dtype(ds[col]):
+            ds[col] = ds[col].astype(str).str.upper()
+        elif pd.api.types.is_numeric_dtype(ds[col]):
+            ds[col] = ds[col].fillna(0).astype(str)
+        else:
+            ds[col] = ds[col].fillna('').astype(str)
+    return ds.replace(["nan", "None", "NaT", "NaN"], "")
+
+def _try_patch_save(name, df, ws, remote_data):
+    """この画面が読み込んだ時点(baseline)から『変わった所だけ』をシートへ反映する。
+    ・変更したセルだけ更新／新しい行は末尾に追加／削除した行だけ削除
+    ・他の人が同時に登録・編集した行や、この画面が触っていないセルには一切触れない
+    戻り値: None=この方式を使えない（従来の全面書き込みへ） / (True, 情報) 成功 / (False, メッセージ) 失敗"""
+    base = st.session_state.get(f"{name}_df")
+    if not isinstance(base, pd.DataFrame) or "ID" not in df.columns or "ID" not in base.columns: return None
+    if len(remote_data) < 2 or "ID" not in remote_data[0]: return None
+    rh = remote_data[0]
+    if any(c not in rh for c in df.columns): return None          # 列が増える（移行）ときは従来方式
+    new_s = _to_sheet_strings(df).reset_index(drop=True); base_s = _to_sheet_strings(base).reset_index(drop=True)
+    nid = new_s["ID"].astype(str).str.strip(); bid = base_s["ID"].astype(str).str.strip()
+    nv = nid[nid != ""]; bv = bid[bid != ""]
+    if nv.duplicated().any() or bv.duplicated().any(): return None  # IDが重複していれば安全のため従来方式
+    ncols = [c for c in df.columns if c in base_s.columns]
+    new_rows = {i: new_s.loc[k, :].to_dict() for k, i in nid.items() if i != ""}
+    base_rows = {i: base_s.loc[k, :].to_dict() for k, i in bid.items() if i != ""}
+    id_pos = rh.index("ID")
+    remote_pos = {}
+    for n_, r in enumerate(remote_data[1:], start=2):            # n_ = シート上の行番号
+        if len(r) > id_pos and str(r[id_pos]).strip(): remote_pos.setdefault(str(r[id_pos]).strip(), n_)
+    # 変更・追加・削除の洗い出し
+    cell_updates, added, deleted = [], [], []
+    for i, row in new_rows.items():
+        if i in base_rows:
+            if i not in remote_pos: continue                      # すでに他の人が削除済み → 復活させない
+            for c in ncols:
+                if _canon_cell(row.get(c)) != _canon_cell(base_rows[i].get(c)):
+                    cell_updates.append((remote_pos[i], rh.index(c) + 1, row.get(c, "")))
+        else:
+            if i not in remote_pos: added.append(row)             # 新規（まだシートに無い）
+    for i in base_rows:
+        if i not in new_rows and i in remote_pos: deleted.append(i)
+    n_remote = len(remote_pos)
+    if len(deleted) >= 10 and len(deleted) > 0.2 * max(1, n_remote):
+        return (False, f"🛡️ 安全装置：この保存では {name} の {len(deleted)} 件（全体の {len(deleted)*100//max(1,n_remote)}%）が一度に消えてしまうため、保存を中止しました。画面が古い可能性があります。『スプレッドシートを再読込』してからやり直してください。")
+    removed_rows = [dict(zip(rh, remote_data[remote_pos[i] - 1] + [""] * (len(rh) - len(remote_data[remote_pos[i] - 1])))) for i in deleted]
+
+    from gspread.utils import rowcol_to_a1
+    if cell_updates:
+        ws.batch_update([{"range": rowcol_to_a1(r, c), "values": [[v]]} for r, c, v in cell_updates], value_input_option="USER_ENTERED")
+    if added:
+        ws.append_rows([[a.get(c, "") for c in rh] for a in added], value_input_option="USER_ENTERED", insert_data_option="INSERT_ROWS")
+    if deleted:
+        rows_desc = sorted((remote_pos[i] for i in deleted), reverse=True)   # 下の行から消す（行番号がずれない）
+        reqs = [{"deleteDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": r - 1, "endIndex": r}}} for r in rows_desc]
+        ws.spreadsheet.batch_update({"requests": reqs})
+    # 書き込み後の確認：残すはずの行が全部あるか、最新のシートを読み直して照合
+    after = ws.get_all_values()
+    ahid = after[0].index("ID") if after and "ID" in after[0] else None
+    after_ids = {str(r[ahid]).strip() for r in after[1:] if ahid is not None and len(r) > ahid and str(r[ahid]).strip()}
+    expect = (set(remote_pos.keys()) - set(deleted)) | {str(a.get("ID", "")).strip() for a in added}
+    lost = sorted(expect - after_ids)
+    repaired = 0
+    if lost:                                                       # 万一消えた行があれば、保存前に読んだ内容で自動復元
+        snap = {str(r[id_pos]).strip(): r for r in remote_data[1:] if len(r) > id_pos}
+        _rest = [(snap[i] + [""] * (len(rh) - len(snap[i]))) for i in lost if i in snap]
+        if _rest:
+            ws.append_rows(_rest, value_input_option="USER_ENTERED", insert_data_option="INSERT_ROWS"); repaired = len(_rest)
+            after = ws.get_all_values()
+        audit_log("自動復元", name, [dict(zip(rh, s)) for s in _rest])
+    return (True, {"updated": len(cell_updates), "added": len(added), "deleted": len(deleted), "removed_rows": removed_rows, "repaired": repaired, "after": after})
+
 def save_sync(name, df):
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         return _save_fail(f"⚠️ {name} のデータが空のため、消失を防ぐために保存を中止しました。")
@@ -395,7 +485,22 @@ def save_sync(name, df):
             if _remote_data is None:
                 return _save_fail("⚠️ 保存前のシート確認に失敗しました。データ保護のため保存を中止しました。少し待ってからもう一度お試しください。")
 
-            # 他の人が新しく登録した行を保存内容に合流させて保護
+            # ① 差分更新（推奨）：変更したセル・追加・削除だけをシートへ反映する
+            _pr = _try_patch_save(name, df, ws, _remote_data)
+            if _pr is not None:
+                if _pr[0] is False:
+                    return _save_fail(_pr[1])
+                _info = _pr[1]
+                st.cache_data.clear()
+                _newdf = _parse_sheet(name, _info["after"])
+                st.session_state[f"{name}_df"] = _newdf
+                if "ID" in _newdf.columns: st.session_state[f"{name}_known_ids"] = set(_newdf["ID"].astype(str).tolist())
+                if _info["removed_rows"]: audit_log("削除", name, _info["removed_rows"])
+                if _info["repaired"]:
+                    st.warning(f"⚠️ 保存後の確認で {_info['repaired']} 件の行が一時的に見当たらなくなったため、自動で復元しました。")
+                return True
+
+            # ② 従来方式（列の追加・IDなしのマスタ等）：他の人が新しく登録した行を保存内容に合流させて保護
             _protected_new = 0
             if "ID" in ds.columns and len(_remote_data) > 1 and "ID" in _remote_data[0]:
                 _rh = _remote_data[0]
@@ -521,6 +626,9 @@ def app_sync(name, nr, fatal=True):
     return True
 
 _ALL_SHEETS = ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]
+if "_loaded_ts" in st.session_state and _time.time() - st.session_state["_loaded_ts"] > 180:
+    for _s in _ALL_SHEETS: st.session_state.pop(f"{_s}_df", None)
+    st.cache_data.clear(); _LOAD_WARNINGS.clear()
 if any(f"{_s}_df" not in st.session_state for _s in _ALL_SHEETS):
     try:
         _fetch_all_raw()
@@ -555,6 +663,12 @@ if _left: st.session_state["_app_err"] = f"🚨 {_left}"
 def force_reload():
     for _s in _ALL_SHEETS: st.session_state.pop(f"{_s}_df", None)
     st.cache_data.clear(); _LOAD_WARNINGS.clear()
+
+def auto_refresh(max_age=180):
+    """操作のたびに、読込から一定時間（既定3分）たっていれば最新のシートを読み直す。
+    登録画面を開きっぱなしでも、他の人の登録が見えない・古い在庫で判断してしまう問題を防ぐ。"""
+    if _time.time() - st.session_state.get("_loaded_ts", 0) > max_age:
+        force_reload()
 
 def refresh_if_stale(max_age=45):
     """画面移動のとき、読込から一定時間が過ぎていたら最新のシートを読み直す（他の端末・他の人の登録が見えない問題の対策）。"""
@@ -595,10 +709,17 @@ def pui(pn):
     if r.empty: return "ケース", 10, 4
     row = r.iloc[0]
     kbn = str(row.get("製造登録区分", "ケース")).strip()
-    if kbn not in ["ケース", "袋", "甲"]: kbn = "ケース"
+    if kbn not in ["ケース", "袋", "甲", "甲数管理"]: kbn = "ケース"
     nyu = max(1, to_int(row.get("入数", 10)))
     kou = max(1, to_int(row.get("甲消費数", 4)))
     return kbn, nyu, kou
+
+def unit_short(p):
+    """在庫を数える単位（略称）。『甲数管理』の製品は甲、それ以外はcs。"""
+    return "甲" if pui(p)[0] == "甲数管理" else "cs"
+
+def unit_long(p):
+    return "甲" if pui(p)[0] == "甲数管理" else "ケース"
 
 def to_case_qty(pn, raw_qty):
     """袋・甲などの登録単位を、在庫計算で使う『真のケース数』へ変換する。
@@ -606,6 +727,7 @@ def to_case_qty(pn, raw_qty):
     袋や甲で入力された数量は保存前に必ずケースへ変換しないと在庫がずれる。"""
     kbn, nyu, kou = pui(pn)
     r = to_int(raw_qty)
+    if kbn == "甲数管理": return r   # 甲数管理：入力した甲の数をそのまま在庫数として扱う（換算しない）
     if kbn == "袋": return max(0, int(r / nyu + 0.5))   # 四捨五入（0.5は切り上げ）
     if kbn == "甲": return r * kou
     return r
@@ -812,9 +934,9 @@ if not mst_u.empty and not odf.empty:
         mfg_lt = max(0, to_int(mpi[p].get("製造リードタイム日",0)))
         use_dt = max(today, (dt - timedelta(days=mfg_lt)).normalize())
         if pn:
-            if kbn == "袋": use_qty = to_int(q / nyu)
-            elif kbn == "甲": use_qty = to_int(q * kou)
-            else: use_qty = q
+            # ケース数は登録時に換算済み（1ケース＝ダンボール1箱）なので再換算しない。
+            # ただし「甲数管理」の製品は、保存されている数が甲数なので 甲数 × 甲消費数 ＝ 資材枚数。
+            use_qty = to_int(q * kou) if kbn == "甲数管理" else q
             pf.setdefault(pn, {})[use_dt] = pf.get(pn,{}).get(use_dt,0) + use_qty
 
 open_po = {}
@@ -1010,6 +1132,8 @@ if pg == "📋 受注登録":
     stype = s3.selectbox("⭐ 種別", options=SP_T, index=SP_T.index("⭐ 特注" if spf else ("🚌 チャーター便" if chf else "（なし）")))
 
     kbn, nyu, kou = pui(prod)
+    _kmg = (kbn == "甲数管理")
+    if _kmg: kbn = "甲"          # 以降の表示用（換算の有無は _kmg で判定）
     if kbn == "袋":
         qty = st.number_input("📦 数量（袋）", min_value=1, step=1, value=None)
     elif kbn == "甲":
@@ -1023,8 +1147,11 @@ if pg == "📋 受注登録":
         st.markdown('<div style="background:#FEF2F2;border:1.5px solid #DC2626;border-radius:8px;padding:8px 14px;font-size:13px;color:#991B1B;margin:4px 0;">📊 <b>在庫調整（－）モード</b>：この登録は在庫を <b>減らす（－）</b> 処理として登録されます。在庫ずれ補正にご利用ください。</div>', unsafe_allow_html=True)
     
     _qty_cs = to_case_qty(prod, qty) if (prod and qty) else 0
-    if kbn != "ケース" and prod and qty:
-        st.caption(f"↳ {to_int(qty):,}{kbn} → 換算後 {_qty_cs:,} ケース として登録されます")
+    if _kmg and prod and qty:
+        st.caption(f"↳ {to_int(qty):,}甲 のまま登録されます（この製品は在庫・受注・製造をすべて甲数で管理）")
+    elif kbn != "ケース" and prod and qty:
+        _how = f"{to_int(qty):,}甲 × 甲消費数{kou}（マスタ設定）" if kbn == "甲" else f"{to_int(qty):,}袋 ÷ 入数{nyu}（マスタ設定）"
+        st.caption(f"↳ {_how} ＝ {_qty_cs:,} ケース として登録されます（在庫はすべてケース単位で管理）")
         if _qty_cs < 1: st.error("⚠️ ケース換算すると 0 ケースになるため、このままでは登録できません（入数に対して数量が少なすぎます）。")
     _pv_ref = cur_stock(prod) if prod else 0; _pv_lbl = "現在庫"
     if prod and od and pd.Timestamp(od).normalize() >= today:
@@ -1044,6 +1171,7 @@ if pg == "📋 受注登録":
                 flash("error", f"⚠️ {to_int(qty):,}{kbn} はケース換算すると 0 ケースになるため登録できません。数量を見直してください（登録されていません）。")
                 st.rerun()
             frem = f"{'【代替品】' if isub else ''}{'【不良廃棄】' if iirr else ''}{'【在庫調整-】' if iadj else ''} {'特注' if '特注' in stype else ('チャーター便' if 'チャーター' in stype else '')} {rem}".strip()
+            if kbn != "ケース" and not _kmg: frem = f"{frem} 【入力:{to_int(qty):,}{kbn}→{qty_cs:,}cs】".strip()
             cn = f"{stor or ''} {sv}".strip() if sv else (stor if stor else "未指定")
             _dsig = ("o", prod, qty_cs, cn, str(od), bool(iadj), bool(iirr))
             _lr = st.session_state.get("_last_reg")
@@ -1055,7 +1183,7 @@ if pg == "📋 受注登録":
             if iadj:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt if not pd.isna(ddt) else pd.Timestamp(jst_today()),"顧客名":"在庫調整","大カテゴリ":cat,"製品名":prod,"ケース数":qty_cs,"運送会社":"","備考":f"【在庫調整-】{frem}","荷姿チェック":False,"発送備考":"","不良廃棄フラグ":False,"日付未定フラグ":False,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
                 st.session_state["_last_reg"] = {"sig": _dsig, "t": _time.time()}; st.session_state["_dup_ack"] = None
-                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(prod)}】 －{qty_cs:,}cs（{to_int(qty):,}{kbn}入力）  現在庫: {cur_stock(prod):,} → {cur_stock(prod)-qty_cs:,}")
+                flash("success", f"📊 在庫調整(－)を登録しました！【{fn(prod)}】 －{qty_cs:,}{unit_short(prod)}" + ("" if _kmg else f"（{to_int(qty):,}{kbn}入力）") + f"  現在庫: {cur_stock(prod):,} → {cur_stock(prod)-qty_cs:,}")
                 st.rerun()
             else:
                 app_sync("orders", pd.DataFrame([{"ID":nid,"納品予定日":ddt,"顧客名":cn,"大カテゴリ":cat,"製品名":prod,"ケース数":qty_cs,"運送会社":sc or "","備考":frem,"荷姿チェック":False,"発送備考":"","不良廃棄フラグ":iirr,"日付未定フラグ":idu,"登録日時": datetime.now(JST).replace(tzinfo=None)}]))
@@ -1076,7 +1204,7 @@ if pg == "📋 受注登録":
                     _stk_msg = f"📦 現在庫: {_cur:,} ／ 出荷日予測在庫: {_proj:,} → 登録後: {_after:,} ✅ 充足"
                     _ftype = "success"
                 st.session_state["_last_reg"] = {"sig": _dsig, "t": _time.time()}; st.session_state["_dup_ack"] = None
-                _unit_msg = f"{to_int(qty):,}{kbn}（＝{qty_cs:,}ケース）" if kbn != "ケース" else f"{qty_cs:,}ケース"
+                _unit_msg = f"{to_int(qty):,}甲" if _kmg else (f"{to_int(qty):,}{kbn}（＝{qty_cs:,}ケース）" if kbn != "ケース" else f"{qty_cs:,}ケース")
                 flash(_ftype, f"✨ 登録完了（スプレッドシートへの書込を確認済み／登録番号 {nid}）\n【{fn(prod)}】 {_unit_msg}  出荷日: {format_date_jp(od) if od else '日付未定'}  顧客: {cn}\n{_stk_msg}{_sp_warn}")
                 st.rerun()
     with _reg_msg_area:
@@ -1360,6 +1488,8 @@ elif pg == "🏭 製造登録":
     pm = s2.selectbox("確定製品", options=pl, index=None, format_func=fn)
     
     kbn, nyu, kou = pui(pm)
+    _mkmg = (kbn == "甲数管理")
+    if _mkmg: kbn = "甲"
     if kbn == "袋":
         mq = c2.number_input(f"📦 数量（袋） ※{nyu}袋で1箱(ﾀﾞﾝﾎﾞｰﾙ)消費", min_value=1, step=1, value=None)
     elif kbn == "甲":
@@ -1375,8 +1505,11 @@ elif pg == "🏭 製造登録":
     ipl = st.checkbox("📦 紐づく資材の在庫も同時に減らす", value=True) if (irp and not iadj_m) else (True if not iadj_m else False)
 
     _mq_cs = to_case_qty(pm, mq) if (pm and mq) else 0
-    if kbn != "ケース" and pm and mq:
-        st.caption(f"↳ {to_int(mq):,}{kbn} → 換算後 {_mq_cs:,} ケース として在庫に反映されます")
+    if _mkmg and pm and mq:
+        st.caption(f"↳ {to_int(mq):,}甲 として在庫に反映されます（この製品は甲数で管理）。資材は {to_int(mq):,}甲 × {kou}（甲消費数）＝ {to_int(mq)*kou:,} 枚を消費します")
+    elif kbn != "ケース" and pm and mq:
+        _how_m = f"{to_int(mq):,}甲 × 甲消費数{kou}（マスタ設定）" if kbn == "甲" else f"{to_int(mq):,}袋 ÷ 入数{nyu}（マスタ設定）"
+        st.caption(f"↳ {_how_m} ＝ {_mq_cs:,} ケース として在庫に反映されます（在庫はすべてケース単位で管理）")
         if _mq_cs < 1: st.error("⚠️ ケース換算すると 0 ケースになるため、このままでは登録できません（入数に対して数量が少なすぎます）。")
 
     if pm and mq and ipl and not mst_u.empty and pm in mst_u["製品名"].values:
@@ -1390,7 +1523,7 @@ elif pg == "🏭 製造登録":
             if _kbn == "袋":
                 _mat_deduct = _mq_cs
                 _calc_desc = f"{to_int(mq)} 袋 ÷ {_nyu} (入数) = {_mat_deduct:,} 枚のダンボール消費"
-            elif _kbn == "甲":
+            elif _kbn in ("甲", "甲数管理"):
                 _mat_deduct = to_int(to_int(mq) * _kou)
                 _calc_desc = f"{to_int(mq)} 甲 × {_kou} (甲消費数) = {_mat_deduct:,} 枚のダンボール消費"
             else:
@@ -1408,7 +1541,7 @@ elif pg == "🏭 製造登録":
             </div>""", unsafe_allow_html=True)
 
     if pm and mq and cur_stock(pm)<=0 and not iadj_m:
-        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cur_stock(pm)} cs</span> → 製造後: <b>{cur_stock(pm)+_mq_cs} cs</b></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='info-card red' style='background:#FEF2F2; padding:10px;'>現在庫: <span class='shortage-red'>{cur_stock(pm)} {unit_short(pm)}</span> → 製造後: <b>{cur_stock(pm)+_mq_cs} {unit_short(pm)}</b></div>", unsafe_allow_html=True)
     st.write("---")
     _mfg_reg_msg_area = st.container()
     if st.button("➕ 製造データを記録", type="primary", use_container_width=True):
@@ -1421,6 +1554,7 @@ elif pg == "🏭 製造登録":
             if mq_cs < 1:
                 flash("error", f"⚠️ {to_int(mq):,}{kbn} はケース換算すると 0 ケースになるため登録できません。数量を見直してください（登録されていません）。")
                 st.rerun()
+            if kbn != "ケース" and not _mkmg: mr = f"{mr} 【入力:{to_int(mq):,}{kbn}→{mq_cs:,}cs】".strip()
             _dsig = ("m", pm, mq_cs, str(mdt), bool(iadj_m), bool(irp))
             _lr = st.session_state.get("_last_reg")
             if _lr and _lr["sig"] == _dsig and _time.time() - _lr["t"] < 90 and st.session_state.get("_dup_ack") != _dsig:
@@ -1436,7 +1570,7 @@ elif pg == "🏭 製造登録":
                     "登録日時": datetime.now(JST).replace(tzinfo=None)
                 }]))
                 st.session_state["_last_reg"] = {"sig": _dsig, "t": _time.time()}; st.session_state["_dup_ack"] = None
-                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(pm)}】 ＋{mq_cs:,}cs（{to_int(mq):,}{kbn}入力）  現在庫: {cur_stock(pm):,} → {cur_stock(pm)+mq_cs:,} cs")
+                flash("success", f"📊 在庫調整(＋)を登録しました！【{fn(pm)}】 ＋{mq_cs:,}{unit_short(pm)}" + ("" if _mkmg else f"（{to_int(mq):,}{kbn}入力）") + f"  現在庫: {cur_stock(pm):,} → {cur_stock(pm)+mq_cs:,} {unit_short(pm)}")
                 st.rerun()
             else:
                 rt = f"{'【リパック】' if irp else ''} {'【資材非連動】' if irp and not ipl else ''} {mr}".strip()
@@ -1452,7 +1586,7 @@ elif pg == "🏭 製造登録":
                         if _kbn2 == "袋":
                             _deduct_qty = abs(mq_cs)
                             _calc_memo = f"製造{to_int(mq)}袋 ÷ {_nyu2}(入数)"
-                        elif _kbn2 == "甲":
+                        elif _kbn2 in ("甲", "甲数管理"):
                             _deduct_qty = abs(to_int(to_int(mq) * _kou2))
                             _calc_memo = f"製造{to_int(mq)}甲 × {_kou2}(甲消費数)"
                         else:
@@ -1466,7 +1600,7 @@ elif pg == "🏭 製造登録":
                         }]))
                         _mfg_mat_msg = f"  ＋【{_pnn}】 {_deduct_qty:,}枚 自動減算（{_calc_memo}）" if _pk_ok else f"\n⚠️ 製造は登録済みですが、【{_pnn}】の自動減算の記録に失敗しました。資材入出庫から手動で登録してください。"
                 st.session_state["_last_reg"] = {"sig": _dsig, "t": _time.time()}; st.session_state["_dup_ack"] = None
-                flash("success", f"✅ 登録しました！【{fn(pm)}】 {mq_cs:,}cs（{to_int(mq):,}{kbn}入力）  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
+                flash("success", f"✅ 登録しました！【{fn(pm)}】 " + (f"{to_int(mq):,}甲" if _mkmg else f"{mq_cs:,}cs（{to_int(mq):,}{kbn}入力）") + f"  製造日: {mdt.strftime('%Y/%m/%d')}{_mfg_mat_msg}")
                 st.rerun()
     with _mfg_reg_msg_area:
         show_flash_inline()
@@ -2134,7 +2268,7 @@ elif pg == "📊 在庫・スケジュール":
             iv = []
             for _,r in mst_fc.iterrows():
                 pn = r["製品名"]
-                row = {"カテゴリ":r["大カテゴリ"],"製品名":pn,"現在庫":cur_stock(pn),"30日出荷計":int(sum(_mv.get(pn, ({}, {}))[0].values()))}
+                row = {"カテゴリ":r["大カテゴリ"],"製品名":pn,"現在庫":cur_stock(pn),"30日出荷計":int(sum(_mv.get(pn, ({}, {}))[0].values())),"単位":unit_long(pn)}
                 _shortage_date = None
                 for d in sd:
                     v = _fc_val(pn, d)
@@ -2146,7 +2280,7 @@ elif pg == "📊 在庫・スケジュール":
             _cat_order = {c.split(" ", 1)[1]: i for i, c in enumerate(CATS)}
             idf["_ord"] = idf["カテゴリ"].map(lambda c: _cat_order.get(c, 999))
             idf = idf.sort_values("_ord", kind="stable").drop(columns="_ord").reset_index(drop=True)   # カテゴリ順（マスタの並び）で、同じカテゴリ内の順序は崩さない
-            idf = idf[["カテゴリ","製品名","現在庫","30日出荷計","最速欠品日"] + _date_cols]
+            idf = idf[["カテゴリ","製品名","現在庫","30日出荷計","単位","最速欠品日"] + _date_cols]
 
             if _stock_filter == "欠品ありのみ":
                 idf = idf[idf[_date_cols].lt(0).any(axis=1)].reset_index(drop=True)
@@ -2535,10 +2669,11 @@ elif pg == "📊 在庫・スケジュール":
         inv_f = [p for p in mst_fc["製品名"].tolist() if inv_s in p] if inv_s else (mst_fc[mst_fc["大カテゴリ"]==inv_cat]["製品名"].tolist() if not mst_fc.empty else [])
         sel_p = ic2.selectbox("📦 製品を選択", options=inv_f, index=None, key="inv_prod", format_func=fn)
         if sel_p:
+            _us = unit_short(sel_p)
             _inv_ts = pd.Timestamp(inv_d).normalize()
             _start_cs = stock_asof(sel_p, inv_d)                                   # 棚卸日の朝の計算在庫
             _end_cs = stock_asof(sel_p, _inv_ts + timedelta(days=1))               # 棚卸日の営業終了時の計算在庫（当日の出荷・製造を反映）
-            st.markdown(f'<div class="info-card">{format_date_jp(_inv_ts)} 営業終了時点の計算上の在庫：<b style="font-size:18px;">{_end_cs:,} cs</b>　<span style="font-size:12px;color:#64748B;">（朝の在庫 {_start_cs:,} ＋ 当日の出荷・製造を反映）</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card">{format_date_jp(_inv_ts)} 営業終了時点の計算上の在庫：<b style="font-size:18px;">{_end_cs:,} {_us}</b>　<span style="font-size:12px;color:#64748B;">（朝の在庫 {_start_cs:,} ＋ 当日の出荷・製造を反映）</span></div>', unsafe_allow_html=True)
 
             _mode = st.radio("🧺 明日以降の出荷準備の扱い", ["📦 出荷準備済みの分を除いて数える（推奨）", "📋 出荷準備分も含めて数える（現物すべて）"], key="inv_mode",
                              help="推奨：夕方に翌営業日の出荷準備（ピッキング）まで終えたあとで棚卸をする運用。準備済みの現物は数えず、足りない分はマイナスで入力できます。")
@@ -2565,19 +2700,19 @@ elif pg == "📊 在庫・スケジュール":
                         _po = _po[(pd.to_datetime(_po["納品予定日"], errors="coerce").dt.normalize() > _inv_ts) & (pd.to_datetime(_po["納品予定日"], errors="coerce").dt.normalize() <= _prep_date)]
                         _po = _po[~_po["備考"].fillna("").str.contains("【在庫調整|【不良廃棄】|【棚卸確定")]
                         _prep_q = to_int(_po["ケース数"].apply(to_int).sum())
-                    st.markdown(f'<div class="info-card yellow" style="background:#FFFBEB;">🧺 {format_date_jp(_prep_date)} までの出荷指示（この製品）：<b>{_prep_q:,} cs</b>　→ 準備済みとして<b>棚卸の数から除いて</b>数えます。</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="info-card yellow" style="background:#FFFBEB;">🧺 {format_date_jp(_prep_date)} までの出荷指示（この製品）：<b>{_prep_q:,} {_us}</b>　→ 準備済みとして<b>棚卸の数から除いて</b>数えます。</div>', unsafe_allow_html=True)
             _same_cp = checkpoints.get(sel_p)
             _same_day_cp = bool(_same_cp) and pd.Timestamp(_same_cp["日付"]).normalize() == _inv_ts
             _expected = _end_cs - (_prep_q if (_prep_mode and not _same_day_cp) else 0)
             if _same_day_cp:
-                st.markdown(f'<div class="info-tip">ℹ️ この製品は同じ日にすでに棚卸済み（実数 {_same_cp["実数"]:,} cs）です。再登録すると最後の棚卸が有効になります。予想値は前回の棚卸値を基準にしています。</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-tip">ℹ️ この製品は同じ日にすでに棚卸済み（実数 {_same_cp["実数"]:,} {_us}）です。再登録すると最後の棚卸が有効になります。予想値は前回の棚卸値を基準にしています。</div>', unsafe_allow_html=True)
             if _prep_mode:
-                st.markdown(f'<div class="info-card">🎯 システム上の予想値（数える数）：<b style="font-size:18px;">{_expected:,} cs</b>　<span style="font-size:12px;color:#64748B;">＝ {_end_cs:,} － 出荷準備済み {_prep_q:,}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="info-card">🎯 システム上の予想値（数える数）：<b style="font-size:18px;">{_expected:,} {_us}</b>　<span style="font-size:12px;color:#64748B;">＝ {_end_cs:,} － 出荷準備済み {_prep_q:,}</span></div>', unsafe_allow_html=True)
                 st.markdown('<div class="info-tip">💡 <b>マイナスも入力できます。</b>例：現物3ケース・翌日の出荷指示4ケースで4ケース分を準備済みなら、準備後の在庫は <b>－1</b>（＝1ケース不足）と入力します。この不足は在庫予測に欠品として表示され、製造登録すると解消されます。</div>', unsafe_allow_html=True)
             else:
                 st.markdown('<div class="info-tip">💡 このモードでは「棚卸日の現物すべて」を数え、翌日以降の出荷は通常どおり在庫から差し引かれます。翌営業日の出荷準備を先に終えた場合は、上の「除いて数える」を選んでください。</div>', unsafe_allow_html=True)
 
-            actual_q = st.number_input("実際に数えた在庫数（ケース）", min_value=(None if _prep_mode else 0), step=1, value=None, key="inv_qty")
+            actual_q = st.number_input(f"実際に数えた在庫数（{unit_long(sel_p)}）", min_value=(None if _prep_mode else 0), step=1, value=None, key="inv_qty")
             inv_note = st.text_input("📝 備考", key="inv_note")
             if actual_q is not None:
                 _diff = to_int(actual_q) - _expected
@@ -2585,9 +2720,9 @@ elif pg == "📊 在庫・スケジュール":
                     st.markdown('<div class="ok-banner">✅ システムの予想値と一致しています（登録するとこの日を新しい基準点として確定します）</div>', unsafe_allow_html=True)
                 else:
                     _dcolor = "#059669" if _diff > 0 else "#DC2626"
-                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} cs</b>　（予想 {_expected:,} → 実数 {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="info-card" style="border-left-color:{_dcolor};">差分：<b style="color:{_dcolor};">{_diff:+,} {_us}</b>　（予想 {_expected:,} → 実数 {to_int(actual_q):,}）</div>', unsafe_allow_html=True)
                 if _prep_mode and to_int(actual_q) < 0:
-                    st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 準備済みの出荷に対して <b>{abs(to_int(actual_q)):,} cs 不足</b>として登録されます。</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="info-card red" style="background:#FEF2F2;">🚨 準備済みの出荷に対して <b>{abs(to_int(actual_q)):,} {_us} 不足</b>として登録されます。</div>', unsafe_allow_html=True)
 
             if st.button("✅ 棚卸を確定（この時点にリセット）", type="primary", use_container_width=True, key="inv_submit"):
                 if actual_q is None:
@@ -2618,8 +2753,8 @@ elif pg == "📊 在庫・スケジュール":
                             "不良廃棄フラグ": False, "日付未定フラグ": False,
                             "登録日時": datetime.now(JST).replace(tzinfo=None),
                         }]))
-                    _pm_msg = f"（{format_date_jp(_prep_date)} 分の出荷準備 {_prep_q:,}cs は反映済みとして扱います）" if _prep_tag else ""
-                    flash("success", f"✅【{sel_p}】{format_date_jp(_inv_ts)} の棚卸を {to_int(actual_q):,} cs で確定しました（予想 {_expected:,} → {to_int(actual_q):,}）。{_pm_msg}")
+                    _pm_msg = f"（{format_date_jp(_prep_date)} 分の出荷準備 {_prep_q:,} {_us} は反映済みとして扱います）" if _prep_tag else ""
+                    flash("success", f"✅【{sel_p}】{format_date_jp(_inv_ts)} の棚卸を {to_int(actual_q):,} {_us} で確定しました（予想 {_expected:,} → {to_int(actual_q):,}）。{_pm_msg}")
                     st.rerun()
         
         with _t5_msg_area:
@@ -3057,7 +3192,7 @@ elif pg == "⚙️ マスタ・分析":
 
     tm1,tm2,tm3,tm4,tm5 = st.tabs(["📦 製品","🏢 顧客","📦 資材","🚚 運送会社",f"⚠️ マスタ未登録品 ({len(_orphan_names)})" if _orphan_names else "⚠️ マスタ未登録品"])
     with tm1:
-        st.markdown('<div class="info-tip">💡 <b>製造登録区分</b>：製造・受注の登録単位とダンボール消費の計算をシンプルに設定できます。<br>・<b>ケース</b>：1登録で1枚消費<br>・<b>袋</b>：登録数 ÷ 入数 ＝ 消費枚数（例: 10袋登録 ÷ 入数10 = 1枚消費）<br>・<b>甲</b>：登録数 × 甲消費数 ＝ 消費枚数（例: 1甲登録 × 甲消費数4 = 4枚消費）</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 <b>製造登録区分</b>：製造・受注の登録単位とダンボール消費の計算をシンプルに設定できます。<br>・<b>ケース</b>：1登録で1枚消費<br>・<b>袋</b>：登録数 ÷ 入数 ＝ 消費枚数（例: 10袋登録 ÷ 入数10 = 1枚消費）<br>・<b>甲</b>：登録数 × 甲消費数 ＝ ケース数に換算して管理（例: 5甲登録 × 甲消費数4 ＝ 20ケースとして在庫管理・20枚消費）<br>・<b>甲数管理</b>：在庫・受注・製造を<b>甲のまま</b>管理します（5甲の受注は「5」と登録）。資材は 登録数 × 甲消費数 を消費（例: 5甲 × 4 ＝ 20枚）。この製品の「初期在庫数」「安全在庫数」も甲数で入力してください。<br>※すでにケース換算で登録済みの製品を「甲数管理」へ切り替えるときは、切り替えた日に「棚卸」で甲数の実数を登録し直してください（棚卸より前の履歴は参照されません）。</div>', unsafe_allow_html=True)
         em_base = mst.copy()
         
         if "製造登録区分" not in em_base.columns: em_base["製造登録区分"] = em_base.get("資材消費単位", "ケース")
@@ -3078,7 +3213,7 @@ elif pg == "⚙️ マスタ・分析":
             column_config={
                 "大カテゴリ": st.column_config.SelectboxColumn(options=[c.split(" ",1)[1] for c in CATS]),
                 "使用資材名": st.column_config.SelectboxColumn(options=pk_m["資材名"].tolist() if not pk_m.empty else []),
-                "製造登録区分": st.column_config.SelectboxColumn("製造登録区分", options=["ケース","袋","甲"]),
+                "製造登録区分": st.column_config.SelectboxColumn("製造登録区分", options=["ケース","袋","甲","甲数管理"], help="ケース：ケース数で管理／袋：袋数→ケースに換算／甲：甲数→ケースに換算／甲数管理：在庫・受注・製造をすべて甲数のまま管理（資材は 甲数×甲消費数）"),
                 "入数": st.column_config.NumberColumn("入数(袋)", min_value=1, step=1, format="%d", help="区分が「袋」の場合：何袋でダンボール1箱になるか"),
                 "甲消費数": st.column_config.NumberColumn("甲消費数(枚/甲)", min_value=1, step=1, format="%d", help="区分が「甲」の場合：1甲でダンボールを何箱消費するか"),
                 "製造リードタイム日": st.column_config.NumberColumn("製造LT(日)", min_value=0, step=1, format="%d", help="出荷予定日の何日前に製造するか。資材の消費予定日をこの日数分前倒しして発注アラートを計算します。"),
