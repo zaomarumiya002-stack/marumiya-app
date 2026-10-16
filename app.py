@@ -454,6 +454,25 @@ def _try_patch_save(name, df, ws, remote_data):
         audit_log("自動復元", name, [dict(zip(rh, s)) for s in _rest])
     return (True, {"updated": len(cell_updates), "added": len(added), "deleted": len(deleted), "removed_rows": removed_rows, "repaired": repaired, "after": after})
 
+def _overwrite_verified(ws, values, old=None):
+    """先に新しい内容を書き、余った古い行・列だけを消し、最後にシートを読み戻して一致を確認する。
+    （従来の『全消去→書き込み』は途中で失敗するとシートが空になるため廃止）戻り値: (一致したか, 読み戻した内容)"""
+    from gspread.utils import rowcol_to_a1
+    if old is None: old = ws.get_all_values()
+    old_rows = len(old); old_cols = max((len(r) for r in old), default=0)
+    n_rows = len(values); n_cols = max(len(r) for r in values)
+    ws.update(values=values, range_name="A1")
+    try:
+        if old_rows > n_rows: ws.batch_clear([f"{rowcol_to_a1(n_rows + 1, 1)}:{rowcol_to_a1(old_rows, max(old_cols, n_cols))}"])
+        if old_cols > n_cols: ws.batch_clear([f"{rowcol_to_a1(1, n_cols + 1)}:{rowcol_to_a1(n_rows, old_cols)}"])
+    except Exception:
+        pass
+    back = ws.get_all_values()
+    def _c(rows, r, c): return _canon_cell(rows[r][c]) if r < len(rows) and c < len(rows[r]) else ""
+    tr = max(len(back), n_rows); tc = max(n_cols, max((len(r) for r in back), default=0))
+    ok = all(_c(values, r, c) == _c(back, r, c) for r in range(tr) for c in range(tc))
+    return ok, back
+
 def save_sync(name, df):
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         return _save_fail(f"⚠️ {name} のデータが空のため、消失を防ぐために保存を中止しました。")
@@ -530,19 +549,13 @@ def save_sync(name, df):
             old_cols = max((len(r) for r in _remote_data), default=0)
             n_rows, n_cols = len(update_values), len(update_values[0])
 
-            ws.update(values=update_values, range_name='A1')   # ← まず新しい内容を書く（この間データは消えない）
-            try:  # その後、余った古い行・列だけを消す
-                from gspread.utils import rowcol_to_a1
-                if old_rows > n_rows:
-                    ws.batch_clear([f"{rowcol_to_a1(n_rows + 1, 1)}:{rowcol_to_a1(old_rows, max(old_cols, n_cols))}"])
-                if old_cols > n_cols:
-                    ws.batch_clear([f"{rowcol_to_a1(1, n_cols + 1)}:{rowcol_to_a1(n_rows, old_cols)}"])
-            except Exception:
-                st.warning("ℹ️ 保存は完了しましたが、不要になった古い行の整理に失敗しました。次回の保存時に自動整理されます。")
+            _ok, _back = _overwrite_verified(ws, update_values, _remote_data)
+            if not _ok:
+                return _save_fail(f"⚠️ {name} を書き込んだ後の確認で、シートの内容が保存内容と一致しませんでした。保存されていない可能性があります。もう一度保存してください。")
 
             st.cache_data.clear()
             if _protected_new > 0:
-                st.session_state[f"{name}_df"] = _parse_sheet(name, ws.get_all_values())
+                st.session_state[f"{name}_df"] = _parse_sheet(name, _back)
             else:
                 st.session_state[f"{name}_df"] = df
             if "ID" in ds.columns: st.session_state[f"{name}_known_ids"] = set(ds["ID"].tolist())
@@ -732,55 +745,13 @@ def to_case_qty(pn, raw_qty):
     if kbn == "甲": return r * kou
     return r
 
-def quick_toggle_check(order_id, new_value, col_name="荷姿チェック"):
-    """チェック項目だけを高速に更新する（シート全体を再書き込みせず、該当セル1つだけを更新）。
-    行番号のズレなど想定外の状況を検知した場合はFalseを返し、呼び出し側で通常保存にフォールバックする。"""
-    try:
-        _odf_now = st.session_state.orders_df
-        idx_arr = _odf_now.index[_odf_now["ID"] == order_id]
-        if len(idx_arr) == 0: return False
-        idx = idx_arr[0]
-        row_num = int(idx) + 2  # 1行目はヘッダー
-        col_names = ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"]
-        if col_name not in col_names: return False
-        col_num = col_names.index(col_name) + 1
-        ws = get_ws("orders")
-        if str(ws.cell(row_num, 1).value or "").strip() != str(order_id).strip(): return False
-        ws.update_cell(row_num, col_num, str(new_value).upper())
-        st.session_state.orders_df.loc[idx, col_name] = new_value
-        st.cache_data.clear()
-        return True
-    except Exception:
-        return False
-
-def quick_toggle_check_batch(order_ids, new_value, col_name="荷姿チェック"):
-    """複数件をまとめて高速更新する（1件ずつセルを更新し、最後に1回だけキャッシュをクリア）。
-    戻り値は「更新できなかったID」のリスト。呼び出し側でそれだけ通常保存にフォールバックする。"""
-    col_names = ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"]
-    if col_name not in col_names: return list(order_ids)
-    col_num = col_names.index(col_name) + 1
-    try:
-        ws = get_ws("orders")
-    except Exception:
-        return list(order_ids)
-    _odf_now = st.session_state.orders_df
-    failed = []
-    for oid in order_ids:
-        try:
-            idx_arr = _odf_now.index[_odf_now["ID"] == oid]
-            if len(idx_arr) == 0: failed.append(oid); continue
-            idx = idx_arr[0]; row_num = int(idx) + 2
-            if str(ws.cell(row_num, 1).value or "").strip() != str(oid).strip():
-                failed.append(oid); continue
-            ws.update_cell(row_num, col_num, str(new_value).upper())
-            st.session_state.orders_df.loc[idx, col_name] = new_value
-        except Exception:
-            failed.append(oid)
-    st.cache_data.clear()
-    return failed
-
-def get_toriatsuki_list(): return sorted(cdf["帳合先" if "帳合先" in cdf.columns else "顧客名"].dropna().unique().tolist()) if not cdf.empty else []
-def get_shiten_list(tori): return sorted(cdf[cdf["帳合先"] == tori]["支店名"].dropna().replace("","").unique().tolist()) if not cdf.empty and tori and "帳合先" in cdf.columns else []
+def _tori_key(df):
+    """選択肢に使う帳合先。帳合先が空欄の行は顧客名を帳合先として扱う（追加した顧客が選択肢に出ない問題の対策）。"""
+    t = df["帳合先"].fillna("").astype(str).str.strip() if "帳合先" in df.columns else pd.Series("", index=df.index)
+    n = df["顧客名"].fillna("").astype(str).str.strip() if "顧客名" in df.columns else pd.Series("", index=df.index)
+    return t.where(t != "", n)
+def get_toriatsuki_list(): return sorted(k for k in _tori_key(cdf).unique().tolist() if k) if not cdf.empty else []
+def get_shiten_list(tori): return sorted(x for x in cdf[_tori_key(cdf) == tori]["支店名"].fillna("").astype(str).str.strip().unique().tolist() if x) if not cdf.empty and tori and "支店名" in cdf.columns else []
 
 today = pd.Timestamp(datetime.now(JST).replace(tzinfo=None)).normalize(); dates = pd.date_range(today, today + timedelta(days=60))
 cs = {}; fs = {}
@@ -1939,22 +1910,29 @@ elif pg == "📦 資材・入出庫":
                     po_df.columns = po_df.columns.str.strip()
                     po_df = po_df.reindex(columns=_PO_COLS, fill_value="")
                 else: po_df = pd.DataFrame(columns=_PO_COLS)
-            except Exception: po_df = pd.DataFrame(columns=_PO_COLS)
+            except Exception:
+                po_df = pd.DataFrame(columns=_PO_COLS); st.session_state["_po_load_failed"] = True
             st.session_state.order_purchases_df = po_df
             st.session_state.po_df_loaded = True
 
         po_df = st.session_state.order_purchases_df
         def _save_po(df):
+            if st.session_state.get("_po_load_failed"):
+                return _save_fail("⚠️ 資材発注の読み込みに失敗していたため、データ保護のため保存を中止しました。ページを再読み込みしてからやり直してください。")
             try:
                 try: _wsp = get_ws("order_purchases")
-                except: _wsp = sheet.add_worksheet(title="order_purchases", rows="500", cols="20")
-                _wsp.clear()
+                except Exception: _wsp = sheet.add_worksheet(title="order_purchases", rows="500", cols="20")
                 _ds = df.copy().fillna("").astype(str)
-                _wsp.update(values=[_ds.columns.tolist()] + _ds.values.tolist(), range_name="A1")
+                with get_write_lock():
+                    _ok, _ = _overwrite_verified(_wsp, [_ds.columns.tolist()] + _ds.values.tolist())
+                if not _ok:
+                    return _save_fail("⚠️ 資材発注を書き込んだ後の確認で、シートの内容が保存内容と一致しませんでした。もう一度保存してください。")
                 st.cache_data.clear()
                 st.session_state.order_purchases_df = df
                 st.session_state.po_df_loaded = True
-            except Exception as e: st.error(f"保存エラー: {e}")
+                return True
+            except Exception as e:
+                return _save_fail(f"🚨 資材発注の保存エラー（保存されていません）: {e}")
 
         _alert_mats = [(pn, d) for pn,d in p_sum.items() if (d.get("管理区分")=="定期発注(自動)" and d.get("現在庫",0) < d.get("発注点",0)) or (d.get("管理区分")=="都度発注(受注連動)" and d.get("不足数",0)>0)]
         if _alert_mats:
@@ -2534,7 +2512,7 @@ elif pg == "📊 在庫・スケジュール":
                     
                     _combined = _past_rows + _today_marker + _today_rows + _future_rows
                     if _combined:
-                        cdf = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","実績在庫"]]
+                        _dtl_df = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","実績在庫"]]
                         def _row_style(r):
                             if str(r["日付"]).startswith("── ↓ 本日"): return ['background-color:#E0F2FE;font-weight:900;color:#0369A1;']*len(r)
                             if "補正" in str(r["区分"]): return ['background-color:#F8FAFC;color:#64748B;']*len(r)
@@ -2542,7 +2520,7 @@ elif pg == "📊 在庫・スケジュール":
                             return ['']*len(r)
                         _today_row_idx = len(_past_rows)
                         _h = min(600, max(320, (_today_row_idx + 12) * 36))
-                        st.dataframe(cdf.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=_h)
+                        st.dataframe(_dtl_df.style.apply(_row_style, axis=1), use_container_width=True, hide_index=True, height=_h)
                         st.caption("💡「表示する過去期間」を短くすると、本日の行までのスクロール量が少なくなります（初期値：過去30日）。")
                     else:
                         st.info("履歴・予定なし")
@@ -3289,9 +3267,12 @@ elif pg == "⚙️ マスタ・分析":
             show_flash_inline()
 
     with tm2:
-        ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="cust_mst_ed")
+        _cust_sig = _sig((cdf.fillna("").astype(str).agg("|".join, axis=1)).tolist()) if not cdf.empty else "empty"
+        ec = st.data_editor(cdf.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key=f"cust_mst_ed_{_cust_sig}")
         _m2_msg_area = st.container()
-        if st.button("💾 顧客マスタ保存", type="primary", key="btn_save_cust_mst"): save_sync("customers", ec); flash("success", "✅ 顧客マスタを保存しました。"); st.rerun()
+        if st.button("💾 顧客マスタ保存", type="primary", key="btn_save_cust_mst"):
+            _ec = ec[ec.fillna("").astype(str).apply(lambda r: "".join(r).strip() != "", axis=1)]
+            save_sync("customers", _ec); flash("success", "✅ 顧客マスタを保存しました。"); st.rerun()
         with _m2_msg_area:
             show_flash_inline()
 
@@ -3493,19 +3474,26 @@ elif pg == "🏗️ 製造スケジューラー":
             df = pd.DataFrame(data[1:], columns=data[0])
             df.columns = df.columns.str.strip()
             return df.reindex(columns=cols, fill_value="")
-        except Exception:
+        except Exception as e:
+            if type(e).__name__ != "WorksheetNotFound":     # シート未作成（初回）は正常。通信エラー等のときは初期値での上書き保存を禁止する
+                st.session_state.setdefault("_sched_load_failed", set()).add(name)
             return pd.DataFrame(init_rows, columns=cols) if init_rows else pd.DataFrame(columns=cols)
 
     def _save_sched_master(name, df):
+        if name in st.session_state.get("_sched_load_failed", set()):
+            return _save_fail(f"⚠️ {name} の読み込みに失敗していたため、データ保護のため保存を中止しました。ページを再読み込みしてからやり直してください。")
         try:
             try: ws = get_ws(name)
-            except: ws = sheet.add_worksheet(title=name, rows="500", cols="25")
-            ws.clear()
+            except Exception: ws = sheet.add_worksheet(title=name, rows="500", cols="25")
             ds = df.copy().fillna("").astype(str)
-            ws.update(values=[ds.columns.tolist()] + ds.values.tolist(), range_name="A1")
+            with get_write_lock():
+                _ok, _ = _overwrite_verified(ws, [ds.columns.tolist()] + ds.values.tolist())
+            if not _ok:
+                return _save_fail(f"⚠️ {name} を書き込んだ後の確認で、シートの内容が保存内容と一致しませんでした。もう一度保存してください。")
             st.cache_data.clear()
+            return True
         except Exception as e:
-            st.error(f"保存エラー ({name}): {e}")
+            return _save_fail(f"🚨 保存エラー（{name}／保存されていません）: {e}")
 
     if "v3_initialized" not in st.session_state:
         st.session_state.v3_shift  = _load_sched_master("shift_master",    _SHIFT_COLS, _SHIFT_INIT)
