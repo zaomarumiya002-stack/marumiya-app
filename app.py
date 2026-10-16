@@ -1371,13 +1371,13 @@ elif pg == "🚚 出荷・発送管理":
                 for _c in ["運送会社", "発送備考", "顧客名", "製品名"]:
                     if _c not in _sd.columns: _sd[_c] = ""
                     _sd[_c] = _sd[_c].fillna("").astype(str)
-                _sd = _sd.sort_values(["運送会社", "顧客名", "製品名"], kind="stable").reset_index(drop=True)
+                _sd = _sd.reset_index(drop=True)   # 登録順のまま（並べ替えは列見出しで任意に）
                 _sd["消込"] = _sd["荷姿チェック"].astype(bool)
-                st.session_state[_snap_k] = {"df": _sd[["ID", "消込", "運送会社", "顧客名", "製品名", "ケース数", "発送備考"]].copy(),
+                st.session_state[_snap_k] = {"df": _sd[["ID", "消込", "顧客名", "ケース数", "製品名", "運送会社", "発送備考"]].copy(),
                                              "at": datetime.now(JST).strftime("%H:%M:%S")}
             _snap = st.session_state[_snap_k]
             _hc1, _hc2 = st.columns([3, 1])
-            _hc1.markdown(f'<div style="font-size:13px;color:#64748B;line-height:1.7;">💡 <b>チェックはこの画面の中だけで操作でき、「保存」を押すまで通信しません</b>（何件チェックしても待たされません）。保存は<b>1回の通信でまとめて</b>登録します。運送会社ごとに並んでいるので、運送会社ごとにチェック→保存すると安全です。<br>🕒 この一覧の取得時刻：{_snap["at"]}</div>', unsafe_allow_html=True)
+            _hc1.markdown(f'<div style="font-size:13px;color:#64748B;line-height:1.7;">💡 <b>チェックはこの画面の中だけで操作でき、「保存」を押すまで通信しません</b>（何件チェックしても待たされません）。保存は<b>1回の通信でまとめて</b>登録します。登録順に表示します（列見出しで並べ替えできます）。20〜30件ごとに保存すると安全です。<br>🕒 この一覧の取得時刻：{_snap["at"]}</div>', unsafe_allow_html=True)
             if _hc2.button("🔄 一覧を最新にする", use_container_width=True, key=f"ship_snap_btn_{td}", help="他の人の消込や新しい受注を反映します。チェック中で未保存の分は消えるので、先に保存してください。"):
                 force_reload(); st.session_state["_ship_snap_refresh"] = str(td); st.rerun()
 
@@ -2300,11 +2300,12 @@ elif pg == "📊 在庫・スケジュール":
             if idf.empty:
                 st.info("条件に一致する製品はありません。")
             st.markdown('<div style="font-size:12.5px;color:#475569;line-height:1.9;">'
-                        '<span style="background:#FEE2E2;color:#DC2626;font-weight:bold;padding:1px 6px;border-radius:4px;">-3</span> 不足（その日までの不足の<b>累計</b>。製造登録されるまで翌日以降も残ります）　'
-                        '<span style="background:#FEF3C7;color:#B45309;font-weight:bold;padding:1px 6px;border-radius:4px;">0</span> 出荷でちょうど在庫ゼロ　'
-                        '<span style="background:#F1F5F9;color:#94A3B8;padding:1px 6px;border-radius:4px;">0</span> 在庫なし・その日の動きなし　'
-                        '<span style="background:#ECFDF5;color:#047857;padding:1px 6px;border-radius:4px;">8</span> その日に製造あり　'
-                        '▼出荷　▲製造　／　数字は<b>その日の終わりの予測在庫</b>（★は今日）</div>', unsafe_allow_html=True)
+                        '<span style="background:#EAF1FB;color:#1E3A8A;padding:1px 6px;border-radius:4px;">5</span> 出荷日　'
+                        '<span style="background:#FEE2E2;color:#DC2626;font-weight:bold;padding:1px 6px;border-radius:4px;">-3</span> 不足（累計）　'
+                        '<span style="background:#FEF3C7;color:#B45309;font-weight:bold;padding:1px 6px;border-radius:4px;">0</span> 出荷で在庫ゼロ　'
+                        '<span style="background:#ECFDF5;color:#047857;padding:1px 6px;border-radius:4px;">8</span> 製造日　'
+                        '<span style="background:#F1F5F9;color:#94A3B8;padding:1px 6px;border-radius:4px;">0</span> 動きなし　'
+                        '／　数字は日末の予測在庫　▼出荷 ▲製造　★今日</div>', unsafe_allow_html=True)
             _prods = idf["製品名"].tolist(); _nr = len(_prods); _nc = len(sd)
             _bal = idf[_date_cols].to_numpy(dtype=float) if _nr else np.zeros((0, _nc))
             _out = np.array([[_mv.get(p, ({}, {}))[0].get(d, 0) for d in sd] for p in _prods], dtype=float).reshape(_nr, _nc)
@@ -2327,6 +2328,7 @@ elif pg == "📊 在庫・スケジュール":
                         b, o, i = _bal[_r][_c], _out[_r][_c], _inn[_r][_c]
                         if b < 0: s = "color:#DC2626;font-weight:bold;background-color:#FEE2E2;"
                         elif b == 0 and o > 0: s = "color:#B45309;font-weight:bold;background-color:#FEF3C7;"
+                        elif o > 0: s = "color:#1E3A8A;background-color:#EAF1FB;"
                         elif b == 0: s = "color:#94A3B8;background-color:#F1F5F9;"
                         elif i > 0: s = "color:#047857;background-color:#ECFDF5;"
                         else: s = ""
@@ -4514,7 +4516,15 @@ elif pg == "🏗️ 製造スケジューラー":
                 inv_df=pd.DataFrame(inv_r)
                 safe_s=_gpp(sp)["安全在庫数"]
                 fig_i=go.Figure()
-                fig_i.add_trace(go.Scatter(x=inv_df["日付"],y=inv_df["予測在庫(cs)"], mode="lines+markers",name="予測在庫", line=dict(color="#2563EB",width=2.5), fill="tozeroy",fillcolor="rgba(37,99,235,0.08)"))
+                fig_i.add_trace(go.Scatter(x=inv_df["日付"],y=inv_df["予測在庫(cs)"], mode="lines",name="予測在庫", line=dict(color="#2563EB",width=2.5), fill="tozeroy",fillcolor="rgba(37,99,235,0.08)"))
+                _gm = ae[(ae["製品名"] == sp) & (ae["日付"] >= today)]
+                _cpm = checkpoints.get(sp)
+                if _cpm: _gm = _gm[_after_checkpoint_mask(_gm, _cpm)]
+                _mo = (-_gm[_gm["qty"] < 0].groupby("日付")["qty"].sum()).to_dict(); _mi = _gm[_gm["qty"] > 0].groupby("日付")["qty"].sum().to_dict()
+                _sx = [d.strftime("%m/%d") for d in pd.date_range(today, today+timedelta(days=hd)) if _mo.get(d, 0) > 0]
+                _sy = [fs.get(sp, {}).get(d, cs.get(sp, 0)) for d in pd.date_range(today, today+timedelta(days=hd)) if _mo.get(d, 0) > 0]
+                _st = [f"出荷 {int(_mo[d]):,}" + (f"／製造 {int(_mi[d]):,}" if _mi.get(d, 0) > 0 else "") for d in pd.date_range(today, today+timedelta(days=hd)) if _mo.get(d, 0) > 0]
+                if _sx: fig_i.add_trace(go.Scatter(x=_sx, y=_sy, mode="markers", name="出荷日", text=_st, hovertemplate="%{x}　%{text}<extra></extra>", marker=dict(size=8, symbol="circle-open", color="#64748B", line=dict(width=1.5))))
                 fig_i.add_hline(y=safe_s,line_dash="dash",line_color="#F59E0B", annotation_text=f"安全在庫 {safe_s}cs")
                 fig_i.add_hline(y=0,line_dash="dot",line_color="#DC2626",annotation_text="ゼロ在庫")
                 fig_i.update_layout(title=f"【{sp}】 在庫推移（{hd}日間）", margin=dict(l=10,r=10,t=50,b=10),height=300, plot_bgcolor="white",hovermode="x unified")
