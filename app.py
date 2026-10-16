@@ -1391,33 +1391,51 @@ elif pg == "🚚 出荷・発送管理":
             c1,c2,c3 = st.columns(3); c1.metric("出荷件数", f"{len(d_ord)} 件"); c2.metric("✅ 消込済", f"{len(dn)} 件"); c3.metric("⏳ 未消込", f"{len(udn)} 件", delta_color="inverse")
             if not udn.empty and td <= jst_today(): st.error(f"🚨 出荷漏れ（荷姿未チェック）が **{len(udn)} 件** あります！")
 
-            st.markdown('<div style="font-size:13px;color:#64748B;">💡 列見出しをクリックで並び替え。左端のチェックで複数選び、下のボタンでまとめて消込できます。</div>', unsafe_allow_html=True)
-            _ship_sc = ["ID","顧客名","製品名","ケース数","状態","運送会社","発送備考"]
-            _sel_ship = st.dataframe(d_ord[_ship_sc].style.apply(lambda r: ['background-color:#D1FAE5;color:#065F46;']*len(r) if "済" in str(r.get("状態","")) else ['']*len(r), axis=1),
-                                      column_config={"ID": None}, use_container_width=True, hide_index=True, row_height=44,
-                                      on_select="rerun", selection_mode="multi-row", key="ship_select_grid")
-            _sel_rows = _sel_ship.selection.get("rows", [])
-            if _sel_rows:
-                _sel_df = d_ord.reset_index(drop=True).iloc[_sel_rows]
-                _n_checked = int((_sel_df["荷姿チェック"]==True).sum()); _n_unchecked = len(_sel_df) - _n_checked
-                st.markdown(f"**{len(_sel_df)}件選択中**　（✅済:{_n_checked}件／⏳未:{_n_unchecked}件）")
-                bcol1, bcol2 = st.columns(2)
-                if bcol1.button(f"✅ 選択した{len(_sel_df)}件を消込完了にする", type="primary", use_container_width=True, key="ship_batch_done"):
-                    _ids = _sel_df["ID"].tolist()
-                    _failed = quick_toggle_check_batch(_ids, True)
-                    if _failed:
-                        _u = odf.copy().astype(object)
-                        _u.loc[_u["ID"].isin(_failed), "荷姿チェック"] = "TRUE"
-                        save_sync("orders", _u)
+            # ───────── 消込（まとめてチェック → 1回の通信で保存）─────────
+            _ship_top_msg = st.container()
+            with _ship_top_msg: show_flash_inline()
+            _snap_k = f"ship_snap_{td}"
+            if st.session_state.pop("_ship_snap_refresh", None) == str(td) or _snap_k not in st.session_state:
+                _sd = d_ord.copy()
+                for _c in ["運送会社", "発送備考", "顧客名", "製品名"]:
+                    if _c not in _sd.columns: _sd[_c] = ""
+                    _sd[_c] = _sd[_c].fillna("").astype(str)
+                _sd = _sd.sort_values(["運送会社", "顧客名", "製品名"], kind="stable").reset_index(drop=True)
+                _sd["消込"] = _sd["荷姿チェック"].astype(bool)
+                st.session_state[_snap_k] = {"df": _sd[["ID", "消込", "運送会社", "顧客名", "製品名", "ケース数", "発送備考"]].copy(),
+                                             "at": datetime.now(JST).strftime("%H:%M:%S")}
+            _snap = st.session_state[_snap_k]
+            _hc1, _hc2 = st.columns([3, 1])
+            _hc1.markdown(f'<div style="font-size:13px;color:#64748B;line-height:1.7;">💡 <b>チェックはこの画面の中だけで操作でき、「保存」を押すまで通信しません</b>（何件チェックしても待たされません）。保存は<b>1回の通信でまとめて</b>登録します。運送会社ごとに並んでいるので、運送会社ごとにチェック→保存すると安全です。<br>🕒 この一覧の取得時刻：{_snap["at"]}</div>', unsafe_allow_html=True)
+            if _hc2.button("🔄 一覧を最新にする", use_container_width=True, key=f"ship_snap_btn_{td}", help="他の人の消込や新しい受注を反映します。チェック中で未保存の分は消えるので、先に保存してください。"):
+                force_reload(); st.session_state["_ship_snap_refresh"] = str(td); st.rerun()
+
+            with st.form(f"ship_form_{td}", clear_on_submit=False):
+                _save_top = st.form_submit_button("💾 消込を保存（チェックの変更をまとめて登録）", type="primary", use_container_width=True)
+                _h = int(min(720, 46 + 38 * max(3, len(_snap["df"]))))
+                _ed_chk = st.data_editor(_snap["df"], key=f"ship_chk_{td}_{_snap['at']}", hide_index=True, use_container_width=True, height=_h,
+                                         disabled=["ID", "運送会社", "顧客名", "製品名", "ケース数", "発送備考"],
+                                         column_config={"ID": None, "消込": st.column_config.CheckboxColumn("消込✅", help="出荷準備ができたらチェック", width="small"),
+                                                        "ケース数": st.column_config.NumberColumn("数量", width="small")})
+                _save_bottom = st.form_submit_button("💾 消込を保存（一覧の下から保存）", type="primary", use_container_width=True)
+            if _save_top or _save_bottom:
+                _before = _snap["df"].set_index("ID")["消込"].astype(bool)
+                _after = _ed_chk.set_index("ID")["消込"].astype(bool)
+                _to_true = [i for i in _after.index if bool(_after[i]) and not bool(_before.get(i, False))]
+                _to_false = [i for i in _after.index if (not bool(_after[i])) and bool(_before.get(i, False))]
+                if not _to_true and not _to_false:
+                    flash("info", "ℹ️ チェックの変更はありません。")
                     st.rerun()
-                if bcol2.button(f"↩️ 選択した{len(_sel_df)}件を未消込に戻す", use_container_width=True, key="ship_batch_undo"):
-                    _ids = _sel_df["ID"].tolist()
-                    _failed = quick_toggle_check_batch(_ids, False)
-                    if _failed:
-                        _u = odf.copy().astype(object)
-                        _u.loc[_u["ID"].isin(_failed), "荷姿チェック"] = "FALSE"
-                        save_sync("orders", _u)
-                    st.rerun()
+                _u = odf.copy()
+                _u["荷姿チェック"] = _u["荷姿チェック"].astype(bool)
+                _u.loc[_u["ID"].isin(_to_true), "荷姿チェック"] = True
+                _u.loc[_u["ID"].isin(_to_false), "荷姿チェック"] = False
+                if save_sync("orders", _u):
+                    st.session_state["_ship_snap_refresh"] = str(td)
+                    flash("success", f"✅ 消込を保存しました（消込 {len(_to_true)}件" + (f"／取消 {len(_to_false)}件" if _to_false else "") + "）")
+                else:
+                    flash("success", "")   # 失敗表示へ変換される（チェックの入力内容は画面に残ります）
+                st.rerun()
 
             st.markdown("---")
             st.markdown("##### 🚚 運送会社・賞味期限・発送備考の編集")
