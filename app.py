@@ -1,3 +1,8 @@
+システムクラッシュのため修繕中です。
+
+復旧見込みは16時頃～です。申し訳ありません。
+
+
 import os
 os.environ["STREAMLIT_THEME_BASE"] = "light"
 os.environ["STREAMLIT_THEME_PRIMARY_COLOR"] = "#2563EB"
