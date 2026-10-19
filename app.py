@@ -2515,10 +2515,14 @@ elif pg == "📊 在庫・スケジュール":
                     _combined = _past_rows + _today_marker + _today_rows + _future_rows
                     if _combined:
                         _dtl_df = pd.DataFrame(_combined)[["日付","区分","出荷先/備考","数量(±)","実績在庫"]]
+                        _isnum = lambda v: pd.api.types.is_number(v) and not pd.isna(v)
+                        _neg = [bool(_isnum(v) and v < 0) for v in _dtl_df["実績在庫"]]
+                        for _c in ("数量(±)", "実績在庫"):
+                            _dtl_df[_c] = [f"{int(v):,}" if _isnum(v) else ("" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v)) for v in _dtl_df[_c]]
                         def _row_style(r):
                             if str(r["日付"]).startswith("── ↓ 本日"): return ['background-color:#E0F2FE;font-weight:900;color:#0369A1;']*len(r)
                             if "補正" in str(r["区分"]): return ['background-color:#F8FAFC;color:#64748B;']*len(r)
-                            if isinstance(r.get("実績在庫"),(int,float)) and r.get("実績在庫")!="" and r.get("実績在庫")<0: return ['color:#DC2626;font-weight:bold;']*len(r)
+                            if _neg[r.name]: return ['color:#DC2626;font-weight:bold;']*len(r)
                             return ['']*len(r)
                         _today_row_idx = len(_past_rows)
                         _h = min(600, max(320, (_today_row_idx + 12) * 36))
@@ -2614,7 +2618,10 @@ elif pg == "📊 在庫・スケジュール":
                     fig_dtf.add_hline(y=0,line_dash="dot",line_color="#DC2626",annotation_text="在庫ゼロ")
                     fig_dtf.update_layout(barmode="relative",hovermode="x unified",margin=dict(l=10,r=10,t=30,b=10),height=320,plot_bgcolor="white")
                     st.plotly_chart(fig_dtf, use_container_width=True)
-                    st.dataframe(dfd.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予定在庫"]), hide_index=True, use_container_width=True)
+                    _dfd_show = dfd.copy()
+                    for _c in ("製造(入)", "出荷(出)"):
+                        _dfd_show[_c] = ["" if v == "" or v is None else f"{int(v):,}" for v in _dfd_show[_c]]
+                    st.dataframe(_dfd_show.style.map(lambda v: 'color:#DC2626;font-weight:900;background-color:#FEE2E2;' if isinstance(v,(int,float)) and v<0 else '', subset=["予定在庫"]), hide_index=True, use_container_width=True)
                 else: st.info("今後60日間の出荷・製造予定はありません。")
 
                 if not pof.empty:
