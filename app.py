@@ -188,7 +188,10 @@ if not st.session_state.password_correct:
 @st.cache_resource
 def get_client(): 
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"])
-    return gspread.authorize(creds)
+    gc = gspread.authorize(creds)
+    try: gc.set_timeout((10, 30))      # 接続10秒・応答30秒で打ち切り（無期限に待たない）
+    except Exception: pass
+    return gc
 
 @st.cache_resource
 def get_spreadsheet():
@@ -221,8 +224,28 @@ def get_ws(name, refresh=False):
     """ワークシートを毎回メタデータ取得せずに使い回す（高速化）。"""
     reg = _ws_registry()
     if refresh or name not in reg:
-        reg[name] = sheet.worksheet(name)
+        if refresh or _time.time() - reg.get("__listed_at__", 0) > 60:    # 一覧の取得は1分に1回まで
+            for w in sheet.worksheets(): reg[w.title] = w
+            reg["__listed_at__"] = _time.time()
+        if name not in reg: raise gspread.WorksheetNotFound(name)
     return reg[name]
+
+def get_or_create_ws(name, rows="500", cols="25"):
+    try:
+        return get_ws(name)
+    except gspread.WorksheetNotFound:
+        try: ws = sheet.add_worksheet(title=name, rows=rows, cols=cols)
+        except Exception: ws = get_ws(name, refresh=True)      # 他の人が先に作成していた場合
+        _ws_registry()[name] = ws
+        return ws
+
+def _reset_connection():
+    """通信が続けて失敗したとき、Googleとの接続を作り直す（長時間稼働後の接続切れ対策）。"""
+    try:
+        get_spreadsheet.clear(); get_client.clear(); _ws_registry().clear()
+        globals()["sheet"] = get_spreadsheet()
+    except Exception:
+        pass
 
 SHEET_COLS = {
         "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
@@ -249,15 +272,16 @@ _LOAD_WARNINGS = st.session_state.setdefault("_load_warnings", {})
 def _fetch_all_raw():
     """全シートを1回のAPI呼び出しでまとめて取得（従来は9シート×複数回）。失敗時は例外（キャッシュされない）。"""
     last_err = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
-            titles = {w.title: w for w in sheet.worksheets()}
-            reg = _ws_registry(); reg.update(titles)
-            for name, tc in SHEET_COLS.items():
-                if name not in titles:
-                    ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
-                    ws.update(values=[tc,["ヤマト運輸"],["佐川急便"],["自社配送"]] if name=="shipping_master" else [tc], range_name="A1")
-                    reg[name] = ws
+            reg = _ws_registry()
+            if any(n not in reg for n in SHEET_COLS):          # 必要なシートが未確認のときだけ一覧を取得
+                titles = {w.title: w for w in sheet.worksheets()}; reg.update(titles)
+                for name, tc in SHEET_COLS.items():
+                    if name not in titles:
+                        ws = sheet.add_worksheet(title=name, rows="1000", cols="30")
+                        ws.update(values=[tc,["ヤマト運輸"],["佐川急便"],["自社配送"]] if name=="shipping_master" else [tc], range_name="A1")
+                        reg[name] = ws
             names = list(SHEET_COLS.keys())
             res = sheet.values_batch_get(ranges=[f"'{n}'" for n in names])
             vrs = res.get("valueRanges", [])
@@ -269,7 +293,11 @@ def _fetch_all_raw():
             if len(out) != len(names): raise RuntimeError("シートの一括取得結果が不完全です")
             return out
         except Exception as e:
-            last_err = e; _time.sleep(1.5 * (attempt + 1))
+            last_err = e
+            try: _ws_registry().clear()
+            except Exception: pass
+            if attempt >= 1: _reset_connection()
+            if attempt < 3: _time.sleep(2 * (2 ** attempt))      # 2秒→4秒→8秒
     raise last_err
 
 def load_data(name):
@@ -334,11 +362,12 @@ def audit_log(op, name, rows):
     """登録・削除の記録を audit_log シートに残す（画面を待たせないよう裏で書き込む）。失敗しても本処理には影響しない。"""
     try:
         if not rows: return
-        ws = _audit_ws(create=True)
+        ws = _audit_ws(create=True); _lk = get_write_lock()
         now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
         vals = [[now, op, name, str(r.get("ID", "")), json.dumps(r, ensure_ascii=False, default=str)] for r in rows]
         def _w():
-            try: ws.append_rows(vals, value_input_option="RAW")
+            try:
+                with _lk: ws.append_rows(vals, value_input_option="RAW")
             except Exception: pass
         threading.Thread(target=_w, daemon=True).start()
     except Exception:
@@ -496,11 +525,12 @@ def save_sync(name, df):
             ws = get_ws(name)
             # 保存直前に最新のシートを必ず確認する（確認できない場合は上書きせず中止＝消失防止）
             _remote_data = None
-            for _try in range(3):
+            for _try in range(4):
                 try:
                     _remote_data = ws.get_all_values(); break
                 except Exception:
-                    _time.sleep(1.0 * (_try + 1))
+                    if _try >= 1: _reset_connection(); ws = get_ws(name)
+                    if _try < 3: _time.sleep(2 * (2 ** _try))
             if _remote_data is None:
                 return _save_fail("⚠️ 保存前のシート確認に失敗しました。データ保護のため保存を中止しました。少し待ってからもう一度お試しください。")
 
@@ -586,7 +616,7 @@ def app_sync(name, nr, fatal=True):
     if nr.empty: return False
     rid = str(nr["ID"].iloc[0]) if "ID" in nr.columns else None
     last_err = None; written = False; rowdict = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             with get_write_lock():
                 ws = get_ws(name)
@@ -619,7 +649,8 @@ def app_sync(name, nr, fatal=True):
             last_err = e
             try: get_ws(name, refresh=True)
             except Exception: pass
-            _time.sleep(1.0 * (attempt + 1))
+            if attempt >= 1: _reset_connection()
+            if attempt < 3: _time.sleep(2 * (2 ** attempt))
     if not written and not fatal:
         return False
     if not written:
@@ -639,9 +670,28 @@ def app_sync(name, nr, fatal=True):
     return True
 
 _ALL_SHEETS = ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]
+
+def reload_all(force=False):
+    """最新のシートで画面データを入れ替える。force=True は共有キャッシュを捨てて必ず取り直す。
+    通信に失敗した場合は、今の画面データをそのまま残して作業を止めず、約1分後に自動で再試行する。"""
+    try:
+        if force: st.cache_data.clear()
+        raw = _fetch_all_raw()
+    except Exception:
+        st.session_state["_loaded_ts"] = _time.time() - 120
+        st.session_state["_reload_failed"] = True
+        return False
+    _LOAD_WARNINGS.clear()
+    for _s in _ALL_SHEETS:
+        _d = _parse_sheet(_s, raw.get(_s, []))
+        st.session_state[f"{_s}_df"] = _d
+        st.session_state[f"{_s}_known_ids"] = set(_d["ID"].astype(str).tolist()) if isinstance(_d, pd.DataFrame) and "ID" in _d.columns else set()
+    st.session_state["_loaded_at"] = datetime.now(JST).strftime("%H:%M:%S")
+    st.session_state["_loaded_ts"] = _time.time()
+    return True
+
 if "_loaded_ts" in st.session_state and _time.time() - st.session_state["_loaded_ts"] > 180:
-    for _s in _ALL_SHEETS: st.session_state.pop(f"{_s}_df", None)
-    st.cache_data.clear(); _LOAD_WARNINGS.clear()
+    reload_all()
 if any(f"{_s}_df" not in st.session_state for _s in _ALL_SHEETS):
     try:
         _fetch_all_raw()
@@ -673,20 +723,10 @@ def flash(type_, msg):
 _left = st.session_state.pop("_save_failed_msg", None)
 if _left: st.session_state["_app_err"] = f"🚨 {_left}"
 
-def force_reload():
-    for _s in _ALL_SHEETS: st.session_state.pop(f"{_s}_df", None)
-    st.cache_data.clear(); _LOAD_WARNINGS.clear()
-
-def auto_refresh(max_age=180):
-    """操作のたびに、読込から一定時間（既定3分）たっていれば最新のシートを読み直す。
-    登録画面を開きっぱなしでも、他の人の登録が見えない・古い在庫で判断してしまう問題を防ぐ。"""
-    if _time.time() - st.session_state.get("_loaded_ts", 0) > max_age:
-        force_reload()
-
 def refresh_if_stale(max_age=45):
     """画面移動のとき、読込から一定時間が過ぎていたら最新のシートを読み直す（他の端末・他の人の登録が見えない問題の対策）。"""
     if _time.time() - st.session_state.get("_loaded_ts", 0) > max_age:
-        force_reload()
+        reload_all()
 
 def show_flash_inline(placeholder=None):
     f = st.session_state.get("_flash")
@@ -1056,13 +1096,8 @@ with st.sidebar:
     st.markdown("<div style='height:1px; background:rgba(255,255,255,0.1); margin:14px 0 10px;'></div>", unsafe_allow_html=True)
     st.caption(f"🕒 最終読込: {st.session_state.get('_loaded_at','-')}")
     if st.button("🔄 スプレッドシートを再読込", use_container_width=True, help="Googleスプレッドシートを直接編集した場合など、最新データを読み込み直します"):
-        for _s in ["orders","manufactures","master","customers","packaging_master",
-                   "packaging_logs","shipping_master","special_schedule","order_purchases"]:
-            st.session_state.pop(f"{_s}_df", None)
-        st.cache_data.clear(); _LOAD_WARNINGS.clear()
-        st.session_state._flash = {"type": "success", "msg": "✅ スプレッドシートから最新データを再読込しました。"}
-        st.session_state["_loaded_at"] = datetime.now(JST).strftime("%H:%M:%S")
-        st.session_state["_loaded_ts"] = _time.time()
+        if reload_all(force=True): flash("success", "✅ スプレッドシートから最新データを再読込しました。")
+        else: flash("error", "⚠️ 再読込に失敗しました（通信が混み合っている可能性）。直前の内容を表示しています。少し待ってからもう一度お試しください。")
         st.rerun()
 
 pg = st.session_state.current_page
@@ -1070,6 +1105,8 @@ hc = {"📋 受注登録": "#1E3A8A, #3B82F6", "🏭 製造登録": "#064E3B, #1
 def page_header(t):
     _e = st.session_state.pop("_app_err", None)
     if _e: st.error(_e)
+    if st.session_state.pop("_reload_failed", False):
+        st.warning("⚠️ 最新データの取得に失敗したため、直前の内容を表示しています（自動で再試行します）。")
     st.markdown(f'<div class="page-header" style="background:linear-gradient(135deg,{hc.get(t,"#1E3A8A, #3B82F6")});"><h1>{t}</h1></div>', unsafe_allow_html=True)
 def sec(t): st.markdown(f'<div class="section-title">{t}</div>', unsafe_allow_html=True)
 
@@ -1273,7 +1310,7 @@ if pg == "📋 受注登録":
             if _not_shown:
                 st.warning(f"⚠️ シートには有るのに、この画面にはまだ表示されていない行が **{len(_not_shown)}件** あります（他の端末・他の人が登録した分）。下のボタンで読み込み直すと表示されます。")
                 if st.button("🔄 今すぐ最新を読み込む", key="chk_reload"):
-                    force_reload(); st.rerun()
+                    reload_all(force=True); st.rerun()
             else:
                 st.success("✅ シートの全行がこの画面に反映されています。")
 
@@ -1319,7 +1356,7 @@ if pg == "📋 受注登録":
                     for _i in _pick:
                         _row = _miss[_i][-1]["内容"]
                         app_sync(_ck_name, pd.DataFrame([{k: ("" if v is None else str(v)) for k, v in _row.items()}]))
-                    force_reload(); st.session_state.pop("_chk_res", None)
+                    reload_all(force=True); st.session_state.pop("_chk_res", None)
                     flash("success", f"♻️ {len(_pick)}件を復元しました。"); st.rerun()
             else:
                 st.caption("✅ 登録・削除の記録と照らして、シートから消えている行は見つかりませんでした。")
@@ -1379,7 +1416,7 @@ elif pg == "🚚 出荷・発送管理":
             _hc1, _hc2 = st.columns([3, 1])
             _hc1.markdown(f'<div style="font-size:13px;color:#64748B;line-height:1.7;">💡 <b>チェックはこの画面の中だけで操作でき、「保存」を押すまで通信しません</b>（何件チェックしても待たされません）。保存は<b>1回の通信でまとめて</b>登録します。登録順に表示します（列見出しで並べ替えできます）。20〜30件ごとに保存すると安全です。<br>🕒 この一覧の取得時刻：{_snap["at"]}</div>', unsafe_allow_html=True)
             if _hc2.button("🔄 一覧を最新にする", use_container_width=True, key=f"ship_snap_btn_{td}", help="他の人の消込や新しい受注を反映します。チェック中で未保存の分は消えるので、先に保存してください。"):
-                force_reload(); st.session_state["_ship_snap_refresh"] = str(td); st.rerun()
+                reload_all(force=True); st.session_state["_ship_snap_refresh"] = str(td); st.rerun()
 
             with st.form(f"ship_form_{td}", clear_on_submit=False):
                 _save_top = st.form_submit_button("💾 消込を保存（チェックの変更をまとめて登録）", type="primary", use_container_width=True)
@@ -1920,8 +1957,7 @@ elif pg == "📦 資材・入出庫":
             if st.session_state.get("_po_load_failed"):
                 return _save_fail("⚠️ 資材発注の読み込みに失敗していたため、データ保護のため保存を中止しました。ページを再読み込みしてからやり直してください。")
             try:
-                try: _wsp = get_ws("order_purchases")
-                except Exception: _wsp = sheet.add_worksheet(title="order_purchases", rows="500", cols="20")
+                _wsp = get_or_create_ws("order_purchases", "500", "20")
                 _ds = df.copy().fillna("").astype(str)
                 with get_write_lock():
                     _ok, _ = _overwrite_verified(_wsp, [_ds.columns.tolist()] + _ds.values.tolist())
@@ -2121,10 +2157,11 @@ elif pg == "📦 資材・入出庫":
 # ─────────────────────────────────────────────
 elif pg == "📑 登録一覧":
     page_header("📑 登録データ一覧・出力")
+    _all_rows = st.checkbox("全件表示（初期表示は最新500件。件数が多いと表示が遅くなります）", key="reg_list_all")
     tl1, tl2, tl3 = st.tabs(["📋 受注・出荷","🏭 製造","📦 資材"])
     with tl1:
         if not odf.empty:
-            eo = odf.sort_values("登録日時", ascending=False).copy(); eo["出荷日"] = eo["納品予定日"].apply(format_date_jp)
+            eo = odf.sort_values("登録日時", ascending=False); eo = (eo if _all_rows else eo.head(500)).copy(); eo["出荷日"] = eo["納品予定日"].apply(format_date_jp)
             def _zaiko_status(r):
                 try:
                     d = pd.Timestamp(str(r["納品予定日"])).normalize()
@@ -2135,7 +2172,7 @@ elif pg == "📑 登録一覧":
             st.dataframe(eo[["ID","出荷日","顧客名","製品名","ケース数","運送会社","備考","荷姿チェック","在庫状況","不良廃棄フラグ"]].style.apply(lambda r: ['background-color:#D1FAE5;']*len(r) if str(r.get("荷姿チェック")).upper()=="TRUE" else (['background-color:#FEE2E2;font-weight:bold;']*len(r) if "不足" in str(r.get("在庫状況","")) else ['']*len(r)), axis=1), hide_index=True, height=600)
     with tl2:
         if not mdf.empty:
-            em = mdf.sort_values("登録日時",ascending=False).copy(); em["製造日"] = em["製造予定日"].apply(format_date_jp)
+            em = mdf.sort_values("登録日時",ascending=False); em = (em if _all_rows else em.head(500)).copy(); em["製造日"] = em["製造予定日"].apply(format_date_jp)
             st.dataframe(em[["ID","製造日","製品名","ケース数","リパックフラグ","備考"]].style.apply(lambda r: ['background-color:#DBEAFE;font-weight:bold;']*len(r) if str(r.get("リパックフラグ")).upper()=="TRUE" else (['background-color:#F8FAFC;color:#64748B;']*len(r) if "【在庫非反映】" in str(r.get("備考","")) else ['']*len(r)), axis=1), hide_index=True, height=600)
     with tl3:
         if not pk_l.empty:
@@ -3492,8 +3529,7 @@ elif pg == "🏗️ 製造スケジューラー":
         if name in st.session_state.get("_sched_load_failed", set()):
             return _save_fail(f"⚠️ {name} の読み込みに失敗していたため、データ保護のため保存を中止しました。ページを再読み込みしてからやり直してください。")
         try:
-            try: ws = get_ws(name)
-            except Exception: ws = sheet.add_worksheet(title=name, rows="500", cols="25")
+            ws = get_or_create_ws(name, "500", "25")
             ds = df.copy().fillna("").astype(str)
             with get_write_lock():
                 _ok, _ = _overwrite_verified(ws, [ds.columns.tolist()] + ds.values.tolist())
