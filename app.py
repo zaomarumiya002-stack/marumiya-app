@@ -44,6 +44,9 @@ def new_id():
         i = uuid.uuid4().hex[:8].upper()
         if i not in used: return i
 
+def _content_sig(df):
+    return _sig(df.fillna("").astype(str).agg("|".join, axis=1).tolist()) if df is not None and not df.empty else "empty"
+
 def _sig(ids):
     """表示中の行IDから作る署名。表の中身が変わったら編集中の状態を引き継がないためのキーに使う。"""
     return hashlib.md5("|".join(map(str, ids)).encode("utf-8")).hexdigest()[:8]
@@ -420,6 +423,19 @@ def _to_sheet_strings(df):
             ds[col] = ds[col].fillna('').astype(str)
     return ds.replace(["nan", "None", "NaT", "NaN"], "")
 
+def _sheet_changed_since_load(name, remote_data):
+    """この画面が読み込んだ内容と、いまのシートの内容が違う（＝スプレッドシート上の直接編集や他の人の更新がある）か。"""
+    base = st.session_state.get(f"{name}_df")
+    if not isinstance(base, pd.DataFrame): return False
+    _had = name in _LOAD_WARNINGS
+    rem = _parse_sheet(name, remote_data)
+    if not _had: _LOAD_WARNINGS.pop(name, None)
+    cols = [c for c in rem.columns if c in base.columns]
+    if not cols or len(rem) != len(base): return bool(cols) and len(rem) != len(base)
+    a = _to_sheet_strings(rem[cols]).reset_index(drop=True).to_numpy().ravel()
+    b = _to_sheet_strings(base[cols]).reset_index(drop=True).to_numpy().ravel()
+    return any(_canon_cell(x) != _canon_cell(y) for x, y in zip(a, b))
+
 def _try_patch_save(name, df, ws, remote_data):
     """この画面が読み込んだ時点(baseline)から『変わった所だけ』をシートへ反映する。
     ・変更したセルだけ更新／新しい行は末尾に追加／削除した行だけ削除
@@ -549,7 +565,10 @@ def save_sync(name, df):
                     st.warning(f"⚠️ 保存後の確認で {_info['repaired']} 件の行が一時的に見当たらなくなったため、自動で復元しました。")
                 return True
 
-            # ② 従来方式（列の追加・IDなしのマスタ等）：他の人が新しく登録した行を保存内容に合流させて保護
+            # ② 従来方式（列の追加・IDなしのマスタ等）
+            if "ID" not in ds.columns and _sheet_changed_since_load(name, _remote_data):
+                return _save_fail(f"⚠️ {name} のシートが、この画面を開いた後に別の場所（スプレッドシート上の直接編集・他の人の更新）で変更されています。このまま保存すると消えてしまうため中止しました。サイドバーの『🔄 スプレッドシートを再読込』で最新を読み込み、もう一度変更してください。")
+            # 他の人が新しく登録した行を保存内容に合流させて保護
             _protected_new = 0
             if "ID" in ds.columns and len(_remote_data) > 1 and "ID" in _remote_data[0]:
                 _rh = _remote_data[0]
@@ -587,7 +606,7 @@ def save_sync(name, df):
             if _protected_new > 0:
                 st.session_state[f"{name}_df"] = _parse_sheet(name, _back)
             else:
-                st.session_state[f"{name}_df"] = df
+                st.session_state[f"{name}_df"] = _parse_sheet(name, _back)   # シートの実際の内容で画面を更新（次回の変更検知の基準にもなる）
             if "ID" in ds.columns: st.session_state[f"{name}_known_ids"] = set(ds["ID"].tolist())
         if _removed: audit_log("削除", name, _removed)
         if _protected_new > 0:
@@ -668,6 +687,16 @@ def app_sync(name, nr, fatal=True):
         st.session_state.pop(f"{name}_df", None)     # 次の描画でシートから読み直す（登録そのものは完了している）
     audit_log("登録", name, [rowdict])
     return True
+
+def cascade_rename(old, new):
+    """旧製品名で登録済みの受注・製造・資材ログ・特注スケジュールを、新しい名称へ書き換える。全て成功でTrue。"""
+    ok = True
+    for sh_name, col in (("orders", "製品名"), ("manufactures", "製品名"), ("packaging_logs", "関連製品名"), ("special_schedule", "製品名")):
+        d = st.session_state.get(f"{sh_name}_df")
+        if isinstance(d, pd.DataFrame) and not d.empty and col in d.columns and (d[col] == old).any():
+            d2 = d.copy(); d2.loc[d2[col] == old, col] = new
+            ok = bool(save_sync(sh_name, d2)) and ok
+    return ok
 
 _ALL_SHEETS = ["orders","manufactures","master","customers","packaging_master","packaging_logs","shipping_master","special_schedule","order_purchases"]
 
@@ -3221,18 +3250,7 @@ elif pg == "⚙️ マスタ・分析":
             if st.button(f"🔁「{_rn_old}」→「{_rn_new}」に一括変更する", type="primary", key="btn_rename_prod"):
                 _m2 = mst.copy(); _m2.loc[_m2["製品名"] == _rn_old, "製品名"] = _rn_new
                 save_sync("master", _m2)
-                if not odf.empty and (odf["製品名"] == _rn_old).any():
-                    _o2 = odf.copy(); _o2.loc[_o2["製品名"] == _rn_old, "製品名"] = _rn_new
-                    save_sync("orders", _o2)
-                if not mdf.empty and (mdf["製品名"] == _rn_old).any():
-                    _md2 = mdf.copy(); _md2.loc[_md2["製品名"] == _rn_old, "製品名"] = _rn_new
-                    save_sync("manufactures", _md2)
-                if not _pl_df.empty and "関連製品名" in _pl_df.columns and (_pl_df["関連製品名"] == _rn_old).any():
-                    _pl2 = _pl_df.copy(); _pl2.loc[_pl2["関連製品名"] == _rn_old, "関連製品名"] = _rn_new
-                    save_sync("packaging_logs", _pl2)
-                if not _ss_df.empty and "製品名" in _ss_df.columns and (_ss_df["製品名"] == _rn_old).any():
-                    _ss2 = _ss_df.copy(); _ss2.loc[_ss2["製品名"] == _rn_old, "製品名"] = _rn_new
-                    save_sync("special_schedule", _ss2)
+                cascade_rename(_rn_old, _rn_new)
                 flash("success", f"✅「{_rn_old}」を「{_rn_new}」に変更し、関連するすべてのデータを引き継ぎました。※「🏗️ 製造スケジューラー」内のOKM/重量換算マスタにこの製品を登録している場合は、そちらも合わせて名称を更新してください。")
                 st.rerun()
 
@@ -3277,7 +3295,7 @@ elif pg == "⚙️ マスタ・分析":
                 "段取りグループ": st.column_config.TextColumn("段取りG"),
                 "特注フラグ": st.column_config.CheckboxColumn("⭐ 特注品"),
                 "チャーターフラグ": st.column_config.CheckboxColumn("🚌 チャーター品"),
-            }, height=500, key="prod_mst_ed")
+            }, height=500, key=f"prod_mst_ed_{_content_sig(em_show)}")
         _m1_msg_area = st.container()
         if st.button("💾 製品マスタ保存", type="primary", key="btn_save_prod_mst"):
             try:
@@ -3285,7 +3303,8 @@ elif pg == "⚙️ マスタ・分析":
 
                 missing_cols = [c for c in mst.columns if c not in save_target.columns]
                 if not mst.empty and missing_cols:
-                    save_target = pd.merge(save_target, mst[["製品名"] + missing_cols], on="製品名", how="left")
+                    # 非表示の設定列（段取り・ライン・人員など）は行の位置で引き継ぐ（製品名で突き合わせると、名前を変えた行の設定が消えるため）
+                    save_target = pd.concat([save_target, mst[missing_cols].reindex(save_target.index)], axis=1)
                 for c in missing_cols:
                     if c not in save_target.columns:
                         save_target[c] = ""
@@ -3302,9 +3321,26 @@ elif pg == "⚙️ マスタ・分析":
                 save_target["製造登録区分"] = save_target["製造登録区分"].replace(["", None], "ケース")
                 save_target["大カテゴリ"] = save_target["大カテゴリ"].replace(["", None], "その他")
 
-                save_sync("master", save_target)
-                
-                flash("success", "✅ 製品マスタを保存しました。")
+                _dupnames = lambda d: set(d["製品名"].astype(str).str.strip()[d["製品名"].astype(str).str.strip().duplicated() & (d["製品名"].astype(str).str.strip() != "")])
+                _new_dups = _dupnames(save_target) - _dupnames(mst)
+                if _new_dups:
+                    flash("error", "⚠️ 同じ名前の製品が複数になるため保存しませんでした：" + "、".join(sorted(_new_dups)) + "（名前を重ならないよう直してから保存してください）")
+                    st.rerun()
+                _renames = []
+                for _i in em.index.intersection(em_show.index):
+                    _o, _n = str(em_show.at[_i, "製品名"]).strip(), str(em.at[_i, "製品名"]).strip()
+                    if _o and _n and _o != _n: _renames.append((_o, _n))
+
+                _saved = save_sync("master", save_target)
+                if _saved and _renames:
+                    _bad = [f"{o}→{n}" for o, n in _renames if not cascade_rename(o, n)]
+                    if _bad:
+                        st.session_state.pop("_save_failed_msg", None)
+                        flash("warning", "⚠️ 製品マスタは保存しましたが、受注・製造などの履歴の名称書き換えに一部失敗しました（" + "、".join(_bad) + "）。『マスタ未登録品』タブで旧名称を統合してください。")
+                    else:
+                        flash("success", f"✅ 製品マスタを保存しました（名称変更 {len(_renames)}件：受注・製造などの履歴も新しい名称に書き換えました）。")
+                else:
+                    flash("success", "✅ 製品マスタを保存しました。")
                 st.rerun()
             except Exception as e:
                 st.error(f"保存失敗: {e}")
@@ -3330,7 +3366,7 @@ elif pg == "⚙️ マスタ・分析":
                 "初期在庫": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
                 "発注点": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
                 "発注リードタイム": st.column_config.NumberColumn(min_value=1, step=1, format="%d"),
-            }, key="pack_mst_ed"
+            }, key=f"pack_mst_ed_{_content_sig(pk_m)}"
         )
         _m3_msg_area = st.container()
         if st.button("💾 資材マスタ保存", type="primary", key="btn_save_pack_mst"): 
@@ -3341,7 +3377,7 @@ elif pg == "⚙️ マスタ・分析":
             show_flash_inline()
 
     with tm4:
-        es = st.data_editor(sh_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key="ship_mst_ed")
+        es = st.data_editor(sh_m.copy(), num_rows="dynamic", use_container_width=True, hide_index=True, key=f"ship_mst_ed_{_content_sig(sh_m)}")
         _m4_msg_area = st.container()
         if st.button("💾 運送会社保存", type="primary", key="btn_save_ship_mst"): save_sync("shipping_master", es); flash("success", "✅ 運送会社マスタを保存しました。"); st.rerun()
         with _m4_msg_area:
