@@ -2996,7 +2996,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
 # ─────────────────────────────────────────────
 elif pg == "📈 経営・分析ダッシュボード":
     page_header("📈 経営・製造管理 ダッシュボード")
-    td1,td2,td3,td4,td5 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド","🗑️ 廃盤検討"])
+    td1,td2,td3,td4,td5,td6 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド","🗑️ 廃盤検討","👥 顧客分析"])
     with td1:
         if not odf.empty:
             tm = jst_today().replace(day=1); om = odf[(safe_dt_date(odf["納品予定日"])>=tm)&(odf["不良廃棄フラグ"]==False)]
@@ -3198,6 +3198,119 @@ elif pg == "📈 経営・分析ダッシュボード":
                 if not _new_df.empty:
                     with st.expander(f"🆕 新製品として対象外にした品目（{len(_new_df)}品目）"):
                         st.dataframe(_new_df[["製品名","初回出荷日","直近出荷日"]], hide_index=True, use_container_width=True)
+
+
+    with td6:
+        try:
+            _src = exclude_adjust(odf) if not odf.empty else odf
+            if _src.empty:
+                st.info("受注（出荷）データがありません。")
+            else:
+                _today = pd.Timestamp(jst_today())
+                _o = _src[(_src["不良廃棄フラグ"] == False) & (_src["日付未定フラグ"] == False)].copy()
+                _o["日付"] = pd.to_datetime(_o["納品予定日"], errors="coerce").dt.normalize()
+                _o["数量"] = _o["ケース数"].apply(to_int)
+                _o = _o[_o["日付"].notna() & (_o["数量"] > 0) & (~_o["顧客名"].astype(str).str.strip().isin(["", "未指定"]))]
+                _tori = sorted([t for t in _tori_key(cdf).unique().tolist() if t], key=len, reverse=True) if not cdf.empty else []
+                def _to_tori(n):
+                    n = str(n).strip()
+                    for t in _tori:
+                        if n == t or n.startswith((t + " ", t + "　")): return t
+                    return re.split(r"[ 　]", n, maxsplit=1)[0]
+                _by = st.radio("集計単位", ["帳合先ごと", "支店ごと（細かく）"], horizontal=True, key="cs_unit")
+                _o["顧客"] = _o["顧客名"].map(_to_tori) if _by == "帳合先ごと" else _o["顧客名"].astype(str).str.strip()
+                _past = _o[_o["日付"] <= _today]
+                _p12 = _past[_past["日付"] > _today - pd.DateOffset(months=12)]
+                st.caption("直近12か月の出荷実績から集計しています。数量は各製品の登録単位です（甲数管理の製品は甲）。")
+                if _p12.empty:
+                    st.info("直近12か月の出荷データがありません。")
+                else:
+                    _spec = set()
+                    if not mst.empty:
+                        for _fc in ("特注フラグ", "チャーターフラグ"):
+                            if _fc in mst.columns: _spec |= set(mst[mst[_fc].astype(str).str.upper().isin(["TRUE", "1"])]["製品名"])
+                    c1, c2, c3 = st.tabs(["🔁 注文サイクル（製造・在庫）", "🎯 営業（減少・クロスセル）", "📉 製品の見直し"])
+
+                    # ── ① 注文サイクル：次に注文が来そうな顧客×製品 ──
+                    with c1:
+                        _d = _p12.groupby(["顧客", "製品名", "日付"], as_index=False)["数量"].sum()
+                        _rows = []
+                        _future = set(map(tuple, _o[_o["日付"] > _today][["顧客", "製品名"]].drop_duplicates().to_numpy()))
+                        for (_c, _p), g in _d.groupby(["顧客", "製品名"]):
+                            if len(g) < 3: continue
+                            ds = g["日付"].sort_values().tolist()
+                            gap = float(np.mean(np.diff([x.value for x in ds]) / 86400e9))
+                            if gap <= 0: continue
+                            nxt = ds[-1] + pd.Timedelta(days=int(round(gap)))
+                            late = (_today - nxt).days
+                            if (_c, _p) in _future: stt = "✅ 注文済み"
+                            elif late > max(3, 0.5 * gap): stt = "⚠️ 間隔が空いている"
+                            elif nxt <= _today + pd.Timedelta(days=7): stt = "⏰ 7日以内に注文見込み"
+                            else: stt = ""
+                            _rows.append({"顧客": _c, "製品名": _p, "注文回数": len(ds), "平均間隔(日)": int(round(gap)), "平均数量": int(round(g["数量"].mean())),
+                                          "最終注文日": ds[-1], "次回予測日": nxt, "状態": stt})
+                        if not _rows:
+                            st.info("注文が3回以上ある顧客×製品がまだありません。")
+                        else:
+                            _cy = pd.DataFrame(_rows).sort_values("次回予測日")
+                            _soon = _cy[_cy["状態"] == "⏰ 7日以内に注文見込み"]
+                            st.markdown("##### ⏰ 7日以内に注文が見込まれる製品（製造の目安）")
+                            if _soon.empty:
+                                st.caption("該当はありません。")
+                            else:
+                                _pp = _soon.groupby("製品名").agg(見込み顧客数=("顧客", "nunique"), 見込み数量=("平均数量", "sum")).reset_index()
+                                _pp["現在庫"] = _pp["製品名"].map(lambda p: cur_stock(p))
+                                _pp["単位"] = _pp["製品名"].map(unit_long)
+                                st.dataframe(_pp.sort_values("見込み数量", ascending=False), hide_index=True, use_container_width=True)
+                            st.markdown("##### 🔁 顧客×製品ごとの注文サイクル")
+                            _only = st.checkbox("近日に注文が見込まれる／間隔が空いているものだけ表示", value=True, key="cs_cycle_only")
+                            _show = _cy[_cy["状態"].isin(["⏰ 7日以内に注文見込み", "⚠️ 間隔が空いている"])] if _only else _cy
+                            _show = _show.copy()
+                            _show["最終注文日"] = _show["最終注文日"].map(format_date_jp); _show["次回予測日"] = _show["次回予測日"].map(format_date_jp)
+                            st.dataframe(_show, hide_index=True, use_container_width=True, height=min(520, 48 + 36 * max(3, len(_show))))
+                            st.caption("次回予測日＝最終注文日＋平均間隔。注文が3回以上ある組み合わせだけを対象にしています。")
+
+                    # ── ② 営業：出荷が減っている顧客／主力製品の未購入顧客 ──
+                    with c2:
+                        _rec = _past[_past["日付"] > _today - pd.DateOffset(months=3)]
+                        _pri = _past[(_past["日付"] <= _today - pd.DateOffset(months=3)) & (_past["日付"] > _today - pd.DateOffset(months=6))]
+                        _cu = pd.DataFrame({"前3か月": _pri.groupby("顧客")["数量"].sum(), "直近3か月": _rec.groupby("顧客")["数量"].sum()}).fillna(0).astype(int)
+                        _cu["最終注文日"] = _past.groupby("顧客")["日付"].max()
+                        _cu = _cu[(_cu["前3か月"] >= 5)].copy()
+                        _cu["増減率(%)"] = ((_cu["直近3か月"] - _cu["前3か月"]) / _cu["前3か月"] * 100).round(0).astype(int)
+                        _dn = _cu[_cu["増減率(%)"] <= -30].sort_values("増減率(%)").reset_index()
+                        st.markdown("##### 📉 出荷が減っている顧客（前3か月より30%以上減）")
+                        if _dn.empty: st.caption("該当はありません。")
+                        else:
+                            _dn["最終注文日"] = _dn["最終注文日"].map(format_date_jp)
+                            st.dataframe(_dn[["顧客", "前3か月", "直近3か月", "増減率(%)", "最終注文日"]].head(20), hide_index=True, use_container_width=True)
+                        st.markdown("##### 🎯 主力製品をまだ買っていない顧客（クロスセル候補）")
+                        _main = _p12[~_p12["製品名"].isin(_spec)].groupby("製品名")["数量"].sum().nlargest(5).index.tolist()
+                        _active = set(_rec["顧客"])
+                        _xr = []
+                        for p in _main:
+                            buyers = set(_p12[_p12["製品名"] == p]["顧客"]); miss = sorted(_active - buyers)
+                            _xr.append({"主力製品": p, "取引顧客数": len(buyers), "未購入の顧客数": len(miss),
+                                        "未購入の顧客": "、".join(miss[:10]) + (f" ほか{len(miss)-10}社" if len(miss) > 10 else "")})
+                        st.dataframe(pd.DataFrame(_xr), hide_index=True, use_container_width=True)
+                        st.caption("主力製品＝直近12か月の出荷量が多い上位5製品（特注・チャーター品は除く）／対象の顧客＝直近3か月に注文がある顧客。")
+
+                    # ── ③ 製品の見直し：1社にしか出ていない製品 ──
+                    with c3:
+                        _g = _p12.groupby("製品名").agg(取引顧客数=("顧客", "nunique"), 出荷量=("数量", "sum"), 注文日数=("日付", "nunique")).reset_index()
+                        _top = _p12.groupby(["製品名", "顧客"])["数量"].sum().reset_index().sort_values("数量", ascending=False).drop_duplicates("製品名").set_index("製品名")["顧客"]
+                        _g["主な顧客"] = _g["製品名"].map(_top)
+                        _g["1回あたり"] = (_g["出荷量"] / _g["注文日数"]).round(0).astype(int)
+                        _low = _g["出荷量"].quantile(0.25)
+                        _one = _g[(_g["取引顧客数"] == 1) & (~_g["製品名"].isin(_spec))].copy()
+                        _one["判断の目安"] = _one["出荷量"].map(lambda v: "🔻 1社のみ・少量" if v <= _low else "1社のみ")
+                        st.markdown("##### 📉 1社にしか出ていない製品（直近12か月）")
+                        if _one.empty: st.caption("該当はありません。")
+                        else:
+                            st.dataframe(_one.sort_values("出荷量")[["製品名", "主な顧客", "出荷量", "注文日数", "1回あたり", "判断の目安"]], hide_index=True, use_container_width=True, height=min(520, 48 + 36 * max(3, len(_one))))
+                            st.caption(f"「少量」＝全製品の出荷量の下位25%（{int(_low):,}以下）。特注・チャーター品は除いています。価格交渉・廃番の判断材料にしてください。")
+        except Exception as _e:
+            st.error(f"顧客分析の集計でエラーが発生しました: {_e}")
 
 # ─────────────────────────────────────────────
 # ⚙️ マスタ・分析
