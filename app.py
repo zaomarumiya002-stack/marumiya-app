@@ -251,7 +251,7 @@ def _reset_connection():
         pass
 
 SHEET_COLS = {
-        "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時"],
+        "orders":       ["ID","納品予定日","顧客名","大カテゴリ","製品名","ケース数","運送会社","備考","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","不良廃棄フラグ","日付未定フラグ","登録日時","ロット"],
         "manufactures": ["ID","製造予定日","大カテゴリ","製品名","ケース数","リパックフラグ","備考","登録日時"],
         "master":       ["大カテゴリ","製品名","初期在庫数",
                          "使用資材名","製造登録区分","入数","甲消費数","製造リードタイム日",
@@ -445,7 +445,14 @@ def _try_patch_save(name, df, ws, remote_data):
     if not isinstance(base, pd.DataFrame) or "ID" not in df.columns or "ID" not in base.columns: return None
     if len(remote_data) < 2 or "ID" not in remote_data[0]: return None
     rh = remote_data[0]
-    if any(c not in rh for c in df.columns): return None          # 列が増える（移行）ときは従来方式
+    _new_cols = [c for c in df.columns if c not in rh]
+    if _new_cols:
+        if any(c not in ("ロット",) for c in _new_cols): return None    # それ以外の列が増える（移行）ときは従来方式
+        from gspread.utils import rowcol_to_a1 as _a1
+        need = len(rh) + len(_new_cols)
+        if getattr(ws, "col_count", need) < need: ws.add_cols(need - ws.col_count)
+        ws.update(values=[_new_cols], range_name=_a1(1, len(rh) + 1))
+        rh = list(rh) + _new_cols
     new_s = _to_sheet_strings(df).reset_index(drop=True); base_s = _to_sheet_strings(base).reset_index(drop=True)
     nid = new_s["ID"].astype(str).str.strip(); bid = base_s["ID"].astype(str).str.strip()
     nv = nid[nid != ""]; bv = bid[bid != ""]
@@ -1093,6 +1100,35 @@ for pn, d in p_sum.items():
             elif d.get("在庫日数", 999) > 30 and mu > 0: d["アラート色"] = "#EFF6FF"
             else: d["アラート色"] = "#F0FDF4"
 
+def ship_changes(before, after):
+    """消込・賞味期限1〜3・ロットの変更点を {ID: {列: 新しい値}} で返す。"""
+    isna = lambda v: v is None or (not isinstance(v, str) and pd.isna(v))
+    nd = lambda v: None if isna(v) else pd.Timestamp(v).date()
+    nl = lambda v: "" if isna(v) else str(v).strip()
+    out = {}
+    for pos in before.index:
+        rb, ra = before.loc[pos], after.loc[pos]; ch = {}
+        if bool(ra["消込"]) != bool(rb["消込"]): ch["消込"] = bool(ra["消込"])
+        for c in ("賞味期限1", "賞味期限2", "賞味期限3"):
+            if nd(ra[c]) != nd(rb[c]): ch[c] = nd(ra[c])
+        if nl(ra["ロット"]) != nl(rb["ロット"]): ch["ロット"] = nl(ra["ロット"])
+        if ch: out[str(rb["ID"])] = ch
+    return out
+
+def apply_ship_changes(df, changes):
+    u = df.copy()
+    for c in ("賞味期限1", "賞味期限2", "賞味期限3"):
+        if c in u.columns: u[c] = u[c].astype(object)
+    if "ロット" not in u.columns: u["ロット"] = ""
+    u["荷姿チェック"] = u["荷姿チェック"].astype(bool)
+    for rid, ch in changes.items():
+        m = u["ID"].astype(str) == rid
+        for c, v in ch.items():
+            if c == "消込": u.loc[m, "荷姿チェック"] = v
+            elif c == "ロット": u.loc[m, "ロット"] = v
+            else: u.loc[m, c] = v.strftime("%Y-%m-%d") if v else ""
+    return u
+
 def exclude_adjust(df):
     """在庫調整（－）・棚卸確定で作られる受注行は実際の出荷ではないため、出荷一覧・件数・CSVから除く。"""
     if df is None or df.empty: return df
@@ -1292,7 +1328,7 @@ if pg == "📋 受注登録":
             sv["納品予定日"] = pd.to_datetime(sv["出荷予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
             sv = sv.drop(columns=[c for c in ["出荷予定日(表示)","登録日時(表示)"] if c in sv.columns])
             _o_ids = do.head(_odf_limit)["ID"].tolist()
-            _o_ref = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
+            _o_ref = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時","ロット"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
             save_sync("orders", pd.concat([odf[~odf["ID"].isin(_o_ids)], pd.merge(sv, _o_ref, on="ID", how="left")], ignore_index=True))
             flash("success", "✅ 受注データを保存しました。"); st.rerun()
         with _o_save_msg_area:
@@ -1308,7 +1344,7 @@ if pg == "📋 受注登録":
                 sva = ea_o.copy(); sva = sva[sva["ID"].notna() & (sva["ID"].astype(str).str.strip() != "")]
                 sva["納品予定日"] = pd.to_datetime(sva["出荷予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
                 sva = sva.drop(columns=[c for c in ["出荷予定日(表示)","登録日時(表示)"] if c in sva.columns])
-                _o_ref_all = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
+                _o_ref_all = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時","ロット"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
                 save_sync("orders", pd.merge(sva, _o_ref_all, on="ID", how="left"))
                 flash("success", "✅ 受注全データを保存しました。"); st.rerun()
             with _o_all_msg_area:
@@ -1434,16 +1470,20 @@ elif pg == "🚚 出荷・発送管理":
             _snap_k = f"ship_snap_{td}"
             if st.session_state.pop("_ship_snap_refresh", None) == str(td) or _snap_k not in st.session_state:
                 _sd = d_ord.copy()
-                for _c in ["運送会社", "発送備考", "顧客名", "製品名"]:
+                for _c in ["運送会社", "発送備考", "顧客名", "製品名", "備考", "ロット"]:
                     if _c not in _sd.columns: _sd[_c] = ""
                     _sd[_c] = _sd[_c].fillna("").astype(str)
                 _sd = _sd.reset_index(drop=True)   # 登録順のまま（並べ替えは列見出しで任意に）
                 _sd["消込"] = _sd["荷姿チェック"].astype(bool)
-                st.session_state[_snap_k] = {"df": _sd[["ID", "消込", "顧客名", "ケース数", "製品名", "運送会社", "発送備考"]].copy(),
+                _sd["登録日時(表示)"] = pd.to_datetime(_sd["登録日時"], errors="coerce").dt.strftime("%Y/%m/%d %H:%M").fillna("")
+                for _c in ("賞味期限1", "賞味期限2", "賞味期限3"):
+                    _dd = pd.to_datetime(_sd[_c], errors="coerce") if _c in _sd.columns else pd.Series(pd.NaT, index=_sd.index)
+                    _sd[_c] = [x.date() if pd.notna(x) else None for x in _dd]
+                st.session_state[_snap_k] = {"df": _sd[["ID", "消込", "顧客名", "ケース数", "製品名", "運送会社", "備考", "登録日時(表示)", "賞味期限1", "賞味期限2", "賞味期限3", "ロット", "発送備考"]].copy(),
                                              "at": datetime.now(JST).strftime("%H:%M:%S")}
             _snap = st.session_state[_snap_k]
             _hc1, _hc2 = st.columns([3, 1])
-            _hc1.markdown(f'<div style="font-size:13px;color:#64748B;line-height:1.7;">💡 <b>チェックはこの画面の中だけで操作でき、「保存」を押すまで通信しません</b>（何件チェックしても待たされません）。保存は<b>1回の通信でまとめて</b>登録します。登録順に表示します（列見出しで並べ替えできます）。20〜30件ごとに保存すると安全です。<br>🕒 この一覧の取得時刻：{_snap["at"]}</div>', unsafe_allow_html=True)
+            _hc1.markdown(f'<div style="font-size:13px;color:#64748B;line-height:1.7;">💡 <b>チェックはこの画面の中だけで操作でき、「保存」を押すまで通信しません</b>（何件チェックしても待たされません）。保存は<b>1回の通信でまとめて</b>登録します。登録順に表示します（列見出しで並べ替えできます）。20〜30件ごとに保存すると安全です。<br>賞味期限は日付のセルをクリックするとカレンダーが開きます（4・5個目は下の編集欄）。ロットはセルに直接入力します。<br>🕒 この一覧の取得時刻：{_snap["at"]}</div>', unsafe_allow_html=True)
             if _hc2.button("🔄 一覧を最新にする", use_container_width=True, key=f"ship_snap_btn_{td}", help="他の人の消込や新しい受注を反映します。チェック中で未保存の分は消えるので、先に保存してください。"):
                 reload_all(force=True); st.session_state["_ship_snap_refresh"] = str(td); st.rerun()
 
@@ -1451,25 +1491,27 @@ elif pg == "🚚 出荷・発送管理":
                 _save_top = st.form_submit_button("💾 消込を保存（チェックの変更をまとめて登録）", type="primary", use_container_width=True)
                 _h = int(min(720, 46 + 38 * max(3, len(_snap["df"]))))
                 _ed_chk = st.data_editor(_snap["df"], key=f"ship_chk_{td}_{_snap['at']}", hide_index=True, use_container_width=True, height=_h,
-                                         disabled=["ID", "運送会社", "顧客名", "製品名", "ケース数", "発送備考"],
+                                         disabled=["ID", "運送会社", "顧客名", "製品名", "ケース数", "備考", "登録日時(表示)", "発送備考"],
                                          column_config={"ID": None, "消込": st.column_config.CheckboxColumn("消込✅", help="出荷準備ができたらチェック", width="small"),
-                                                        "ケース数": st.column_config.NumberColumn("数量", width="small")})
+                                                        "ケース数": st.column_config.NumberColumn("数量", width="small"),
+                                                        "備考": st.column_config.TextColumn("備考（登録時）", width="medium"),
+                                                        "登録日時(表示)": st.column_config.TextColumn("登録日時", width="small"),
+                                                        "賞味期限1": st.column_config.DateColumn("賞味期限1", format="YYYY-MM-DD", width="small"),
+                                                        "賞味期限2": st.column_config.DateColumn("賞味期限2", format="YYYY-MM-DD", width="small"),
+                                                        "賞味期限3": st.column_config.DateColumn("賞味期限3", format="YYYY-MM-DD", width="small"),
+                                                        "ロット": st.column_config.TextColumn("ロット", width="small")})
                 _save_bottom = st.form_submit_button("💾 消込を保存（一覧の下から保存）", type="primary", use_container_width=True)
             if _save_top or _save_bottom:
-                _before = _snap["df"].set_index("ID")["消込"].astype(bool)
-                _after = _ed_chk.set_index("ID")["消込"].astype(bool)
-                _to_true = [i for i in _after.index if bool(_after[i]) and not bool(_before.get(i, False))]
-                _to_false = [i for i in _after.index if (not bool(_after[i])) and bool(_before.get(i, False))]
-                if not _to_true and not _to_false:
-                    flash("info", "ℹ️ チェックの変更はありません。")
+                _chg = ship_changes(_snap["df"], _ed_chk)
+                if not _chg:
+                    flash("info", "ℹ️ 変更はありません。")
                     st.rerun()
-                _u = odf.copy()
-                _u["荷姿チェック"] = _u["荷姿チェック"].astype(bool)
-                _u.loc[_u["ID"].isin(_to_true), "荷姿チェック"] = True
-                _u.loc[_u["ID"].isin(_to_false), "荷姿チェック"] = False
+                _u = apply_ship_changes(odf, _chg)
                 if save_sync("orders", _u):
                     st.session_state["_ship_snap_refresh"] = str(td)
-                    flash("success", f"✅ 消込を保存しました（消込 {len(_to_true)}件" + (f"／取消 {len(_to_false)}件" if _to_false else "") + "）")
+                    _n_on = sum(1 for v in _chg.values() if v.get("消込") is True); _n_off = sum(1 for v in _chg.values() if v.get("消込") is False)
+                    _n_ex = sum(1 for v in _chg.values() if any(k.startswith("賞味期限") for k in v)); _n_lot = sum(1 for v in _chg.values() if "ロット" in v)
+                    flash("success", "✅ 保存しました（" + "／".join(x for x in [f"消込 {_n_on}件" if _n_on else "", f"取消 {_n_off}件" if _n_off else "", f"賞味期限 {_n_ex}件" if _n_ex else "", f"ロット {_n_lot}件" if _n_lot else ""] if x) + "）")
                 else:
                     flash("success", "")   # 失敗表示へ変換される（チェックの入力内容は画面に残ります）
                 st.rerun()
@@ -1529,7 +1571,7 @@ elif pg == "🚚 出荷・発送管理":
                 if c in edf.columns: edf[c] = pd.to_datetime(edf[c],errors='coerce').apply(lambda x: x.strftime("%Y/%m/%d") if pd.notnull(x) else "")
             edf["荷姿チェック"] = edf["荷姿チェック"].map({True:"済",False:"未"}).fillna("")
             st.metric("対象件数", f"{len(edf)} 件")
-            _edf_out = edf[[c for c in ["納品予定日","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","備考"] if c in edf.columns]]
+            _edf_out = edf[[c for c in ["納品予定日","顧客名","製品名","ケース数","運送会社","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","ロット","発送備考","備考"] if c in edf.columns]]
             excel_or_csv_download(_edf_out, f"出荷データ_{es}_{ee}", sheet_name="出荷データ", key="ts3_dl", use_container_width=True, type_="primary")
 
 # ─────────────────────────────────────────────
