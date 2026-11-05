@@ -1334,9 +1334,15 @@ if pg == "📋 受注登録":
         with _o_save_msg_area:
             show_flash_inline()
         with st.expander("📂 全データ一括編集"):
-            _sig_oa = _sig(do["ID"].tolist())
-            ea_o = st.data_editor(do[["ID","登録日時(表示)","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key=f"ord_all_edit_{_sig_oa}")
-            _pend_oa = do[~do["ID"].isin(ea_o["ID"].dropna().tolist())]
+            _sc1, _sc2 = st.columns([2, 1])
+            _skey = _sc1.selectbox("並び替え", ["登録日時", "出荷予定日", "顧客名", "製品名", "数量", "運送会社"], key="ord_all_sort_col")
+            _sdir = _sc2.radio("順序", ["降順", "昇順"], horizontal=True, key="ord_all_sort_dir")
+            st.caption("並び替えを変えると、未保存の編集は消えます（先に保存してください）。")
+            _smap = {"登録日時": "登録日時", "出荷予定日": "納品予定日", "顧客名": "顧客名", "製品名": "製品名", "数量": "ケース数", "運送会社": "運送会社"}
+            do_all = do.sort_values(_smap[_skey], ascending=(_sdir == "昇順"), kind="stable", na_position="last")
+            _sig_oa = _sig(do_all["ID"].tolist())
+            ea_o = st.data_editor(do_all[["ID","登録日時(表示)","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key=f"ord_all_edit_{_sig_oa}")
+            _pend_oa = do_all[~do_all["ID"].isin(ea_o["ID"].dropna().tolist())]
             if not _pend_oa.empty:
                 st.warning(f"🗑️ 「💾 全データ保存」を押すと、{len(_pend_oa)}件の受注が**削除**されます：" + " ／ ".join(f"{r['顧客名']} {r['製品名']} {to_int(r['ケース数'])}" for _, r in _pend_oa.head(8).iterrows()) + (" ほか" if len(_pend_oa) > 8 else ""))
             _o_all_msg_area = st.container()
@@ -1727,9 +1733,15 @@ elif pg == "🏭 製造登録":
         with _mfg_save_msg_area:
             show_flash_inline()
         with st.expander("📂 全データ一括編集・削除"):
-            _sig_ma = _sig(dm["ID"].tolist())
-            ea_m = st.data_editor(dm[["ID","登録日時(表示)","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key=f"mfg_all_edit_{_sig_ma}")
-            _pend_ma = dm[~dm["ID"].isin(ea_m["ID"].dropna().tolist())]
+            _mc1, _mc2 = st.columns([2, 1])
+            _mkey = _mc1.selectbox("並び替え", ["登録日時", "製造予定日", "製品名", "数量"], key="mfg_all_sort_col")
+            _mdir = _mc2.radio("順序", ["降順", "昇順"], horizontal=True, key="mfg_all_sort_dir")
+            st.caption("並び替えを変えると、未保存の編集は消えます（先に保存してください）。")
+            _mmap = {"登録日時": "登録日時", "製造予定日": "製造予定日", "製品名": "製品名", "数量": "ケース数"}
+            dm_all = dm.sort_values(_mmap[_mkey], ascending=(_mdir == "昇順"), kind="stable", na_position="last")
+            _sig_ma = _sig(dm_all["ID"].tolist())
+            ea_m = st.data_editor(dm_all[["ID","登録日時(表示)","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key=f"mfg_all_edit_{_sig_ma}")
+            _pend_ma = dm_all[~dm_all["ID"].isin(ea_m["ID"].dropna().tolist())]
             if not _pend_ma.empty:
                 st.warning(f"🗑️ 「💾 全データ保存」を押すと、{len(_pend_ma)}件の製造記録が**削除**されます。")
             _mfg_all_msg_area = st.container()
@@ -2935,7 +2947,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
         if has_t and has_c: return "特注+チャーター便"
         if has_c: return "チャーター便"
         return "特注"
-    ts1, ts2, ts3, ts4 = st.tabs(["📋 一覧","📅 製品別スケジュール","✏️ 編集・保存","🗓️ 週間スケジュール"])
+    ts1, ts2, ts3, ts4 = st.tabs(["📋 一覧","📅 製品別スケジュール","✏️ 編集・保存","🗓️ 月間スケジュール"])
     def _stock_status(pn, d):
         if pd.isnull(d): return "―"
         v = fs.get(pn, {}).get(pd.Timestamp(d).normalize(), 0)
@@ -2987,34 +2999,74 @@ elif pg == "⭐ 特注・チャータースケジュール":
                 st.dataframe(fsp[sc2].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
                 excel_or_csv_download(fsp[sc2], f"製品別特注チャータースケジュール_{jst_today()}", sheet_name="製品別スケジュール", key="ts2_csv_dl")
     with ts4:
-        st.markdown('<div class="info-tip">💡 1週間分の特注・チャーター便を、曜日順の一覧で確認できます。製品名は省略せずフルで表示しています。</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 1か月分の特注・チャーター便をカレンダーで表示します。各日に「顧客／製品／出荷数」が出ます（マウスを乗せると備考と在庫状況も見られます）。赤い予定は、出荷日時点で在庫が足りないものです。</div>', unsafe_allow_html=True)
         if spo.empty: st.info("なし")
         else:
+            from html import escape as _esc
+            import calendar as _cal
             spo["種別"] = spo.apply(_sp_kind, axis=1) if "種別" not in spo.columns else spo["種別"]
-            wcol1, wcol2 = st.columns(2)
-            wk_start = wcol1.date_input("週の開始日", value=today.date() - timedelta(days=today.weekday()), key="ts4_week_start")
+            st.session_state.setdefault("ts4_month", today.date().replace(day=1))
+            def _ts4_shift(n):
+                m_ = st.session_state["ts4_month"]; y_, mo_ = m_.year, m_.month + n
+                y_ += (mo_ - 1) // 12; mo_ = (mo_ - 1) % 12 + 1
+                st.session_state["ts4_month"] = date(y_, mo_, 1)
+            def _ts4_now(): st.session_state["ts4_month"] = today.date().replace(day=1)
+            _mo = st.session_state["ts4_month"]
+            n1, n2, n3, n4 = st.columns([1, 1, 1, 4])
+            n1.button("◀ 前月", on_click=_ts4_shift, args=(-1,), key="ts4_prev", use_container_width=True)
+            n2.button("今月", on_click=_ts4_now, key="ts4_today", use_container_width=True)
+            n3.button("次月 ▶", on_click=_ts4_shift, args=(1,), key="ts4_next", use_container_width=True)
+            n4.markdown(f"### {_mo.year}年{_mo.month}月")
             _cl4 = sorted(spo["顧客名"].astype(str).str.strip().replace("", np.nan).dropna().unique().tolist())
-            _sel_cust4 = wcol2.multiselect("👤 顧客で絞り込み（複数選択可・未選択＝全顧客）", options=_cl4, key="ts4_cust_filter")
-            wk_start_ts = pd.Timestamp(wk_start)
-            week_dates = [wk_start_ts + timedelta(days=i) for i in range(7)]
-            wspo = spo[(pd.to_datetime(spo["納品予定日"],errors='coerce')>=week_dates[0]) & (pd.to_datetime(spo["納品予定日"],errors='coerce')<=week_dates[-1])].copy()
-            if _sel_cust4:
-                wspo = wspo[wspo["顧客名"].astype(str).str.strip().isin(_sel_cust4)]
-            if wspo.empty:
-                st.info("この週は該当する特注・チャーター便はありません。")
+            f1, f2 = st.columns(2)
+            _show4 = f1.multiselect("👤 表示する顧客（未選択＝全顧客）", options=_cl4, key="ts4_cust_show")
+            _hide4 = f2.multiselect("🙈 非表示にする顧客", options=_cl4, key="ts4_cust_hide")
+            _first = pd.Timestamp(_mo); _last = pd.Timestamp(date(_mo.year, _mo.month, _cal.monthrange(_mo.year, _mo.month)[1]))
+            _dd = pd.to_datetime(spo["納品予定日"], errors="coerce").dt.normalize()
+            ms = spo[(_dd >= _first) & (_dd <= _last)].copy(); ms["日付"] = _dd[ms.index]
+            _cn = ms["顧客名"].astype(str).str.strip()
+            if _show4: ms = ms[_cn.isin(_show4)]
+            if _hide4: ms = ms[~ms["顧客名"].astype(str).str.strip().isin(_hide4)]
+            ms["在庫状況"] = ms.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1) if not ms.empty else []
+            ms["顧客名"] = ms["顧客名"].astype(str).str.strip()
+            _by_day = {}
+            for (_dt, _cu, _pr), g_ in ms.groupby(["日付", "顧客名", "製品名"], sort=True):
+                _by_day.setdefault(_dt, []).append({"顧客": _cu, "製品": _pr, "数": int(g_["ケース数"].sum()), "種別": g_["種別"].iloc[0],
+                                                    "備考": " / ".join(sorted({str(x).strip() for x in g_["備考"] if str(x).strip()})), "欠品": g_["在庫状況"].astype(str).str.contains("❌").any()})
+            _kcol = {"特注": ("#EDE9FE", "#7C3AED"), "チャーター便": ("#E0F2FE", "#0284C7"), "特注+チャーター便": ("#F3E8FF", "#A855F7")}
+            _wd = ["日", "月", "火", "水", "木", "金", "土"]
+            _css = ("<style>.tsc{width:100%;border-collapse:collapse;table-layout:fixed}.tsc th{padding:6px;font-size:13px;border:1px solid rgba(128,128,128,.35);text-align:center}"
+                    ".tsc td{vertical-align:top;height:118px;padding:4px;border:1px solid rgba(128,128,128,.35);font-size:12px;line-height:1.35;overflow:hidden}"
+                    ".tsc .dn{font-weight:700;font-size:13px;margin-bottom:3px}.tsc .out{opacity:.35}.tsc .today{outline:3px solid #F59E0B;outline-offset:-3px}"
+                    ".tsc .e{border-left:4px solid;border-radius:4px;padding:2px 5px;margin-bottom:3px;color:#1F2937;word-break:break-all}.tsc .e .c{font-weight:700}.tsc .e .q{font-weight:700;margin-left:4px}</style>")
+            _html = [_css, '<table class="tsc"><tr>' + "".join(f'<th style="color:{"#DC2626" if i == 0 else "#2563EB" if i == 6 else "inherit"}">{w}</th>' for i, w in enumerate(_wd)) + "</tr>"]
+            for wk in _cal.Calendar(firstweekday=6).monthdatescalendar(_mo.year, _mo.month):
+                _html.append("<tr>")
+                for d_ in wk:
+                    if d_.month != _mo.month:
+                        _html.append('<td class="out"></td>'); continue
+                    ents = _by_day.get(pd.Timestamp(d_), [])
+                    cls = "today" if d_ == today.date() else ""
+                    cells = f'<div class="dn" style="color:{"#DC2626" if d_.weekday() == 6 else "#2563EB" if d_.weekday() == 5 else "inherit"}">{d_.day}</div>'
+                    for e_ in ents:
+                        bg, bd = ("#FEE2E2", "#DC2626") if e_["欠品"] else _kcol.get(e_["種別"], ("#EDE9FE", "#7C3AED"))
+                        tip = _esc(f'{e_["種別"]}｜{e_["顧客"]}｜{e_["製品"]} {e_["数"]}' + (f'｜備考: {e_["備考"]}' if e_["備考"] else "") + ("｜⚠ 在庫不足" if e_["欠品"] else ""), quote=True)
+                        cells += f'<div class="e" style="background:{bg};border-left-color:{bd}" title="{tip}"><div class="c">{_esc(e_["顧客"])}</div><div>{_esc(e_["製品"])}<span class="q">{e_["数"]:,}{unit_short(e_["製品"])}</span></div></div>'
+                    _html.append(f'<td class="{cls}">{cells}</td>')
+                _html.append("</tr>")
+            _html.append("</table>")
+            st.markdown("".join(_html), unsafe_allow_html=True)
+            st.markdown('<div style="font-size:12px;margin-top:6px;">'
+                        '<span style="background:#EDE9FE;border-left:4px solid #7C3AED;padding:1px 8px;color:#1F2937;">特注</span> '
+                        '<span style="background:#E0F2FE;border-left:4px solid #0284C7;padding:1px 8px;color:#1F2937;">チャーター便</span> '
+                        '<span style="background:#F3E8FF;border-left:4px solid #A855F7;padding:1px 8px;color:#1F2937;">特注＋チャーター便</span> '
+                        '<span style="background:#FEE2E2;border-left:4px solid #DC2626;padding:1px 8px;color:#1F2937;">在庫不足</span>　枠線の日＝今日</div>', unsafe_allow_html=True)
+            if ms.empty:
+                st.caption("この月に該当する特注・チャーター便はありません。")
             else:
-                _yobi = ["月","火","水","木","金","土","日"]
-                wspo["日付"] = pd.to_datetime(wspo["納品予定日"],errors='coerce').dt.normalize()
-                wspo["曜日/日付"] = wspo["日付"].apply(lambda d: f"{_yobi[d.weekday()]} {d.month}/{d.day}")
-                wspo["在庫状況"] = wspo.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1)
-                wspo = wspo.sort_values("日付")
-                sc4 = [c for c in ["曜日/日付","種別","製品名","顧客名","ケース数","在庫状況","備考"] if c in wspo.columns]
-                st.dataframe(wspo[sc4].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]),
-                             hide_index=True, use_container_width=True,
-                             column_config={"曜日/日付": st.column_config.TextColumn(width="small"), "製品名": st.column_config.TextColumn(width="large")},
-                             height=min(600, 60+40*len(wspo)))
-                _fname4 = "_".join(_sel_cust4) if _sel_cust4 else "全顧客"
-                excel_or_csv_download(wspo[sc4], f"週間特注チャータースケジュール_{wk_start}_{_fname4}", sheet_name="週間スケジュール", key="ts4_csv_dl")
+                _csv = ms.sort_values("日付").assign(出荷予定日=lambda x: x["日付"].map(format_date_jp))
+                _sc4 = [c for c in ["出荷予定日", "種別", "顧客名", "製品名", "ケース数", "在庫状況", "備考"] if c in _csv.columns]
+                excel_or_csv_download(_csv[_sc4], f"月間特注チャータースケジュール_{_mo.year}{_mo.month:02d}", sheet_name="月間スケジュール", key="ts4_csv_dl")
     with ts3:
         if not spo.empty:
             ex = sp_s["受注ID"].tolist() if not sp_s.empty else []; nr = [{"ID":new_id(),"受注ID":r["ID"],"製品名":r["製品名"],"顧客名":r["顧客名"],"納品予定日":r["納品予定日"],"出荷予定日":r["納品予定日"]-timedelta(days=1) if pd.notnull(r["納品予定日"]) else None,"備考":r.get("備考",""),"更新日時": datetime.now(JST).replace(tzinfo=None)} for _,r in spo.iterrows() if r["ID"] not in ex]
