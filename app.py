@@ -1334,20 +1334,15 @@ if pg == "📋 受注登録":
         with _o_save_msg_area:
             show_flash_inline()
         with st.expander("📂 全データ一括編集"):
-            _sc1, _sc2 = st.columns([2, 1])
-            _skey = _sc1.selectbox("並び替え", ["登録日時", "出荷予定日", "顧客名", "製品名", "数量", "運送会社"], key="ord_all_sort_col")
-            _sdir = _sc2.radio("順序", ["降順", "昇順"], horizontal=True, key="ord_all_sort_dir")
-            st.caption("並び替えを変えると、未保存の編集は消えます（先に保存してください）。")
-            _smap = {"登録日時": "登録日時", "出荷予定日": "納品予定日", "顧客名": "顧客名", "製品名": "製品名", "数量": "ケース数", "運送会社": "運送会社"}
-            do_all = do.sort_values(_smap[_skey], ascending=(_sdir == "昇順"), kind="stable", na_position="last")
-            _sig_oa = _sig(do_all["ID"].tolist())
-            ea_o = st.data_editor(do_all[["ID","登録日時(表示)","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key=f"ord_all_edit_{_sig_oa}")
-            _pend_oa = do_all[~do_all["ID"].isin(ea_o["ID"].dropna().tolist())]
+            st.caption("列見出しをクリックすると、昇順・降順に並べ替えできます。行を削除するときは「🗑削除」にチェックして「💾 全データ保存」を押してください。")
+            _sig_oa = _sig(do["ID"].tolist())
+            ea_o = st.data_editor(do[["ID","登録日時(表示)","出荷予定日(表示)","顧客名","製品名","ケース数","運送会社","備考","不良廃棄フラグ"]].assign(削除=False), use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"出荷予定日(表示)":st.column_config.TextColumn("出荷予定日",width="medium"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d"),"削除":st.column_config.CheckboxColumn("🗑削除",help="チェックして保存すると、この受注を削除します")}, height=400, key=f"ord_all_edit_{_sig_oa}")
+            _pend_oa = do[do["ID"].isin(ea_o[ea_o["削除"] == True]["ID"].tolist())]
             if not _pend_oa.empty:
                 st.warning(f"🗑️ 「💾 全データ保存」を押すと、{len(_pend_oa)}件の受注が**削除**されます：" + " ／ ".join(f"{r['顧客名']} {r['製品名']} {to_int(r['ケース数'])}" for _, r in _pend_oa.head(8).iterrows()) + (" ほか" if len(_pend_oa) > 8 else ""))
             _o_all_msg_area = st.container()
             if st.button("💾 全データ保存"):
-                sva = ea_o.copy(); sva = sva[sva["ID"].notna() & (sva["ID"].astype(str).str.strip() != "")]
+                sva = ea_o[ea_o["削除"] != True].drop(columns=["削除"]); sva = sva[sva["ID"].notna() & (sva["ID"].astype(str).str.strip() != "")]
                 sva["納品予定日"] = pd.to_datetime(sva["出荷予定日(表示)"].str.replace("🟡 日付未定","").str.replace("🟡 ","").str.split(" ").str[0], errors="coerce")
                 sva = sva.drop(columns=[c for c in ["出荷予定日(表示)","登録日時(表示)"] if c in sva.columns])
                 _o_ref_all = odf[[c for c in ["ID","大カテゴリ","荷姿チェック","賞味期限1","賞味期限2","賞味期限3","賞味期限4","賞味期限5","発送備考","日付未定フラグ","登録日時","ロット"] if c in odf.columns]].drop_duplicates(subset="ID", keep="first")
@@ -1733,20 +1728,15 @@ elif pg == "🏭 製造登録":
         with _mfg_save_msg_area:
             show_flash_inline()
         with st.expander("📂 全データ一括編集・削除"):
-            _mc1, _mc2 = st.columns([2, 1])
-            _mkey = _mc1.selectbox("並び替え", ["登録日時", "製造予定日", "製品名", "数量"], key="mfg_all_sort_col")
-            _mdir = _mc2.radio("順序", ["降順", "昇順"], horizontal=True, key="mfg_all_sort_dir")
-            st.caption("並び替えを変えると、未保存の編集は消えます（先に保存してください）。")
-            _mmap = {"登録日時": "登録日時", "製造予定日": "製造予定日", "製品名": "製品名", "数量": "ケース数"}
-            dm_all = dm.sort_values(_mmap[_mkey], ascending=(_mdir == "昇順"), kind="stable", na_position="last")
-            _sig_ma = _sig(dm_all["ID"].tolist())
-            ea_m = st.data_editor(dm_all[["ID","登録日時(表示)","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]], num_rows="dynamic", use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d")}, height=400, key=f"mfg_all_edit_{_sig_ma}")
-            _pend_ma = dm_all[~dm_all["ID"].isin(ea_m["ID"].dropna().tolist())]
+            st.caption("列見出しをクリックすると、昇順・降順に並べ替えできます。行を削除するときは「🗑削除」にチェックして「💾 全データ保存」を押してください。")
+            _sig_ma = _sig(dm["ID"].tolist())
+            ea_m = st.data_editor(dm[["ID","登録日時(表示)","製造予定日(表示)","製品名","ケース数","リパックフラグ","備考"]].assign(削除=False), use_container_width=True, hide_index=True, column_config={"ID":None,"登録日時(表示)":st.column_config.TextColumn("📝 登録日時",disabled=True,help="日本時間（東京）・24時間表記"),"製造予定日(表示)":st.column_config.TextColumn("製造予定日",width="medium"),"ケース数":st.column_config.NumberColumn(min_value=1,step=1,format="%d"),"削除":st.column_config.CheckboxColumn("🗑削除",help="チェックして保存すると、この製造記録を削除します")}, height=400, key=f"mfg_all_edit_{_sig_ma}")
+            _pend_ma = dm[dm["ID"].isin(ea_m[ea_m["削除"] == True]["ID"].tolist())]
             if not _pend_ma.empty:
                 st.warning(f"🗑️ 「💾 全データ保存」を押すと、{len(_pend_ma)}件の製造記録が**削除**されます。")
             _mfg_all_msg_area = st.container()
             if st.button("💾 全データ保存", key="btn_ea_m"):
-                sma = ea_m.copy(); sma = sma[sma["ID"].notna() & (sma["ID"].astype(str).str.strip() != "")]
+                sma = ea_m[ea_m["削除"] != True].drop(columns=["削除"]); sma = sma[sma["ID"].notna() & (sma["ID"].astype(str).str.strip() != "")]
                 sma["製造予定日"] = pd.to_datetime(sma["製造予定日(表示)"].str.split(" ").str[0], errors="coerce")
                 sma = sma.drop(columns=[c for c in ["製造予定日(表示)","登録日時(表示)"] if c in sma.columns])
                 save_sync("manufactures", pd.merge(sma, mdf[["ID","大カテゴリ","登録日時"]], on="ID", how="left"))
@@ -2999,7 +2989,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
                 st.dataframe(fsp[sc2].style.map(lambda v: 'color:#DC2626;font-weight:bold;background-color:#FEE2E2;' if "❌" in str(v) else '', subset=["在庫状況"]), hide_index=True)
                 excel_or_csv_download(fsp[sc2], f"製品別特注チャータースケジュール_{jst_today()}", sheet_name="製品別スケジュール", key="ts2_csv_dl")
     with ts4:
-        st.markdown('<div class="info-tip">💡 1か月分の特注・チャーター便をカレンダーで表示します。各日に「顧客／製品／出荷数」が出ます（マウスを乗せると備考と在庫状況も見られます）。赤い予定は、出荷日時点で在庫が足りないものです。</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-tip">💡 1か月分の特注・チャーター便をカレンダーで表示します。各日に「顧客／製品／出荷数／備考」が出ます。同じ製品・同じ顧客でも、注文ごとに別々に表示します（マウスを乗せると在庫状況も見られます）。赤い予定は、出荷日時点で在庫が足りないものです。</div>', unsafe_allow_html=True)
         if spo.empty: st.info("なし")
         else:
             from html import escape as _esc
@@ -3030,15 +3020,15 @@ elif pg == "⭐ 特注・チャータースケジュール":
             ms["在庫状況"] = ms.apply(lambda r: _stock_status(r["製品名"], r.get("納品予定日")), axis=1) if not ms.empty else []
             ms["顧客名"] = ms["顧客名"].astype(str).str.strip()
             _by_day = {}
-            for (_dt, _cu, _pr), g_ in ms.groupby(["日付", "顧客名", "製品名"], sort=True):
-                _by_day.setdefault(_dt, []).append({"顧客": _cu, "製品": _pr, "数": int(g_["ケース数"].sum()), "種別": g_["種別"].iloc[0],
-                                                    "備考": " / ".join(sorted({str(x).strip() for x in g_["備考"] if str(x).strip()})), "欠品": g_["在庫状況"].astype(str).str.contains("❌").any()})
+            for _, r_ in ms.sort_values(["日付", "顧客名", "製品名"], kind="stable").iterrows():       # 注文ごとに1件（合算しない）
+                _by_day.setdefault(r_["日付"], []).append({"顧客": r_["顧客名"], "製品": r_["製品名"], "数": to_int(r_["ケース数"]), "種別": r_["種別"],
+                                                           "備考": str(r_.get("備考", "")).strip(), "欠品": "❌" in str(r_["在庫状況"])})
             _kcol = {"特注": ("#EDE9FE", "#7C3AED"), "チャーター便": ("#E0F2FE", "#0284C7"), "特注+チャーター便": ("#F3E8FF", "#A855F7")}
             _wd = ["日", "月", "火", "水", "木", "金", "土"]
             _css = ("<style>.tsc{width:100%;border-collapse:collapse;table-layout:fixed}.tsc th{padding:6px;font-size:13px;border:1px solid rgba(128,128,128,.35);text-align:center}"
                     ".tsc td{vertical-align:top;height:118px;padding:4px;border:1px solid rgba(128,128,128,.35);font-size:12px;line-height:1.35;overflow:hidden}"
                     ".tsc .dn{font-weight:700;font-size:13px;margin-bottom:3px}.tsc .out{opacity:.35}.tsc .today{outline:3px solid #F59E0B;outline-offset:-3px}"
-                    ".tsc .e{border-left:4px solid;border-radius:4px;padding:2px 5px;margin-bottom:3px;color:#1F2937;word-break:break-all}.tsc .e .c{font-weight:700}.tsc .e .q{font-weight:700;margin-left:4px}</style>")
+                    ".tsc .e{border-left:4px solid;border-radius:4px;padding:2px 5px;margin-bottom:3px;color:#1F2937;word-break:break-all}.tsc .e .c{font-weight:700}.tsc .e .q{font-weight:700;margin-left:4px}.tsc .e .n{font-size:11px;opacity:.75}</style>")
             _html = [_css, '<table class="tsc"><tr>' + "".join(f'<th style="color:{"#DC2626" if i == 0 else "#2563EB" if i == 6 else "inherit"}">{w}</th>' for i, w in enumerate(_wd)) + "</tr>"]
             for wk in _cal.Calendar(firstweekday=6).monthdatescalendar(_mo.year, _mo.month):
                 _html.append("<tr>")
@@ -3051,7 +3041,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
                     for e_ in ents:
                         bg, bd = ("#FEE2E2", "#DC2626") if e_["欠品"] else _kcol.get(e_["種別"], ("#EDE9FE", "#7C3AED"))
                         tip = _esc(f'{e_["種別"]}｜{e_["顧客"]}｜{e_["製品"]} {e_["数"]}' + (f'｜備考: {e_["備考"]}' if e_["備考"] else "") + ("｜⚠ 在庫不足" if e_["欠品"] else ""), quote=True)
-                        cells += f'<div class="e" style="background:{bg};border-left-color:{bd}" title="{tip}"><div class="c">{_esc(e_["顧客"])}</div><div>{_esc(e_["製品"])}<span class="q">{e_["数"]:,}{unit_short(e_["製品"])}</span></div></div>'
+                        cells += f'<div class="e" style="background:{bg};border-left-color:{bd}" title="{tip}"><div class="c">{_esc(e_["顧客"])}</div><div>{_esc(e_["製品"])}<span class="q">{e_["数"]:,}{unit_short(e_["製品"])}</span></div>{('<div class="n">' + _esc(e_["備考"]) + '</div>') if e_["備考"] else ""}</div>'
                     _html.append(f'<td class="{cls}">{cells}</td>')
                 _html.append("</tr>")
             _html.append("</table>")
