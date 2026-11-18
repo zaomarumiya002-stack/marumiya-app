@@ -821,6 +821,13 @@ def to_case_qty(pn, raw_qty):
     if kbn == "甲": return r * kou
     return r
 
+def tori_of(n):
+    """顧客名（帳合先＋支店名）から帳合先を取り出す。"""
+    n = str(n).strip()
+    for t in sorted([x for x in _tori_key(cdf).unique().tolist() if x], key=len, reverse=True) if not cdf.empty else []:
+        if n == t or n.startswith((t + " ", t + "　")): return t
+    return re.split(r"[ 　]", n, maxsplit=1)[0]
+
 def _tori_key(df):
     """選択肢に使う帳合先。帳合先が空欄の行は顧客名を帳合先として扱う（追加した顧客が選択肢に出ない問題の対策）。"""
     t = df["帳合先"].fillna("").astype(str).str.strip() if "帳合先" in df.columns else pd.Series("", index=df.index)
@@ -3007,6 +3014,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
             n2.button("今月", on_click=_ts4_now, key="ts4_today", use_container_width=True)
             n3.button("次月 ▶", on_click=_ts4_shift, args=(1,), key="ts4_next", use_container_width=True)
             n4.markdown(f"### {_mo.year}年{_mo.month}月")
+            _view = st.radio("表示切替", ["📅 カレンダー", "📊 日別一覧（1〜31日）"], horizontal=True, key="ts4_view")
             _cl4 = sorted(spo["顧客名"].astype(str).str.strip().replace("", np.nan).dropna().unique().tolist())
             f1, f2 = st.columns(2)
             _show4 = f1.multiselect("👤 表示する顧客（未選択＝全顧客）", options=_cl4, key="ts4_cust_show")
@@ -3025,26 +3033,60 @@ elif pg == "⭐ 特注・チャータースケジュール":
                                                            "備考": str(r_.get("備考", "")).strip(), "欠品": "❌" in str(r_["在庫状況"])})
             _kcol = {"特注": ("#EDE9FE", "#7C3AED"), "チャーター便": ("#E0F2FE", "#0284C7"), "特注+チャーター便": ("#F3E8FF", "#A855F7")}
             _wd = ["日", "月", "火", "水", "木", "金", "土"]
-            _css = ("<style>.tsc{width:100%;border-collapse:collapse;table-layout:fixed}.tsc th{padding:6px;font-size:13px;border:1px solid rgba(128,128,128,.35);text-align:center}"
-                    ".tsc td{vertical-align:top;height:118px;padding:4px;border:1px solid rgba(128,128,128,.35);font-size:12px;line-height:1.35;overflow:hidden}"
-                    ".tsc .dn{font-weight:700;font-size:13px;margin-bottom:3px}.tsc .out{opacity:.35}.tsc .today{outline:3px solid #F59E0B;outline-offset:-3px}"
-                    ".tsc .e{border-left:4px solid;border-radius:4px;padding:2px 5px;margin-bottom:3px;color:#1F2937;word-break:break-all}.tsc .e .c{font-weight:700}.tsc .e .q{font-weight:700;margin-left:4px}.tsc .e .n{font-size:11px;opacity:.75}</style>")
-            _html = [_css, '<table class="tsc"><tr>' + "".join(f'<th style="color:{"#DC2626" if i == 0 else "#2563EB" if i == 6 else "inherit"}">{w}</th>' for i, w in enumerate(_wd)) + "</tr>"]
-            for wk in _cal.Calendar(firstweekday=6).monthdatescalendar(_mo.year, _mo.month):
-                _html.append("<tr>")
-                for d_ in wk:
-                    if d_.month != _mo.month:
-                        _html.append('<td class="out"></td>'); continue
-                    ents = _by_day.get(pd.Timestamp(d_), [])
-                    cls = "today" if d_ == today.date() else ""
-                    cells = f'<div class="dn" style="color:{"#DC2626" if d_.weekday() == 6 else "#2563EB" if d_.weekday() == 5 else "inherit"}">{d_.day}</div>'
-                    for e_ in ents:
-                        bg, bd = ("#FEE2E2", "#DC2626") if e_["欠品"] else _kcol.get(e_["種別"], ("#EDE9FE", "#7C3AED"))
-                        tip = _esc(f'{e_["種別"]}｜{e_["顧客"]}｜{e_["製品"]} {e_["数"]}' + (f'｜備考: {e_["備考"]}' if e_["備考"] else "") + ("｜⚠ 在庫不足" if e_["欠品"] else ""), quote=True)
-                        cells += f'<div class="e" style="background:{bg};border-left-color:{bd}" title="{tip}"><div class="c">{_esc(e_["顧客"])}</div><div>{_esc(e_["製品"])}<span class="q">{e_["数"]:,}{unit_short(e_["製品"])}</span></div>{('<div class="n">' + _esc(e_["備考"]) + '</div>') if e_["備考"] else ""}</div>'
-                    _html.append(f'<td class="{cls}">{cells}</td>')
-                _html.append("</tr>")
-            _html.append("</table>")
+            if _view.startswith("📊"):
+                _nd = _cal.monthrange(_mo.year, _mo.month)[1]
+                _rowsm = {}
+                for _d_, _lst in _by_day.items():
+                    for e_ in _lst: _rowsm.setdefault((e_["顧客"], e_["製品"]), {}).setdefault(_d_.day, []).append(e_)
+                _mcss = ("<style>.tsm-w{overflow-x:auto}.tsm{border-collapse:collapse;font-size:12px}.tsm th,.tsm td{border:1px solid rgba(128,128,128,.35);padding:3px 5px;text-align:center;white-space:nowrap}"
+                         ".tsm th{font-weight:700}.tsm .l1,.tsm .l2{position:sticky;background:Canvas;color:CanvasText;text-align:left;z-index:2;overflow:hidden;text-overflow:ellipsis}"
+                         ".tsm .l1{left:0;min-width:150px;max-width:150px}.tsm .l2{left:150px;min-width:170px;max-width:170px}"
+                         ".tsm .we{background:rgba(128,128,128,.12)}.tsm .td{outline:2px solid #F59E0B;outline-offset:-2px}.tsm .v{font-weight:700;color:#1F2937;border-radius:3px;padding:1px 5px;display:inline-block;margin:1px 0}.tsm .tot{font-weight:700}</style>")
+                _mh = ['<div class="tsm-w"><table class="tsm"><tr><th class="l1">顧客</th><th class="l2">製品</th><th>計</th>']
+                for dd in range(1, _nd + 1):
+                    dt_ = date(_mo.year, _mo.month, dd); wi = (dt_.weekday() + 1) % 7
+                    cl = ("we " if wi in (0, 6) else "") + ("td" if dt_ == today.date() else "")
+                    col = "#DC2626" if wi == 0 else "#2563EB" if wi == 6 else "inherit"
+                    _mh.append(f'<th class="{cl.strip()}" style="color:{col}">{dd}<br><span style="font-weight:400">{_wd[wi]}</span></th>')
+                _mh.append("</tr>")
+                _cnt = {dd: sum(len(days_.get(dd, [])) for days_ in _rowsm.values()) for dd in range(1, _nd + 1)}
+                _mh.append('<tr><td class="l1"><b>出荷件数</b></td><td class="l2"></td><td class="tot">' + str(sum(_cnt.values())) + "</td>" + "".join(
+                    f'<td class="{"we" if ((date(_mo.year, _mo.month, dd).weekday() + 1) % 7) in (0, 6) else ""}"><b>{_cnt[dd] if _cnt[dd] else ""}</b></td>' for dd in range(1, _nd + 1)) + "</tr>")
+                for (cu_, pr_), days_ in sorted(_rowsm.items()):
+                    tot_ = sum(e_["数"] for v in days_.values() for e_ in v)
+                    _mh.append(f'<tr><td class="l1" title="{_esc(cu_, quote=True)}">{_esc(cu_)}</td><td class="l2" title="{_esc(pr_, quote=True)}">{_esc(pr_)}</td><td class="tot">{tot_:,}{unit_short(pr_)}</td>')
+                    for dd in range(1, _nd + 1):
+                        wi = (date(_mo.year, _mo.month, dd).weekday() + 1) % 7
+                        parts = []
+                        for e_ in days_.get(dd, []):
+                            bg, bd = ("#FEE2E2", "#DC2626") if e_["欠品"] else _kcol.get(e_["種別"], ("#EDE9FE", "#7C3AED"))
+                            tip = _esc(f'{e_["種別"]}｜{e_["顧客"]}｜{e_["製品"]} {e_["数"]}' + (f'｜備考: {e_["備考"]}' if e_["備考"] else "") + ("｜⚠ 在庫不足" if e_["欠品"] else ""), quote=True)
+                            parts.append(f'<span class="v" style="background:{bg}" title="{tip}">{e_["数"]:,}</span>')
+                        _mh.append(f'<td class="{"we" if wi in (0, 6) else ""}">{"+".join(parts)}</td>')
+                    _mh.append("</tr>")
+                _mh.append("</table></div>")
+                _html = [_mcss] + _mh
+            else:
+                _css = ("<style>.tsc{width:100%;border-collapse:collapse;table-layout:fixed}.tsc th{padding:6px;font-size:13px;border:1px solid rgba(128,128,128,.35);text-align:center}"
+                        ".tsc td{vertical-align:top;height:118px;padding:4px;border:1px solid rgba(128,128,128,.35);font-size:12px;line-height:1.35;overflow:hidden}"
+                        ".tsc .dn{font-weight:700;font-size:13px;margin-bottom:3px}.tsc .out{opacity:.35}.tsc .today{outline:3px solid #F59E0B;outline-offset:-3px}"
+                        ".tsc .e{border-left:4px solid;border-radius:4px;padding:2px 5px;margin-bottom:3px;color:#1F2937;word-break:break-all}.tsc .e .c{font-weight:700}.tsc .e .q{font-weight:700;margin-left:4px}.tsc .e .n{font-size:11px;opacity:.75}</style>")
+                _html = [_css, '<table class="tsc"><tr>' + "".join(f'<th style="color:{"#DC2626" if i == 0 else "#2563EB" if i == 6 else "inherit"}">{w}</th>' for i, w in enumerate(_wd)) + "</tr>"]
+                for wk in _cal.Calendar(firstweekday=6).monthdatescalendar(_mo.year, _mo.month):
+                    _html.append("<tr>")
+                    for d_ in wk:
+                        if d_.month != _mo.month:
+                            _html.append('<td class="out"></td>'); continue
+                        ents = _by_day.get(pd.Timestamp(d_), [])
+                        cls = "today" if d_ == today.date() else ""
+                        cells = f'<div class="dn" style="color:{"#DC2626" if d_.weekday() == 6 else "#2563EB" if d_.weekday() == 5 else "inherit"}">{d_.day}</div>'
+                        for e_ in ents:
+                            bg, bd = ("#FEE2E2", "#DC2626") if e_["欠品"] else _kcol.get(e_["種別"], ("#EDE9FE", "#7C3AED"))
+                            tip = _esc(f'{e_["種別"]}｜{e_["顧客"]}｜{e_["製品"]} {e_["数"]}' + (f'｜備考: {e_["備考"]}' if e_["備考"] else "") + ("｜⚠ 在庫不足" if e_["欠品"] else ""), quote=True)
+                            cells += f'<div class="e" style="background:{bg};border-left-color:{bd}" title="{tip}"><div class="c">{_esc(e_["顧客"])}</div><div>{_esc(e_["製品"])}<span class="q">{e_["数"]:,}{unit_short(e_["製品"])}</span></div>{('<div class="n">' + _esc(e_["備考"]) + '</div>') if e_["備考"] else ""}</div>'
+                        _html.append(f'<td class="{cls}">{cells}</td>')
+                    _html.append("</tr>")
+                _html.append("</table>")
             st.markdown("".join(_html), unsafe_allow_html=True)
             st.markdown('<div style="font-size:12px;margin-top:6px;">'
                         '<span style="background:#EDE9FE;border-left:4px solid #7C3AED;padding:1px 8px;color:#1F2937;">特注</span> '
@@ -3080,7 +3122,7 @@ elif pg == "⭐ 特注・チャータースケジュール":
 # ─────────────────────────────────────────────
 elif pg == "📈 経営・分析ダッシュボード":
     page_header("📈 経営・製造管理 ダッシュボード")
-    td1,td2,td3,td4,td5,td6 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🏭 製造効率分析","📅 月次トレンド","🗑️ 廃盤検討","👥 顧客分析"])
+    td1,td2,td3,td5,td6 = st.tabs(["🏠 経営サマリ","📦 製品・ABC分析","🔎 製品×顧客 検索・分析","🗑️ 廃盤検討","👥 顧客分析"])
     with td1:
         if not odf.empty:
             tm = jst_today().replace(day=1); om = odf[(safe_dt_date(odf["納品予定日"])>=tm)&(odf["不良廃棄フラグ"]==False)]
@@ -3180,16 +3222,67 @@ elif pg == "📈 経営・分析ダッシュボード":
                     st.dataframe(_piv_disp, use_container_width=True)
                     excel_or_csv_download(_piv_disp.reset_index(), f"製品別月次出荷_{_abc_period}_{jst_today()}", sheet_name="月次出荷", key="v3_abc_monthly_dl")
     with td3:
-        if not mdf.empty:
-            mt = mdf[safe_dt_date(mdf["製造予定日"])>=jst_today().replace(day=1)]; tc = mt["ケース数"].apply(to_int).sum(); rc = mt[mt["リパックフラグ"]==True]["ケース数"].apply(to_int).sum()
-            c1,c2 = st.columns(2); c1.metric("今月 製造",f"{tc:,} cs"); c2.metric("今月 リパック",f"{rc:,} cs",delta=f"{int(rc/max(tc,1)*100)}%")
-            st.plotly_chart(px.histogram(mdf,x="製造予定日",y="ケース数",color="大カテゴリ",barmode="stack",title="推移"), use_container_width=True)
-        if p_sum: st.dataframe(pd.DataFrame([{"資材":k,"庫":v.get("現在庫",0),"点":v.get("発注点",0),"出":v.get("出庫",0)} for k,v in p_sum.items()]).style.apply(lambda r: ['background-color:#FFEDD5;color:#C2410C;']*len(r) if to_int(r.get("庫",0))<to_int(r.get("点",0)) else ['']*len(r), axis=1), hide_index=True)
-    with td4:
-        if not odf.empty:
-            tdf = odf[odf["不良廃棄フラグ"]==False].copy(); tdf["年月"] = pd.to_datetime(tdf["納品予定日"],errors='coerce').dt.to_period("M").astype(str)
-            mn = tdf.groupby(["年月","大カテゴリ"])["ケース数"].apply(lambda x: x.apply(to_int).sum()).reset_index()
-            if not mn.empty: st.plotly_chart(px.bar(mn,x="年月",y="ケース数",color="大カテゴリ",barmode="stack",title="月次カテ別"), use_container_width=True)
+        try:
+            _s3 = exclude_adjust(odf) if not odf.empty else odf
+            if _s3.empty:
+                st.info("受注（出荷）データがありません。")
+            else:
+                _u3 = _s3[(_s3["不良廃棄フラグ"] == False) & (_s3["日付未定フラグ"] == False)].copy()
+                _u3["日付"] = pd.to_datetime(_u3["納品予定日"], errors="coerce").dt.normalize()
+                _u3 = _u3[_u3["日付"].notna()].copy()
+                _u3["数量"] = _u3["ケース数"].apply(to_int)
+                _u3["顧客名"] = _u3["顧客名"].astype(str).str.strip()
+                _tm3 = {n_: tori_of(n_) for n_ in _u3["顧客名"].unique()}
+                _u3["帳合先"] = _u3["顧客名"].map(_tm3)
+                _t0 = jst_today()
+                g1, g2, g3 = st.columns([2, 3, 3])
+                _rg = g1.date_input("期間", value=(_t0 - timedelta(days=90), _t0), key="ux_range")
+                _fp = g2.multiselect("製品", sorted(_u3["製品名"].astype(str).unique().tolist()), key="ux_prod")
+                _fc = g3.multiselect("顧客（帳合先）", sorted(_u3["帳合先"].unique().tolist()), key="ux_cust")
+                _q = st.text_input("🔎 検索（製品名・顧客名・備考の一部）", key="ux_q")
+                if not (isinstance(_rg, (tuple, list)) and len(_rg) == 2):
+                    st.info("期間の開始日と終了日の両方を選んでください。")
+                else:
+                    _f = _u3[(_u3["日付"] >= pd.Timestamp(_rg[0])) & (_u3["日付"] <= pd.Timestamp(_rg[1]))]
+                    if _fp: _f = _f[_f["製品名"].isin(_fp)]
+                    if _fc: _f = _f[_f["帳合先"].isin(_fc)]
+                    if _q.strip():
+                        _nz3 = lambda x: unicodedata.normalize("NFKC", str(x)).replace(" ", "").replace("　", "").lower()
+                        _hay = (_f["製品名"].astype(str) + " " + _f["顧客名"] + " " + _f["備考"].fillna("").astype(str)).map(_nz3)
+                        _f = _f[_hay.str.contains(re.escape(_nz3(_q)), na=False)]
+                    _vw = st.radio("表示", ["📋 明細（注文ごと）", "📊 製品×顧客 集計", "🗓 月別マトリクス"], horizontal=True, key="ux_view")
+                    st.caption(f"{len(_f):,}件／製品 {_f['製品名'].nunique()}品目／顧客 {_f['帳合先'].nunique()}社　（数量は各製品の登録単位）")
+                    if _f.empty:
+                        st.info("条件に合うデータがありません。")
+                    elif _vw.startswith("📋"):
+                        _d3 = _f.sort_values(["日付", "顧客名", "製品名"], ascending=[False, True, True], kind="stable")
+                        _tb = pd.DataFrame({"出荷日": _d3["日付"].map(format_date_jp), "顧客名": _d3["顧客名"], "製品名": _d3["製品名"].astype(str), "数量": _d3["数量"].astype(int),
+                                            "単位": _d3["製品名"].map(unit_long), "運送会社": _d3["運送会社"].fillna("").astype(str), "備考": _d3["備考"].fillna("").astype(str),
+                                            "ロット": (_d3["ロット"] if "ロット" in _d3.columns else pd.Series("", index=_d3.index)).fillna("").astype(str),
+                                            "登録日時": pd.to_datetime(_d3["登録日時"], errors="coerce").dt.strftime("%Y/%m/%d %H:%M").fillna("")})
+                        st.dataframe(_tb, hide_index=True, use_container_width=True, height=min(640, 48 + 36 * min(len(_tb), 16)))
+                        excel_or_csv_download(_tb, "製品顧客_明細", sheet_name="明細", key="ux_dl_detail")
+                    elif _vw.startswith("📊"):
+                        _g = _f.groupby(["製品名", "帳合先"]).agg(出荷回数=("日付", "nunique"), 合計数量=("数量", "sum"), 初回=("日付", "min"), 最終=("日付", "max")).reset_index()
+                        _g["1回平均"] = (_g["合計数量"] / _g["出荷回数"]).round(1)
+                        _g["期間(日)"] = (_g["最終"] - _g["初回"]).dt.days + 1
+                        _g["単位"] = _g["製品名"].map(unit_long)
+                        _g["初回出荷"] = _g["初回"].map(format_date_jp); _g["最終出荷"] = _g["最終"].map(format_date_jp)
+                        _g = _g.sort_values(["製品名", "合計数量"], ascending=[True, False])
+                        _tb = _g[["製品名", "帳合先", "合計数量", "単位", "出荷回数", "1回平均", "初回出荷", "最終出荷", "期間(日)"]]
+                        st.dataframe(_tb, hide_index=True, use_container_width=True, height=min(640, 48 + 36 * min(len(_tb), 16)))
+                        excel_or_csv_download(_tb, "製品顧客_集計", sheet_name="集計", key="ux_dl_sum")
+                    else:
+                        _rb = st.radio("行", ["製品", "顧客（帳合先）", "製品×顧客"], horizontal=True, key="ux_rowby")
+                        _ix = {"製品": ["製品名"], "顧客（帳合先）": ["帳合先"], "製品×顧客": ["製品名", "帳合先"]}[_rb]
+                        _pv = _f.assign(月=_f["日付"].dt.to_period("M").astype(str)).pivot_table(index=_ix, columns="月", values="数量", aggfunc="sum", fill_value=0)
+                        _pv["合計"] = _pv.sum(axis=1)
+                        _pv = _pv.reset_index().sort_values("合計", ascending=False); _pv.columns.name = None
+                        _mc = [c for c in _pv.columns if c not in _ix + ["合計"]]
+                        st.dataframe(_pv.style.map(lambda v: "color:#B0B0B0" if v == 0 else "", subset=_mc), hide_index=True, use_container_width=True, height=min(640, 48 + 36 * min(len(_pv), 16)))
+                        excel_or_csv_download(_pv, "製品顧客_月別", sheet_name="月別", key="ux_dl_mx")
+        except Exception as _e:
+            st.error(f"製品×顧客の集計でエラーが発生しました: {_e}")
 
     with td5:
         st.markdown('<div class="info-tip">💡 <b>廃盤・リニューアル検討の目安（食品メーカー向けの一般的な考え方）</b><br>①<b>ABCランク</b>：出荷ケース数の累計比率で下位（Cランク）の商品は、売上への影響が小さい候補です。<br>②<b>出荷頻度</b>：年間のうち出荷があった月数が少ない商品は、需要が細く・不定期で、製造の切替ロスや欠品リスクに対して割に合わない可能性があります。<br>③<b>トレンド</b>：Cランクでなくても、期間の後半に大きく落ち込んでいる商品はリニューアル・テコ入れ or 廃盤の検討材料になります。<br>④<b>新製品の除外</b>：発売直後の商品は実績が少なくて当然のため、一定期間は候補から外します。<br>⑤<b>季節商品への配慮</b>：お歳暮・夏季需要など季節性がある商品は、年間の出荷月数が少なくても廃盤対象ではありません。上の「📦 製品・ABC分析」タブのヒートマップで必ず確認してください。<br>※このシステムには原価・利益率のデータが無いため、この判定は<b>出荷量ベースの目安</b>です。実際の廃盤判断では、利益率・専用資材の有無・得意先との契約・欠品時のクレームリスクなども必ず合わせてご確認ください。</div>', unsafe_allow_html=True)
