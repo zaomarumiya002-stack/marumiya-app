@@ -186,14 +186,39 @@ p, span, label, div { color: #0F172A !important; }
 # ─────────────────────────────────────────────
 # ログイン処理
 # ─────────────────────────────────────────────
+import secrets as _sec
+AUTH_KEEP_MIN = 30     # 最後に操作してから、この分数以内ならログインし直さなくてよい
+
+@st.cache_resource
+def _auth_tokens():
+    return {}          # {ログイン札: 最後に操作した時刻}（サーバー側のみ。再起動すると消える）
+
+def _auth_ok(tok):
+    d = _auth_tokens(); t = d.get(tok)
+    if t is None: return False
+    if _time.time() - t > AUTH_KEEP_MIN * 60:
+        d.pop(tok, None); return False
+    d[tok] = _time.time(); return True
+
 if "password_correct" not in st.session_state: st.session_state.password_correct = False
+_qt = st.query_params.get("t")
+if not st.session_state.password_correct and _qt and _auth_ok(_qt):      # 通信が切れて画面が作り直されても、30分以内なら自動でログイン状態に戻す
+    st.session_state.password_correct = True; st.session_state["_auth_tok"] = _qt
+if st.session_state.password_correct and st.session_state.get("_auth_tok"):
+    _auth_tokens()[st.session_state["_auth_tok"]] = _time.time()         # 操作のたびに「最後に操作した時刻」を更新
 if not st.session_state.password_correct:
     st.markdown("<div style='text-align:center;margin-top:60px;'><span style='font-size:72px;'>🏭</span><h2 style='color:#1E3A8A;'>丸実屋　受発注管理</h2></div>", unsafe_allow_html=True)
     _, c, _ = st.columns([1, 2, 1])
     with c:
         pwd = st.text_input("パスワードを入力", type="password")
         if st.button("ログイン", use_container_width=True, type="primary"):
-            if pwd == st.secrets["app_password"]: st.session_state.password_correct = True; st.rerun()
+            if pwd == st.secrets["app_password"]:
+                _d = _auth_tokens(); _now = _time.time()
+                for _k in [k for k, v in _d.items() if _now - v > AUTH_KEEP_MIN * 60]: _d.pop(_k, None)      # 期限切れの札を掃除
+                _tk = _sec.token_urlsafe(24); _d[_tk] = _now
+                st.session_state.password_correct = True; st.session_state["_auth_tok"] = _tk
+                st.query_params["t"] = _tk
+                st.rerun()
             else: st.error("❌ パスワードが違います")
     st.stop()
 
@@ -1218,6 +1243,12 @@ with st.sidebar:
 
     st.markdown("<div style='height:1px; background:rgba(255,255,255,0.1); margin:14px 0 10px;'></div>", unsafe_allow_html=True)
     st.caption(f"🕒 最終読込: {st.session_state.get('_loaded_at','-')}")
+    if st.button("🔓 ログアウト", use_container_width=True, key="btn_logout", help="共有のパソコンなどでは、使い終わったら押してください"):
+        _auth_tokens().pop(st.session_state.get("_auth_tok"), None)
+        st.session_state.password_correct = False; st.session_state["_auth_tok"] = None
+        try: del st.query_params["t"]
+        except Exception: pass
+        st.rerun()
     if st.button("🔄 スプレッドシートを再読込", use_container_width=True, help="Googleスプレッドシートを直接編集した場合など、最新データを読み込み直します"):
         if reload_all(force=True): flash("success", "✅ スプレッドシートから最新データを再読込しました。")
         else: flash("error", "⚠️ 再読込に失敗しました（通信が混み合っている可能性）。直前の内容を表示しています。少し待ってからもう一度お試しください。")
